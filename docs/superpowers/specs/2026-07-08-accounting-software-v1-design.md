@@ -1,7 +1,7 @@
 # Accounting Software — v1 Design
 
 **Working name:** TBD (folder is currently `not sure`; must be renamed before scaffolding — paths with spaces break some frontend tooling)
-**Date:** 2026-07-08 (rev 2 — 27 confirmed findings from adversarial review folded in)
+**Date:** 2026-07-08 (rev 3 — rev 2 folded in 27 adversarial-review findings; rev 3 adds the §17 production-safety addendum)
 **Status:** Pending written-spec review by Jawad
 **First real user:** SparkingAsia (services company — agency work, no physical inventory)
 **Long-term goal:** If the product proves itself internally, sell it as a multi-tenant SaaS (QuickBooks-class, built up in phases)
@@ -14,7 +14,7 @@ Build a web-based accounting application that does what QuickBooks does — even
 
 **Success criteria for v1:**
 
-1. SparkingAsia runs its real books on it for a full month. **Precondition (checked before Phase 3):** all billing in the trial month can be done in the base currency (PKR). If SparkingAsia must issue USD invoices in that month, a minimal FX slice is pulled forward (see §16.5) — this assumption is recorded here so it is a checked precondition, not a surprise at Gate B.
+1. SparkingAsia runs its real books on it for a full month. **Precondition (checked before Phase 3):** all billing in the trial month can be done in the base currency (PKR). If SparkingAsia must issue USD invoices in that month, the FX-lite slice is pulled forward (binding decision rule: §17.1) — this assumption is recorded here so it is a checked precondition, not a surprise at Gate B.
 2. A hired accountant reviews the Trial Balance, General Ledger, and reports from that month and signs off that the books are correct (Gate B, §13).
 3. Every test in the required test suite (§12) passes.
 4. The books cannot be corrupted through the UI — by construction, not by discipline.
@@ -33,7 +33,7 @@ Build a web-based accounting application that does what QuickBooks does — even
 | Tenancy | Single database, `company_id` on every tenant table, global scopes | Proven pattern in Tracksuite; simplest correct multi-tenancy |
 | Money storage | Integers in minor units (paisa/cents) | Floats are how books stop balancing. Non-negotiable |
 | Ledger visibility | Users never see debits/credits | QuickBooks' key product decision; ledger writes itself under invoice/expense screens. Accountant role and reports expose it for those who want it |
-| Multi-currency | Schema and column semantics multi-currency-native from day one; single-currency behavior in v1 | SparkingAsia will need USD invoicing. The **schema** change later is additive; the **service/report/integrity logic** changes are enumerated now (§3) so they're planned, not discovered |
+| Multi-currency | Schema and column semantics multi-currency-native from day one; single-currency behavior in v1 **unless the §17.1 Path 2 FX-lite slice is pulled in** | SparkingAsia will need USD invoicing. The **schema** change later is additive; the **service/report/integrity logic** changes are enumerated now (§3) so they're planned, not discovered |
 | Corrections | Immutable posted entries + reversals | Real accounting practice; structurally prevents silent-corruption bugs |
 
 ---
@@ -62,11 +62,11 @@ A fresh Laravel 12 application:
 
 Pinned column semantics (from day one, even while everything is single-currency):
 
-- Source documents (invoices, bills, expenses, payments) carry `currency_code`, `fx_rate` (rate to base at transaction time, DECIMAL(16,8)), **document-currency** amounts (`subtotal`, `tax_total`, `total`, `amount_paid`, `balance`) **and** base-currency mirrors (`base_subtotal`, `base_total`, …). In v1, `fx_rate = 1.0` and the pairs are equal — but every consumer is written against the pinned semantics from the start.
+- Source documents (invoices, bills, expenses, payments) carry `currency_code`, `fx_rate` (rate to base at transaction time, DECIMAL(16,8)), **document-currency** amounts (`subtotal`, `tax_total`, `total`, `amount_paid`, `balance`) **and** base-currency mirrors (`base_subtotal`, `base_total`, …). Under §17.1 Path 1, `fx_rate = 1.0` in v1 and the pairs are equal; under Path 2, invoices/payments carry real rates per §17.1. Every consumer is written against the pinned semantics from the start — no code may assume fx = 1.
 - `bank_accounts` carry `currency_code` (constrained to base currency in v1).
 - Journal lines store **base-currency amounts only**.
 
-Honestly stated: enabling multi-currency later is an **additive schema migration plus enumerated logic changes** — payment application in document currency with base posting, a settlement rounding rule that relieves AR to exactly zero in base, an FX Gain/Loss account, and splitting integrity check (c) into a document-currency check and a base-currency tie-out that tolerates FX postings (§9). These are planned changes, not a restructuring — but they are logic, not just columns.
+Honestly stated: enabling multi-currency later is an **additive schema migration plus enumerated logic changes** — payment application in document currency with base posting, a settlement rounding rule that relieves AR to exactly zero in base, an FX Gain/Loss account, and splitting integrity check (c) into a document-currency check and a base-currency tie-out that tolerates FX postings (§9). These are planned changes, not a restructuring — but they are logic, not just columns. (Under §17.1 Path 2, a defined subset — invoice/payment FX posting, the settlement rounding rule, the FX accounts, and the integrity-check split — is pulled into v1.)
 
 ---
 
@@ -94,7 +94,8 @@ Three tables everything else sits on:
 | id, company_id | |
 | entry_date | The accounting date (not the created-at timestamp) |
 | memo | Human description |
-| source_type, source_id | Polymorphic link to the document that created it (invoice, payment, expense, bill, bill_payment, transfer, other_receipt, opening_balance, manual, reversal) |
+| source_type, source_id | Polymorphic link to the source that created it (invoice, invoice_payment, expense, bill, bill_payment, transfer, other_receipt, opening_balance_run, manual_journal). **Reversal entries keep the original source's type/id** — they are distinguished by `entry_role`, never by a `reversal` source_type |
+| entry_role | `primary` \| `reversal`. Unique index on (company_id, source_type, source_id, entry_role) — the §17.2 duplicate-post backstop |
 | status | `posted` only in v1 (drafts live on documents, not in the ledger) |
 | reverses_entry_id | Set on reversal entries; links to the entry being reversed |
 | created_by, posted_at | |
@@ -151,7 +152,7 @@ Services-business template; the accountant reviews this list at Gate A. Users ca
 
 \* 1000/1010 are created through the Bank & Cash Accounts module (§7.3); every bank/cash account the user creates gets its own ledger account with subtype `bank`/`cash`. The seeded pair is the starting point.
 
-Launch track adds: FX Gain/Loss (4950/5950), Customer Credits, Undeposited Funds. (If the §1 precondition fails and USD invoices are unavoidable in the Gate B month, FX Gain/Loss is seeded early — §16.5.)
+Launch track adds: FX Gain/Loss (4950/5950 — seeded early under §17.1 Path 2), Undeposited Funds. Customer credits, when built, are held inside AR with contact_id (§17.4) — no separate Customer Credits account is seeded.
 
 ---
 
@@ -180,11 +181,11 @@ The complete list of v1 business events and the journal lines they generate. **T
 | P14 | Owner contribution / other receipt — 300,000 into bank | 1010 Bank 300,000 | 3000 Owner's Equity 300,000 (or other selected non-control account) |
 | P15 | Fixed-asset purchase — laptop 250,000 | 1500 Office Equipment 250,000 | 1010 Bank 250,000 (or 2000 AP via bill) |
 
-P12/P13/P15 are recorded through the Expense/Bill screens (the category picker allows asset, liability, and equity accounts — §7.8); P14 through the "Other receipt" screen (§7.3). They are listed separately so the accountant validates each posting shape at Gate A.
+P12/P13/P15 are recorded through the Expense/Bill screens (the category picker allows asset, liability, and equity accounts — §7.8); P14 through the "Other receipt" screen (§7.3). They are listed separately so the accountant validates each posting shape at Gate A. **If §17.1 Path 2 is taken, the FX rules P1fx/P2fx (fully specified in §17.1) join this catalog and receive a Gate A addendum review before Phase 3.**
 
 Notes for Gate A review:
 
-- **Opening balances (P8a–c):** the guided setup captures opening receivables/payables **per open document** — contact, amount, original date, due date. P8b/P8c create real (system-flagged `is_opening`) invoice/bill documents with **no income or expense effect** — their offset is Opening Balance Equity. Payments against them then flow through P2/P3/P7 unchanged, and aging buckets use their real due dates. Opening bank balances (P8a) post per bank/cash account.
+- **Opening balances (P8a–c):** the guided setup captures opening receivables/payables **per open document** — contact, amount, original date, due date. P8b/P8c create real (system-flagged `is_opening`) invoice/bill documents with **no income or expense effect** — their offset is Opening Balance Equity. Payments against them then flow through P2/P3/P7 unchanged, and aging buckets use their real due dates. Opening bank balances (P8a) post per bank/cash account, with the setup run itself (`opening_balance_runs` row) as the entry's source — each re-run is a new row, so the §17.2 uniqueness backstop holds (§7.1).
 - **Input tax (P5/P6t):** v1 nets input tax against 2100 Tax Payable (debit side), so 2100's balance = net tax owed. If the accountant prefers a separate Input Tax (asset) account, that's a one-row change to the seed + posting rules — decide at Gate A. (A second reason to consider it: it makes the Tax summary's collected-vs-input split trivial — §7.11.6.)
 - **AR/AP subledger:** every line on an AR/AP control account (P1–P3, P6–P8, and their reversals) carries `contact_id` — enforced by `LedgerService` — so aging and contact balances derive from ledger lines and tie to the control accounts by construction.
 - **Overpayments are rejected in v1** — a payment cannot exceed the document's outstanding balance (customer credits are launch track). Enforced on a row-locked read (§9).
@@ -198,7 +199,7 @@ Notes for Gate A review:
 ### 7.1 Onboarding & company setup
 Signup → create company (name, base currency, fiscal year start month, **books start date**) → seed chart of accounts → guided setup: add bank/cash accounts with opening balances (P8a), open customer invoices and vendor bills one-by-one with contact, amount, original date and due date (P8b/P8c) → system posts the opening entries, dated per captured dates (bank balances as of the day before books start date).
 
-- **Re-running setup** (allowed until the first real transaction): reverses every prior opening entry (`reverses_entry_id` set) and posts fresh ones — never a second copy on top. **"First real transaction"** = first posted entry whose source_type is not `opening_balance` (or a reversal of one).
+- **Re-running setup** (allowed until the first real transaction): each run is a new `opening_balance_runs` row. A re-run **voids the prior run** — reversal entries for its P8a entries, void-by-reversal for its opening documents — then creates **new** opening documents and posts fresh entries against the new run. Fresh entries always have fresh sources, so the §17.2 unique index is never violated, and nothing is ever edited in place or duplicated on top. **"First real transaction"** = first posted entry (regardless of entry_role) whose source is neither an `opening_balance_run` nor an `is_opening` document.
 - **Opening Balance Equity lifecycle:** after setup is confirmed correct (at latest, Gate B), the app offers a one-click assisted journal entry transferring the OBE balance to 3000 Owner's Equity, with the expectation that OBE reads zero on the go-forward Balance Sheet. This guidance appears on the OBE account page.
 
 ### 7.2 Chart of Accounts (user-facing)
@@ -224,7 +225,8 @@ Simple table: name + percentage ("GST 18%"). Applied per line on invoices, expen
 - Drafts freely editable, no ledger effect, no invoice number. **Send** assigns the number, freezes the document, posts P1. Sent invoices are never edited — void and reissue.
 - Line items: description, qty × unit rate, optional tax rate, per-line income account (defaults from item or 4000). No invoice-level discount in v1 (launch track — allocation rounding is a known trap).
 - Record payment (full/partial) → pick deposit account + date → posts P2/P3.
-- PDF (clean default template, company logo/colors) + send-by-email with the PDF attached.
+- PDF (clean default template, company logo/colors) + send-by-email with the PDF attached (email decoupled from posting, with per-attempt status — §17.6).
+- Under §17.1 Path 2 only: an invoice may carry a foreign currency, with the FX rate captured at send (P1fx) and payments recorded per P2fx.
 
 ### 7.8 Expenses & Bills (money out)
 - **Expense** = already paid. Lifecycle: **Draft → Recorded** (recording posts P4/P5); **Void** via reversal. Multi-line like bills: each line has a category account, amount, optional tax rate. Paid-from account + date on the document.
@@ -238,7 +240,7 @@ Pick bank account → enter statement end date + statement ending balance → sc
 - No bank feeds/CSV import in v1 (launch track).
 
 ### 7.10 Manual Journal Entries
-For roles with `ledger.post_manual`: date, memo, arbitrary lines (account, debit/credit). Live balance indicator; unbalanced entries cannot be submitted (client-side UX + server-side `LedgerService` enforcement). Reversal button on any manual entry.
+For roles with `ledger.post_manual`: date, memo, arbitrary lines (account, debit/credit). Each manual JE is stored as a `manual_journals` document (the header + lines as entered), which is the ledger entry's source — so the §17.2 duplicate-post backstop covers manual JEs at the database layer too. Live balance indicator; unbalanced entries cannot be submitted (client-side UX + server-side `LedgerService` enforcement). Reversal button on any manual entry.
 - **Manual JEs may not touch AR/AP control accounts (1100/2000)** — corrections to receivables/payables go through void/reissue of the underlying documents, keeping document state and subledger in lockstep. Enforced in `LedgerService`, explained in the UI.
 - Manual JEs *may* post to 3200 Retained Earnings (prior-period adjustments); the Balance Sheet rule in §7.11.2 accounts for this.
 
@@ -293,7 +295,7 @@ Roles are fixed bundles in v1 (custom roles are launch track). Role is per compa
 
 ## 8. Data Model Summary
 
-Tenant tables (all with `company_id`): `accounts`, `journal_entries`, `journal_lines`, `contacts`, `items`, `tax_rates`, `bank_accounts` (with `currency_code`), `invoices`, `invoice_lines`, `invoice_payments`, `bills`, `bill_lines`, `bill_payments`, `expenses`, `expense_lines`, `transfers`, `other_receipts`, `reconciliations`, `reconciliation_lines`, `attachments`, `activity_log`, `document_counters`.
+Tenant tables (all with `company_id`): `accounts`, `journal_entries`, `journal_lines`, `contacts`, `items`, `tax_rates`, `bank_accounts` (with `currency_code`), `invoices` (with `email_status` — §17.6), `invoice_lines`, `invoice_payments`, `bills`, `bill_lines`, `bill_payments`, `expenses`, `expense_lines`, `transfers`, `other_receipts`, `manual_journals` (§7.10), `opening_balance_runs` (§7.1), `reconciliations`, `reconciliation_lines`, `attachments`, `activity_log`, `document_counters`, `idempotency_keys` (§17.2), `email_attempts` (per-send log — §17.6).
 Global tables: `users` (with `current_company_id`), `companies`, `company_user` (role per membership).
 
 - Invoices and bills carry `is_opening` (system-generated opening documents, §6 P8b/c; excluded from income/expense reporting by construction since they never post to income/expense accounts).
@@ -307,7 +309,7 @@ Global tables: `users` (with `current_company_id`), `companies`, `company_user` 
 - **Transactions:** document write + ledger post = one DB transaction, always. Partial states cannot exist.
 - **Row locking, not just transactions:** every payment-recording, send, void, and reconciliation-completing operation begins by acquiring the parent document row with `lockForUpdate()` (voids also lock the related payment rows), then re-reads `amount_paid`/`status`/`balance` from the locked row before validating and posting. All status-transition checks in the service layer happen on lock-acquired rows. (A plain re-read inside a transaction does **not** prevent races under InnoDB's default REPEATABLE READ — two concurrent payments would both see the same stale balance and overpay.)
 - **Validation layers:** client-side UX validation → form request validation → domain service invariants (balance, period lock, overpayment, status transitions, control-account rules). The service layer is authoritative; the UI is convenience.
-- **Integrity checker:** artisan command, scheduled daily and runnable on demand. Iterates companies explicitly (context set per company; never vacuous — §3). Per company, all checks run **inside a single REPEATABLE READ transaction** (one consistent snapshot), and any finding is re-verified once on a fresh snapshot before alerting (no false alarms from a payment committing mid-scan). Checks: (a) every journal entry balances; (b) trial balance sums to zero; (c) every invoice/bill document-currency balance equals its payment-application-derived balance, and (in v1, where fx=1) its ledger-derived balance; (d) AR/AP control accounts equal their by-contact subledger sums; (e) every posted document has exactly the expected ledger entries; (f) every control-account line carries contact_id. Any failure → logged, surfaced on an admin health screen, and emailed to the owner. Expected result forever: zero findings.
+- **Integrity checker:** artisan command, scheduled daily and runnable on demand. Iterates companies explicitly (context set per company; never vacuous — §3). Per company, all checks run **inside a single REPEATABLE READ transaction** (one consistent snapshot), and any finding is re-verified once on a fresh snapshot before alerting (no false alarms from a payment committing mid-scan). Checks: (a) every journal entry balances; (b) trial balance sums to zero; (c) every invoice/bill document-currency balance equals its payment-application-derived balance, and — under §17.1 Path 1, where fx=1 — its ledger-derived balance (under Path 2, the base-currency tie-out runs as a separate check that tolerates FX gain/loss lines, per §17.1); (d) AR/AP control accounts equal their by-contact subledger sums; (e) every posted document has exactly the expected ledger entries; (f) every control-account line carries contact_id. Any failure → logged, surfaced on an admin health screen, and emailed to the owner. Expected result forever: zero findings.
 - **Status transitions** are a defined state machine per document (§7.7 invoices; §7.8 expenses/bills); illegal transitions are rejected in the service layer regardless of what the UI sends.
 - **User-facing errors** are specific and honest ("This invoice is in a locked period; the reversal will be dated today — proceed?"), never silent fallbacks. No catch-and-continue around money paths.
 
@@ -337,7 +339,7 @@ Global tables: `users` (with `current_company_id`), `companies`, `company_user` 
 
 1. **Every posted entry balances** — asserted in every posting-rule unit test *and* as a global invariant re-checked after every feature test run (test hook queries the whole test-DB ledger).
 2. **No direct editing of posted ledger entries** — model guards throw on update/delete; no HTTP route can modify them (route audit test).
-3. **Reversal/adjustment flow works** — void invoice (P9), void after partial payment (payments reversed first), manual JE reversal, setup re-run (prior opening entries reversed, never duplicated); reversals link to their originals and the net effect is zero.
+3. **Reversal/adjustment flow works** — void invoice (P9), void after partial payment (payments reversed first), manual JE reversal, setup re-run (prior run voided, new run + new opening documents created — never re-posted on the same source; §7.1); reversals link to their originals and the net effect is zero.
 4. **Tenant isolation** — for every resource endpoint: user of company B gets **404** on company A's data (no existence leak), and writes cannot attach to another company (automated across routes, not hand-picked).
 5. **Invoices create correct receivables** — P1 lines exact, incl. multi-line, taxed/untaxed mix, item-based and free-typed lines; every AR line carries contact_id.
 6. **Payments clear receivables** — full (P2), partial (P3), multiple partials sum correctly, overpayment rejected, **payments against opening invoices (P8b) work identically**, concurrent double-payment cannot overpay. The concurrency test runs against a **real MySQL database with two parallel processes/connections** — not inside a wrapping test transaction, where the race cannot occur and the test would pass vacuously.
@@ -346,7 +348,7 @@ Global tables: `users` (with `current_company_id`), `companies`, `company_user` 
 9. **Reports tie back to the ledger** — Balance Sheet balances (incl. after manual postings to 3200 and across a fiscal-year boundary); P&L net = income − expense lines; aging totals == AR/AP control balances (incl. opening documents; buckets by due date); Trial Balance debits == credits; report amounts derived from `journal_lines` (aging bucket dates via source documents, per §7.11).
 10. **Rounding/money storage is safe** — integer minor units end-to-end; property-style tests with large and awkward values; no float appears in any money computation path (static grep check in CI for `float` casts on money columns).
 
-Plus: period-lock enforcement tests, permission-matrix tests (asserting the §7.14 table, role × permission), audit-log coverage tests (every mutating action writes a log row), reconciliation tests (complete at difference 0 only; reopen newest-first unlocks correctly), and integrity-checker tests (seeded corruption is detected; checker fails loudly on zero companies/entries).
+Plus: period-lock enforcement tests, permission-matrix tests (asserting the §7.14 table, role × permission), audit-log coverage tests (every mutating action writes a log row; exports too, §17.8), reconciliation tests (complete at difference 0 only; reopen newest-first unlocks correctly), integrity-checker tests (seeded corruption is detected; checker fails loudly on zero companies/entries), **idempotency tests** (replayed request with same key returns original response and posts once; DB unique index rejects a duplicate primary entry per source — §17.2), **DB-constraint tests** (each §17.3 constraint rejects violations at the SQL level, bypassing services), **email-failure tests** (mail transport down → ledger stays posted, email_status `failed`, resend works — §17.6), and opening-CSV validation tests (bad row rejects whole file with line errors — §17.7). If FX-lite is pulled in (§17.1 Path 2): P1fx/P2fx posting tests incl. gain, loss, partial-payment plug, final-payment-relieves-base-AR-to-exactly-zero, conversion-rounding awkward-value cases, tax-component-never-revalued, and integrity-checker-under-FX cases (split check (c) reports zero findings on FX invoices).
 
 **Browser verification:** per Jawad's standing rule, every feature is driven in the real browser (Laravel dev server + preview tools) before being called ready — forms submitted, PDFs opened, reports eyeballed. Tests + curl alone don't count.
 
@@ -358,17 +360,17 @@ Plus: period-lock enforcement tests, permission-matrix tests (asserting the §7.
 
 | Phase | Ships | Exit criteria |
 |---|---|---|
-| **Gate A** | Accountant reviews §5 (chart of accounts) + §6 (posting rules, incl. P8/P11–P15 and the input-tax question) + reconciliation & period-lock design | Written sign-off or corrections folded back into this spec. Can run in parallel with Phase 0–1 build, **must pass before Phase 3 begins** |
-| 0 | Project scaffold, auth, company setup + seeding, company switcher/context, roles/permissions (§7.14 table), audit-log plumbing, CI with test suite | Tests green; two companies fully isolated; permission matrix tests assert §7.14 |
+| **Gate A** | Accountant reviews §5 (chart of accounts) + §6 (posting rules, incl. P8/P11–P15 and the input-tax question) + reconciliation & period-lock design. **If §17.1 Path 2 is chosen at Phase 2 exit, a Gate A addendum review of P1fx/P2fx (incl. the official-tax-rate question) happens before Phase 3** | Written sign-off or corrections folded back into this spec. Can run in parallel with Phase 0–1 build, **must pass (incl. any FX addendum) before Phase 3 begins** |
+| 0 | Project scaffold, auth, company setup + seeding, company switcher/context, roles/permissions (§7.14 table), audit-log plumbing, idempotency plumbing + DB constraints (§17.2–3), error monitoring wired (§17.9), CI with test suite | Tests green; two companies fully isolated; permission matrix tests assert §7.14; constraint + idempotency tests green |
 | 1 | **Ledger core:** accounts + CoA screen, `LedgerService` (all iron rules incl. control-account guards), manual JEs, period locks, Trial Balance report, integrity checker | All §12 ledger tests green; TB balances in browser; checker fails loudly on seeded corruption |
-| 2 | Contacts, items, tax rates, bank/cash accounts, transfers + other receipts, opening-balance setup flow (P8a–c, re-run semantics) | Opening balances post correctly incl. per-contact opening documents; setup re-run reverses cleanly; balances visible on CoA |
-| 3 | **Invoicing:** lifecycle, numbering, payments (row-locked), void/reversal, PDF, email | P1–P3, P9 tests green incl. real-MySQL concurrency test; payment against an opening invoice verified; full invoice life driven in browser |
-| 4 | Expenses & bills (multi-line, input tax, asset/liability/equity categories) + payments, attachments | P4–P7, P6t, P12/P13/P15 green |
+| 2 | Contacts, items, tax rates, bank/cash accounts, transfers + other receipts, opening-balance setup flow (P8a–c, re-run semantics) incl. CSV templates (§17.7) | Opening balances post correctly incl. per-contact opening documents; setup re-run reverses cleanly; balances visible on CoA; CSV round-trip verified. **§17.1 currency decision recorded here — gates Phase 3** |
+| 3 | **Invoicing:** lifecycle, numbering, payments (row-locked), void/reversal, PDF, email with decoupled status + resend (§17.6); FX-lite if §17.1 Path 2 | P1–P3, P9 tests green incl. real-MySQL concurrency test; payment against an opening invoice verified; email-failure test green; FX-lite tests green if Path 2; full invoice life driven in browser |
+| 4 | Expenses & bills (multi-line, input tax, asset/liability/equity categories) + payments, attachments hardened per §17.8 (size/MIME limits, private disk) | P4–P7, P6t, P12/P13/P15 green; upload-hardening rules verified |
 | 5 | Reports (P&L, BS, agings, GL, tax summary) + dashboard | Report tie-out tests green (§12.9), incl. aging with opening documents and BS across fiscal-year boundary |
-| 6 | Bank reconciliation (incl. reopen), audit-log viewer, CSV/accountant-package export, backups + rehearsed restore, polish | All §14 **pre-trial** items checked |
+| 6 | Bank reconciliation (incl. reopen), month-end close checklist (§17.5), audit-log viewer, CSV/accountant-package export with export logging (§17.8), backups + rehearsed restore, heartbeat monitoring (§17.9), polish | All §14 **pre-trial** items checked |
 | **Real-month trial** | SparkingAsia runs a real month (precondition from §1 confirmed: PKR-only billing, or FX slice pulled forward) | A full month of real books entered |
 | **Gate B** | Accountant reviews TB, GL, P&L, BS, agings from the real month | Accountant sign-off → production use (§14 sign-off items checked) |
-| Launch track | Multi-currency UI + FX gain/loss (per §3's enumerated logic changes), customer statements & credits, recurring invoices, bank CSV import, invoice-level discounts, contact/invoice CSV import, custom roles, tenant self-serve signup & billing | Turns internal tool into sellable product |
+| Launch track | Full multi-currency (per §3's enumerated logic changes; beyond any §17.1 FX-lite slice), credit notes / refunds / write-offs (§17.4), customer statements, recurring invoices, bank CSV import, invoice-level discounts, contact/invoice CSV import, custom roles, 2FA enforcement (§17.8), tenant self-serve signup & billing | Turns internal tool into sellable product |
 | Later phases | Localization packs (Pakistan FBR, …), inventory, online payments, payroll (last — hardest) | Driven by real customer demand |
 
 Ledger core, chart of accounts, journal entries, opening balances, and reports are all built and tested **before** any launch-track feature — per Jawad's explicit requirement.
@@ -379,13 +381,16 @@ Ledger core, chart of accounts, journal entries, opening balances, and reports a
 
 **Before the real-month trial (Phase 6 exit):**
 
-- [ ] All §12 test categories green in CI
+- [ ] All §12 test categories green in CI (incl. idempotency, DB-constraint, and email-failure tests)
 - [ ] Gate A accountant sign-off recorded
-- [ ] §1 currency precondition confirmed for the trial month
+- [ ] §17.1 currency decision recorded (Path 1 confirmed, or Path 2 built and tested)
+- [ ] Monitoring wired: error tracking, backup/integrity/queue heartbeats — test alert received on each channel (§17.9)
+- [ ] Month-end close checklist walked through once on test data (§17.5)
 - [ ] Integrity checker scheduled and alerting (and failing loudly on empty input)
 - [ ] Daily backups running; restore rehearsed successfully once
 - [ ] Period locking verified in browser
-- [ ] Audit log capturing all mutating actions
+- [ ] Audit log capturing all mutating actions (and exports — §17.8)
+- [ ] Attachment upload hardening verified: size limit, MIME allowlist, private-disk serving via authenticated routes (§17.8)
 - [ ] Permission matrix verified per role in browser (against the §7.14 table)
 - [ ] Accountant-package export opens correctly in Excel
 
@@ -416,4 +421,99 @@ Ledger core, chart of accounts, journal entries, opening balances, and reports a
 2. **Hosting** — Hostinger like SA Track, or a VPS for cron/queue/backup control? Decide by Phase 6.
 3. **Accountant sourcing** — who performs Gates A and B (former company accountant? hired freelancer?). Needed by end of Phase 2.
 4. **Fiscal year** — company setting exists (§7.1); confirm SparkingAsia's fiscal year start for Retained Earnings behavior.
-5. **SparkingAsia's invoicing currency mix** — confirm before Phase 3 whether the Gate B trial month can be billed entirely in PKR. If not: seed FX Gain/Loss early and define the minimal supported USD workflow (rate captured at send and at payment; difference posts to FX Gain/Loss) as a v1.5 slice before the trial.
+5. **SparkingAsia's invoicing currency mix** — resolved into a binding decision rule: see Addendum §17.1.
+
+---
+
+## 17. Addendum — Production-Safety Details (rev 3)
+
+Added at Jawad's direction before implementation. Nothing here expands v1's feature scope (no payroll, inventory, bank feeds, or online payments); everything hardens what v1 already promises.
+
+### 17.1 Multi-currency: the binding decision rule (before Phase 3)
+
+At **Phase 2 exit**, Jawad confirms SparkingAsia's billing plan for the trial month. Exactly one of two paths is taken — no third option, no deferral:
+
+- **Path 1 — PKR-only trial:** every invoice in the Gate B month is PKR. Recorded as a checked item in §14; USD stays launch track.
+- **Path 2 — FX-lite pulled into v1** (built before Phase 3's invoicing, since it shapes payment posting). A Path 2 decision **triggers a Gate A addendum review** of the rules below before Phase 3 begins.
+  - **P1fx — foreign-currency invoice sent.** `currency_code` + `fx_rate` captured at **send** (manually entered, editable suggested value). The full posting, all at the send rate — e.g. USD 1,000 + 18% tax @ 280: **Dr 1100 AR 330,400; Cr 4000 Income 280,000; Cr 2100 Tax Payable 50,400.**
+    - *Conversion rounding rule (mirrors §7.6):* each component (per line, and the tax per line) converts to base and rounds half-up; `base_total` = the **sum** of converted components, never an independent round(total × rate). The AR debit equals that sum by construction, so the entry always balances.
+    - *Tax is a base-currency liability from that moment:* 2100 is owed to a domestic authority in PKR; it is **never re-measured** at payment date, and P12 tax remittance is unchanged with no FX plug. **Gate A question:** does the tax authority mandate an official rate for converting tax on foreign-currency invoices (FBR practice)? If so, that rate is captured/displayed for the tax component.
+  - **P2fx — payment received on a foreign-currency invoice.** The user enters the **actual base (PKR) amount the bank credited** (the implied rate is displayed, not typed) — a rate-derived deposit would differ from the bank statement by spread/fees and permanently block §7.9 reconciliation, which requires difference exactly 0. Posting: **Dr Bank = actual PKR received; Cr AR = relief at the invoice rate; difference → 4950 FX Gain / 5950 FX Loss.** Example: USD 1,000 invoice @ 280, bank credits 284,200 → Dr Bank 284,200; Cr AR 280,000; Cr 4950 FX Gain 4,200. A transfer fee deducted before credit is split to 5700 Bank Fees, not buried in the FX plug.
+    - *Settlement rounding rule:* partial payments relieve AR at round(invoice_rate × amount paid); **the payment that brings the document-currency balance to zero relieves the entire remaining base AR balance for that invoice** (not rate × amount), with the FX plug absorbing the difference — no phantom paisa of AR ever survives a fully paid invoice.
+  - **Integrity checker under Path 2:** check (c) splits per §3 — a document-currency check (balance = total − payments applied) plus a base-currency AR tie-out that tolerates FX gain/loss lines. Built as part of the slice, not deferred.
+  - Reporting stays base-currency; invoice documents and PDFs show both currencies.
+  - **Still excluded even on Path 2:** foreign-currency bank accounts, unrealized period-end revaluation of open balances, and any currency beyond one foreign currency. These are the first launch-track FX extensions.
+
+### 17.2 Idempotency & duplicate-post prevention
+
+Three independent layers, so no single failure double-posts:
+
+1. **Client:** posting buttons disable on submit; every posting form generates a UUID idempotency key when it opens and sends it with the request.
+2. **Server:** an `idempotency_keys` table (company_id, user_id, key, action, response snapshot; unique on company_id + key). A replayed request (double-click, browser retry, network retry) returns the original response instead of re-executing. Applies to every posting action: send invoice, record payment, record expense, receive bill, transfer, other receipt, void, manual JE, opening setup.
+3. **Database backstop:** `journal_entries` carries `entry_role` (`primary` | `reversal`) with a **unique index on (company_id, source_type, source_id, entry_role)** — one source can never create two primary entries or two reversals, no matter what bug sits above it. The convention that makes this hold everywhere (§4): **reversal entries keep the original source's type/id** (distinguished only by entry_role + reverses_entry_id); manual JEs have real `manual_journals` source rows (§7.10); each setup run is a fresh `opening_balance_runs` source and re-runs create new opening documents rather than re-posting old sources (§7.1). No source_id is ever NULL, so the index has no NULL escape hatch. Queued jobs are idempotent by design: they carry the document id + expected state and exit cleanly if the work is already done.
+
+### 17.3 Database-level constraints (migrations, not just service rules)
+
+Every service-layer invariant that *can* be expressed in the schema *is* (MySQL 8 enforces CHECK constraints):
+
+- **Unique:** invoice/bill numbers per company (null allowed for drafts), account codes per company, document counters per (company, type), the §17.2 journal-entry index.
+- **CHECK:** journal_lines — exactly one of debit/credit > 0, the other = 0; both ≥ 0. Non-negative money columns on all documents (totals, amount_paid).
+- **NOT NULL `company_id`** on every tenant table.
+- **Foreign keys with `ON DELETE RESTRICT`** everywhere the ledger points: accounts, contacts, and journal entries referenced by journal_lines cannot be hard-deleted (archive instead); no cascading delete exists anywhere near the ledger, so orphan ledger lines are structurally impossible.
+- §12 gains constraint tests: attempts to violate each constraint at the SQL level (bypassing services) are rejected by the database.
+
+### 17.4 Credit notes, refunds, and write-offs — explicitly launch track, workflow named now
+
+**Not in v1.** But since manual JEs are banned from AR/AP control accounts (§7.10), the future path is defined now so nobody improvises one later. All four are **documents** (never manual JEs), keeping document state and subledger in lockstep:
+
+- **Customer credit note** — Dr Income (+ tax reversal) / Cr AR, with contact; applied against open invoices or refunded. **Model decision (made now):** unapplied credits live **inside AR** as contact-scoped credit rows (aging shows them as negatives) — there is no separate Customer Credits liability account (§5 seed note aligned).
+- **Customer refund** — Dr AR (clearing the credit) / Cr Bank.
+- **Vendor credit & refund** — mirror images on AP.
+- **Bad-debt write-off** — Dr Bad Debt Expense / Cr AR (account seeded when built). **Whether the tax portion is also reversed is a jurisdiction decision taken with the accountant at build time** — bad-debt output-tax relief is conditional in most regimes; the default is *no* tax reversal unless the local regime permits it.
+
+V1's correction path remains void-and-reissue. If the trial month produces a real case that void-and-reissue cannot express, that is the trigger to pull credit notes forward — decided then, not improvised.
+
+### 17.5 Month-end close workflow (v1, Phase 6)
+
+A guided checklist screen — process UI over existing machinery, no new accounting logic:
+
+1. Reconcile all bank/cash accounts through month end (§7.9)
+2. Review A/R and A/P aging (§7.11.3)
+3. Review Trial Balance (§7.11.4)
+4. **Sweep unposted drafts dated on or before month end** — the screen lists them automatically; each is sent/recorded or consciously re-dated. Zero pending drafts is part of the done-state. (Otherwise the lock in step 6 strands them: a June-dated draft could only post re-dated into July — a cutoff error.)
+5. Run the integrity checker on demand (§9) — must report zero findings
+6. Lock the period through month end (§4 rule 4)
+7. Export the accountant package for the **now-frozen** period (§11) — exporting after the lock guarantees the package matches the books the lock froze; nothing can post into the period between export and close.
+
+Each step links to its screen and shows done/not-done; completing the close is audit-logged. Steps can be revisited (the lock is the only irreversible-ish act, and even it is movable by Owner/Accountant with an audit trail).
+
+### 17.6 Email/PDF failure behavior
+
+Posting and emailing are **decoupled**. "Send" posts to the ledger and assigns the number synchronously and transactionally; the email is a queued job dispatched after commit. Therefore:
+
+- An email failure **never** affects ledger or document state — the invoice stays Sent/posted.
+- Invoices carry a separate **email_status**: `not_sent` → `queued` → `sent` / `failed`, with a per-attempt send log (timestamp, recipient, outcome). Failed sends surface on the invoice page and dashboard; a **Resend** button re-queues (every attempt logged, idempotency per §17.2 prevents double-dispatch of the same attempt).
+- PDFs are rendered on demand, not stored; a rendering failure surfaces as a user-visible error and a `failed` email attempt — the invoice itself remains valid. §12 gains a test: kill the mail transport, send an invoice, assert ledger posted + email_status `failed` + resend works.
+
+### 17.7 Opening data CSV templates (v1, Phase 2)
+
+Not a general import system — downloadable, documented CSV templates accepted **only by the opening-setup wizard**, feeding the existing P8a–c flow:
+
+- Customers, vendors (contact fields)
+- Open customer invoices / vendor bills (contact, reference, original date, due date, amount)
+- Bank/cash accounts with starting balances
+
+Per-row validation with a preview screen; each file imports all-or-nothing (a bad row rejects the file with line-numbered errors, nothing partial). This exists to make the SparkingAsia trial-month setup a one-hour job instead of an afternoon of typing.
+
+### 17.8 Security & file-upload hardening
+
+- **2FA (TOTP):** required before public SaaS launch (launch track); pulled into v1 only if Phase 6 has slack. When built: optional per user, enforceable per company for Owner/Accountant roles.
+- **Attachments:** size limit (10 MB), extension + server-side MIME sniff allowlist (pdf, jpg, png, webp) — never extension-trust alone; randomized storage names on a private disk outside the public root; served only through the authenticated, policy-checked routes of §10. Virus scanning (ClamAV) if the eventual host supports it; MIME + size validation is the enforced minimum everywhere.
+- **Export access logging:** every export — list CSVs, report CSVs, the accountant package — writes an audit-log row (who, what, period, when). Exports are the data-exfiltration surface; they get the same trail as mutations.
+
+### 17.9 Monitoring & alerting (before the trial month)
+
+- **Error monitoring:** Sentry (or Flare) wired from Phase 0 — uncaught exceptions alert to email/Slack.
+- **Dead-man's-switch heartbeats** (e.g. healthchecks.io) on the three scheduled lifelines: daily backup, integrity checker, queue worker liveness. Alert fires on **silence**, not just on reported failure — a dead cron that never runs must still page.
+- **Backup failure and integrity-checker findings** alert to email + optional Slack webhook the moment they occur.
+- §14 pre-trial checklist gains: monitoring wired and a test alert received on each channel.
