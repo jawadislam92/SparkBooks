@@ -1,6 +1,6 @@
-# Accounting Software — v1 Design
+# SparkBooks — v1 Design
 
-**Working name:** TBD (folder is currently `not sure`; must be renamed before scaffolding — paths with spaces break some frontend tooling)
+**Name:** SparkBooks (decided 2026-07-08; repo at `C:\laragon\www\SparkBooks`)
 **Date:** 2026-07-08 (rev 3 — rev 2 folded in 27 adversarial-review findings; rev 3 adds the §17 production-safety addendum)
 **Status:** Pending written-spec review by Jawad
 **First real user:** SparkingAsia (services company — agency work, no physical inventory)
@@ -417,7 +417,7 @@ Ledger core, chart of accounts, journal entries, opening balances, and reports a
 
 ## 16. Open Questions (not blockers for starting the build)
 
-1. **Product name** — needed before scaffolding (folder rename; no spaces). Working candidates welcome.
+1. ~~Product name~~ — **resolved: SparkBooks** (2026-07-08); folder renamed to `C:\laragon\www\SparkBooks`.
 2. **Hosting** — Hostinger like SA Track, or a VPS for cron/queue/backup control? Decide by Phase 6.
 3. **Accountant sourcing** — who performs Gates A and B (former company accountant? hired freelancer?). Needed by end of Phase 2.
 4. **Fiscal year** — company setting exists (§7.1); confirm SparkingAsia's fiscal year start for Retained Earnings behavior.
