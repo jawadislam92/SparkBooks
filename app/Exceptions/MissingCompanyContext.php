@@ -1,4 +1,4 @@
-<?php // app/Exceptions/MissingCompanyContext.php
+<?php
 namespace App\Exceptions;
 
 class MissingCompanyContext extends \RuntimeException

@@ -1,4 +1,4 @@
-<?php // app/Http/Controllers/CompanySwitchController.php
+<?php
 namespace App\Http\Controllers;
 
 use App\Models\Company;
@@ -10,7 +10,7 @@ class CompanySwitchController extends Controller
     {
         $validated = $request->validate(['company_id' => ['required', 'integer']]);
         $company = Company::query()->findOrFail($validated['company_id']);
-        abort_unless($request->user()->belongsToCompany($company), 403);
+        abort_unless($request->user()->belongsToCompany($company), 404);
         $request->user()->forceFill(['current_company_id' => $company->id])->save();
         return back();
     }

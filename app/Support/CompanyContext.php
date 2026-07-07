@@ -1,4 +1,4 @@
-<?php // app/Support/CompanyContext.php
+<?php
 namespace App\Support;
 
 use App\Exceptions\MissingCompanyContext;
