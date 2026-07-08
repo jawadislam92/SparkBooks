@@ -69,7 +69,7 @@ export default function CreateCompany({ currencies }: { currencies: string[] }) 
                         id="base_currency"
                         name="base_currency"
                         value={data.base_currency}
-                        className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-spark focus:ring-spark"
+                        className="mt-1 block w-full rounded-md border-rule shadow-sm focus:border-spark focus:ring-spark"
                         onChange={(e) => setData('base_currency', e.target.value)}
                         required
                     >
@@ -96,7 +96,7 @@ export default function CreateCompany({ currencies }: { currencies: string[] }) 
                         id="fiscal_year_start_month"
                         name="fiscal_year_start_month"
                         value={data.fiscal_year_start_month}
-                        className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-spark focus:ring-spark"
+                        className="mt-1 block w-full rounded-md border-rule shadow-sm focus:border-spark focus:ring-spark"
                         onChange={(e) =>
                             setData(
                                 'fiscal_year_start_month',
