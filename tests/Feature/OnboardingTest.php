@@ -3,9 +3,11 @@ namespace Tests\Feature;
 
 use App\Enums\Role;
 use App\Models\ActivityLog;
+use App\Models\Company;
 use App\Models\User;
 use App\Support\CompanyContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Inertia\Testing\AssertableInertia;
 use Tests\TestCase;
 
 class OnboardingTest extends TestCase
@@ -63,5 +65,51 @@ class OnboardingTest extends TestCase
         ]);
 
         $this->actingAs($user)->get(route('onboarding.company'))->assertRedirect(route('dashboard'));
+    }
+
+    public function test_store_is_guarded_when_user_already_has_a_company(): void
+    {
+        $user = User::factory()->create();
+        $this->actingAs($user)->post(route('onboarding.company'), [
+            'name' => 'SparkingAsia', 'base_currency' => 'PKR', 'fiscal_year_start_month' => 7,
+        ]);
+        $user->refresh();
+        $original = $user->current_company_id;
+
+        $this->actingAs($user)->post(route('onboarding.company'), [
+            'name' => 'Second Company', 'base_currency' => 'USD', 'fiscal_year_start_month' => 1,
+        ])->assertRedirect(route('dashboard'));
+
+        $this->assertSame(1, Company::query()->count());
+        $this->assertSame($original, $user->fresh()->current_company_id);
+    }
+
+    public function test_onboarding_form_renders_for_user_without_company(): void
+    {
+        $user = User::factory()->create();
+
+        $this->actingAs($user)->get(route('onboarding.company'))
+            ->assertOk()
+            ->assertInertia(fn (AssertableInertia $page) => $page->component('Onboarding/CreateCompany'));
+    }
+
+    public function test_spoofed_company_id_in_request_input_is_ignored(): void
+    {
+        $user = User::factory()->create();
+
+        $this->actingAs($user)->post(route('onboarding.company'), [
+            'name' => 'SparkingAsia',
+            'base_currency' => 'PKR',
+            'fiscal_year_start_month' => 7,
+            'company_id' => 999999,
+        ])->assertRedirect(route('dashboard'));
+
+        $user->refresh();
+        $company = $user->currentCompany;
+        $this->assertNotNull($company);
+        $this->assertNotSame(999999, $company->id);
+        $this->assertSame('SparkingAsia', $company->name);
+        $this->assertSame(1, Company::query()->count());
+        $this->assertSame($company->id, $user->current_company_id);
     }
 }

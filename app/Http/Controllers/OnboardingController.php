@@ -20,6 +20,10 @@ class OnboardingController extends Controller
 
     public function store(StoreCompanyRequest $request, CompanySetupService $setup)
     {
+        if ($request->user()->companies()->exists()) {
+            return redirect()->route('dashboard');
+        }
+
         $setup->create($request->user(), $request->validated());
         return redirect()->route('dashboard');
     }
