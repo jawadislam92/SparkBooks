@@ -8,7 +8,7 @@ use App\Http\Requests\StoreManualJournalRequest;
 use App\Models\Account;
 use App\Models\ManualJournal;
 use App\Services\ManualJournalService;
-use Illuminate\Database\QueryException;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
@@ -84,10 +84,39 @@ class ManualJournalController extends Controller
             $service->reverse($journal, $validated['date'], $validated['memo']);
         } catch (LedgerException $e) {
             throw ValidationException::withMessages(['memo' => $e->getMessage()]);
-        } catch (QueryException $e) {
+        } catch (UniqueConstraintViolationException $e) {
+            // ONLY a collision on the (company_id, source_type, source_id,
+            // entry_role) index means "already reversed" — a second reversal
+            // tries to insert a duplicate reversal JournalEntry for the same
+            // source. Any OTHER unique-constraint failure (or, since we no
+            // longer catch the broad QueryException, any deadlock / lock-wait
+            // timeout / connection drop) must propagate untouched so the
+            // global handler + Sentry see the real production failure in this
+            // money path — spec §9 forbids swallowing it. Mirrors the narrow
+            // classification in IdempotencyService::isIdempotencyKeyCollision.
+            if (! $this->isDuplicateReversal($e)) {
+                throw $e;
+            }
+
             throw ValidationException::withMessages(['memo' => 'This entry has already been reversed.']);
         }
 
         return redirect()->route('journal-entries.index');
+    }
+
+    /**
+     * Whether the violated unique index is the journal_entries source-unique
+     * index (one primary + one reversal max per source). Prefers the driver's
+     * populated index name, falling back to a message substring for
+     * drivers/situations where ->index isn't set (MySQL always includes the
+     * violated key name in the duplicate-entry message).
+     */
+    private function isDuplicateReversal(UniqueConstraintViolationException $e): bool
+    {
+        if ($e->index !== null) {
+            return $e->index === 'journal_entries_source_unique';
+        }
+
+        return str_contains($e->getMessage(), 'journal_entries_source_unique');
     }
 }

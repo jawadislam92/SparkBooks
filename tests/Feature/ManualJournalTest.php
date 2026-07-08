@@ -12,6 +12,7 @@ use App\Models\Company;
 use App\Models\JournalEntry;
 use App\Models\ManualJournal;
 use App\Models\User;
+use App\Support\CompanyContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
 use Illuminate\Testing\TestResponse;
@@ -385,6 +386,12 @@ class ManualJournalTest extends TestCase
 
     public function test_reversing_twice_returns_422_with_friendly_message(): void
     {
+        // Exercises the controller's NARROW catch: the second reversal's
+        // duplicate-insert raises a UniqueConstraintViolationException on the
+        // journal_entries_source_unique index, which the controller
+        // classifies (by index name) as "already reversed" and turns into a
+        // friendly 422. Any OTHER DB failure in this path is deliberately NOT
+        // caught here and propagates to the global handler + Sentry.
         $company = Company::factory()->create();
         $this->actingAsRole($company, Role::Owner);
         $bank = $this->bankAccount($company);
@@ -415,6 +422,51 @@ class ManualJournalTest extends TestCase
             ->where('source_id', $journal->id)
             ->count());
         $this->assertSame('reversed', $journal->fresh()->status);
+        $this->assertLedgerBalances();
+    }
+
+    /**
+     * Standing cross-tenant regression guard: a user in Company B must never
+     * be able to reverse a journal that belongs to Company A. The reviewer
+     * proved this holds empirically, but a future refactor (e.g. switching
+     * the reverse() lookup to an implicit route binding, or dropping the
+     * BelongsToCompany scope) could silently reintroduce the hole — this test
+     * fails loudly if that ever happens.
+     */
+    public function test_cannot_reverse_another_companys_journal(): void
+    {
+        $companyA = Company::factory()->create();
+        $this->actingAsRole($companyA, Role::Owner);
+        $bankA = $this->bankAccount($companyA);
+        $incomeA = $this->incomeAccount($companyA);
+
+        $this->postJournal([
+            ['account_id' => $bankA->id, 'debit' => 10000, 'credit' => 0],
+            ['account_id' => $incomeA->id, 'debit' => 0, 'credit' => 10000],
+        ], ['memo' => "A's private entry"])->assertRedirect();
+
+        $journalAId = ManualJournal::query()->sole()->id;
+
+        // Become a different Owner whose current company is B, then try to
+        // reverse A's journal by id.
+        $companyB = Company::factory()->create();
+        $this->actingAsRole($companyB, Role::Owner);
+
+        $response = $this->postJson("/journal-entries/{$journalAId}/reverse", [
+            'date' => '2026-07-05',
+            'memo' => 'Cross-tenant reversal attempt',
+        ]);
+
+        $response->assertNotFound();
+
+        // A's journal is completely untouched: still posted, no reversal entry.
+        app(CompanyContext::class)->set($companyA);
+        $this->assertSame('posted', ManualJournal::query()->findOrFail($journalAId)->status);
+        $this->assertSame(0, JournalEntry::query()
+            ->where('source_type', 'manual_journal')
+            ->where('source_id', $journalAId)
+            ->where('entry_role', EntryRole::Reversal->value)
+            ->count());
         $this->assertLedgerBalances();
     }
 
