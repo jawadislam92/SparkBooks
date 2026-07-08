@@ -15,6 +15,7 @@ use App\Exceptions\Ledger\LockedPeriod;
 use App\Exceptions\Ledger\UnbalancedEntry;
 use App\Models\Account;
 use App\Models\Company;
+use App\Models\Contact;
 use App\Models\JournalEntry;
 use App\Models\JournalLine;
 use App\Services\LedgerService;
@@ -457,6 +458,10 @@ class LedgerServiceTest extends TestCase
         app(CompanyContext::class)->set($company);
         $ar = $this->receivableAccount();
         $income = $this->incomeAccount();
+        // journal_lines.contact_id now carries a real FK (composite on
+        // contact_id + company_id, added in Phase 2) — it must reference an
+        // actual same-company Contact row, not an arbitrary integer.
+        $contact = Contact::factory()->create(['company_id' => $company->id]);
 
         $draft = new EntryDraft(
             entryDate: CarbonImmutable::parse('2026-07-01'),
@@ -464,7 +469,7 @@ class LedgerServiceTest extends TestCase
             sourceType: 'invoice',
             sourceId: 11,
             lines: [
-                new LineDraft(accountId: $ar->id, debit: 10000, credit: 0, contactId: 42),
+                new LineDraft(accountId: $ar->id, debit: 10000, credit: 0, contactId: $contact->id),
                 new LineDraft(accountId: $income->id, debit: 0, credit: 10000),
             ],
         );
@@ -473,7 +478,7 @@ class LedgerServiceTest extends TestCase
 
         $this->assertCount(2, $entry->lines);
         $arLine = $entry->lines->firstWhere('account_id', $ar->id);
-        $this->assertSame(42, $arLine->contact_id);
+        $this->assertSame($contact->id, $arLine->contact_id);
         $this->assertLedgerBalances();
     }
 

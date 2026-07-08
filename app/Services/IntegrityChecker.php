@@ -50,7 +50,14 @@ class IntegrityChecker
 
                 // (f) every line posted to a receivable/payable control account
                 // must carry a contact_id — otherwise AR/AP subledger reports
-                // can't attribute the balance to anyone.
+                // can't attribute the balance to anyone. Phase 2 added a real
+                // FK on journal_lines.contact_id (composite on
+                // (contact_id, company_id) -> contacts.(id, company_id)), so a
+                // non-null contact_id is now guaranteed to reference a real,
+                // same-company contact. That FK can't enforce NON-null,
+                // though — a contact_id-less control-account line is still
+                // valid at the DB level — so this check remains the only
+                // guard against that specific gap.
                 $missing = JournalLine::query()
                     ->whereIn('account_id', Account::query()->whereIn('subtype', ['receivable', 'payable'])->pluck('id'))
                     ->whereNull('contact_id')->count();

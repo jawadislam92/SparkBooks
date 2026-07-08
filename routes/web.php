@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\AccountController;
 use App\Http\Controllers\CompanySwitchController;
+use App\Http\Controllers\ContactController;
 use App\Http\Controllers\HealthController;
 use App\Http\Controllers\ManualJournalController;
 use App\Http\Controllers\OnboardingController;
@@ -72,6 +73,15 @@ Route::middleware(['auth', 'verified', 'company', 'can:accounts.manage'])->group
     Route::post('/accounts/{account}/archive', [AccountController::class, 'archive'])->name('accounts.archive');
     Route::post('/accounts/{account}/unarchive', [AccountController::class, 'unarchive'])->name('accounts.unarchive');
     Route::get('/accounts/{account}', [AccountController::class, 'show'])->name('accounts.show');
+});
+
+Route::middleware(['auth', 'verified', 'company', 'can:contacts.manage'])->group(function () {
+    Route::get('/contacts', [ContactController::class, 'index'])->name('contacts.index');
+    Route::post('/contacts', [ContactController::class, 'store'])->name('contacts.store');
+    Route::patch('/contacts/{contact}', [ContactController::class, 'update'])->name('contacts.update');
+    Route::post('/contacts/{contact}/archive', [ContactController::class, 'archive'])->name('contacts.archive');
+    Route::post('/contacts/{contact}/unarchive', [ContactController::class, 'unarchive'])->name('contacts.unarchive');
+    Route::get('/contacts/{contact}', [ContactController::class, 'show'])->name('contacts.show');
 });
 
 require __DIR__.'/auth.php';
