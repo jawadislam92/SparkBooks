@@ -27,6 +27,7 @@ function navGroups(): NavGroup[] {
                 { label: 'Chart of accounts', href: '/accounts' },
                 { label: 'Journal entries', href: '/journal-entries' },
                 { label: 'Contacts', href: '/contacts' },
+                { label: 'Items', href: '/items' },
             ],
         },
         {

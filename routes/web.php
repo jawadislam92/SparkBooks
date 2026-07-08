@@ -4,6 +4,7 @@ use App\Http\Controllers\AccountController;
 use App\Http\Controllers\CompanySwitchController;
 use App\Http\Controllers\ContactController;
 use App\Http\Controllers\HealthController;
+use App\Http\Controllers\ItemController;
 use App\Http\Controllers\ManualJournalController;
 use App\Http\Controllers\OnboardingController;
 use App\Http\Controllers\PeriodLockController;
@@ -83,6 +84,14 @@ Route::middleware(['auth', 'verified', 'company', 'can:contacts.manage'])->group
     Route::post('/contacts/{contact}/archive', [ContactController::class, 'archive'])->name('contacts.archive');
     Route::post('/contacts/{contact}/unarchive', [ContactController::class, 'unarchive'])->name('contacts.unarchive');
     Route::get('/contacts/{contact}', [ContactController::class, 'show'])->name('contacts.show');
+});
+
+Route::middleware(['auth', 'verified', 'company', 'can:items.manage'])->group(function () {
+    Route::get('/items', [ItemController::class, 'index'])->name('items.index');
+    Route::post('/items', [ItemController::class, 'store'])->name('items.store');
+    Route::patch('/items/{item}', [ItemController::class, 'update'])->name('items.update');
+    Route::post('/items/{item}/archive', [ItemController::class, 'archive'])->name('items.archive');
+    Route::post('/items/{item}/unarchive', [ItemController::class, 'unarchive'])->name('items.unarchive');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:tax_rates.manage'])->group(function () {
