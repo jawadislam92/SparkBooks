@@ -3,10 +3,16 @@
 namespace Tests\Feature;
 
 use App\Models\Company;
+use App\Models\IdempotencyKey;
 use App\Support\CompanyContext;
 use App\Support\IdempotencyService;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
+use LogicException;
 use Tests\TestCase;
 
 class IdempotencyTest extends TestCase
@@ -62,5 +68,164 @@ class IdempotencyTest extends TestCase
 
         $this->assertSame('from-a', $ra);
         $this->assertSame('from-b', $rb);
+    }
+
+    public function test_concurrent_identical_request_replays_winners_snapshot(): void
+    {
+        app(CompanyContext::class)->set(Company::factory()->create());
+        $key = (string) Str::uuid();
+
+        // A service subclass whose claimKey() first simulates a *different*
+        // database session winning the race: it inserts and commits a
+        // competing row (with its own snapshot already set) on a genuinely
+        // separate connection, then delegates to the real claimKey(), whose
+        // insert now hits the real unique index — exercising the actual
+        // catch(UniqueConstraintViolationException) path end-to-end.
+        $service = new class extends IdempotencyService {
+            protected function claimKey(string $key, string $action): IdempotencyKey
+            {
+                config(['database.connections.idempotency_race_sim' => config('database.connections.mysql')]);
+                $sim = DB::connection('idempotency_race_sim');
+                // The test's own Company row lives inside RefreshDatabase's still-open,
+                // uncommitted outer transaction on the default connection, so it is
+                // invisible to this genuinely separate session. Skip the FK check
+                // (this insert is purely a race simulation, not a referential-integrity
+                // test) to avoid blocking on that row's lock.
+                $sim->statement('SET SESSION FOREIGN_KEY_CHECKS=0');
+                $sim->table('idempotency_keys')->insert([
+                    'company_id' => app(CompanyContext::class)->id(),
+                    'user_id' => null,
+                    'key' => $key,
+                    'action' => $action,
+                    'response_snapshot' => json_encode(['invoice_id' => 'winner']),
+                    'created_at' => now(),
+                ]);
+                DB::disconnect('idempotency_race_sim');
+
+                return parent::claimKey($key, $action);
+            }
+        };
+
+        $ranOperation = false;
+        $result = $service->execute($key, 'invoice.send', function () use (&$ranOperation) {
+            $ranOperation = true;
+            return ['invoice_id' => 'mine'];
+        });
+
+        $this->assertFalse($ranOperation, 'Operation must not run once another request already claimed the key.');
+        $this->assertSame(['invoice_id' => 'winner'], $result);
+    }
+
+    public function test_unrelated_unique_violation_inside_operation_propagates_and_releases_key(): void
+    {
+        // CREATE TABLE is DDL and causes MySQL to implicitly commit whatever
+        // transaction issued it. Running it on the default connection would
+        // silently commit RefreshDatabase's outer test transaction while
+        // Laravel's own transaction-level bookkeeping stays out of sync,
+        // corrupting the savepoint nesting the rest of this test relies on.
+        // Create the throwaway table on a separate connection/session instead
+        // — schema changes are immediately visible to every session regardless.
+        //
+        // The table is created idempotently and never dropped: once this
+        // test's own transaction (rolled back by RefreshDatabase as usual)
+        // inserts rows into it, a DROP TABLE from any session would block
+        // on the table's metadata lock until that transaction ends — i.e.
+        // it would deadlock against the very test that's trying to run it.
+        // Leaving the (empty, schema-only) table in place is harmless and
+        // self-healing across a `migrate:fresh` of the test database.
+        config(['database.connections.idempotency_schema_sim' => config('database.connections.mysql')]);
+        $schemaConnection = Schema::connection('idempotency_schema_sim');
+        if (! $schemaConnection->hasTable('idempotency_test_widgets')) {
+            $schemaConnection->create('idempotency_test_widgets', function (Blueprint $t) {
+                $t->id();
+                $t->string('code')->unique();
+            });
+        }
+        DB::disconnect('idempotency_schema_sim');
+
+        app(CompanyContext::class)->set(Company::factory()->create());
+        $service = app(IdempotencyService::class);
+        $key = (string) Str::uuid();
+
+        DB::table('idempotency_test_widgets')->insert(['code' => 'dup']);
+
+        $threw = null;
+        try {
+            $service->execute($key, 'widget.create', function () {
+                DB::table('idempotency_test_widgets')->insert(['code' => 'dup']);
+            });
+        } catch (UniqueConstraintViolationException $e) {
+            $threw = $e;
+        }
+
+        $this->assertNotNull($threw, 'The caller\'s own unique violation must propagate, not be swallowed.');
+        $this->assertDatabaseMissing('idempotency_keys', ['key' => $key]);
+
+        // The key was released, so a retry with the same key succeeds normally.
+        $result = $service->execute($key, 'widget.create', fn () => ['retried' => true]);
+        $this->assertSame(['retried' => true], $result);
+    }
+
+    public function test_execute_rejects_being_called_inside_an_open_transaction(): void
+    {
+        app(CompanyContext::class)->set(Company::factory()->create());
+        $service = app(IdempotencyService::class);
+
+        $this->expectException(LogicException::class);
+        $this->expectExceptionMessage(
+            'IdempotencyService::execute must not be called inside an open transaction; it owns the transaction boundary.'
+        );
+
+        DB::transaction(function () use ($service) {
+            $service->execute((string) Str::uuid(), 'invoice.send', fn () => ['ok' => true]);
+        });
+    }
+
+    public function test_reusing_key_for_a_different_action_throws(): void
+    {
+        app(CompanyContext::class)->set(Company::factory()->create());
+        $service = app(IdempotencyService::class);
+        $key = (string) Str::uuid();
+
+        $service->execute($key, 'invoice.send', fn () => ['ok' => true]);
+
+        $this->expectException(LogicException::class);
+        $this->expectExceptionMessageMatches('/reused across different actions/');
+
+        $service->execute($key, 'invoice.void', fn () => ['should' => 'not-run']);
+    }
+
+    public function test_null_and_falsy_snapshots_replay_correctly(): void
+    {
+        app(CompanyContext::class)->set(Company::factory()->create());
+        $service = app(IdempotencyService::class);
+
+        $nullKey = (string) Str::uuid();
+        $nullRuns = 0;
+        $firstNull = $service->execute($nullKey, 'noop', function () use (&$nullRuns) {
+            $nullRuns++;
+            return null;
+        });
+        $secondNull = $service->execute($nullKey, 'noop', function () use (&$nullRuns) {
+            $nullRuns++;
+            return ['should-not-run' => true];
+        });
+        $this->assertSame(1, $nullRuns);
+        $this->assertNull($firstNull);
+        $this->assertNull($secondNull);
+
+        $falseKey = (string) Str::uuid();
+        $falseRuns = 0;
+        $firstFalse = $service->execute($falseKey, 'noop', function () use (&$falseRuns) {
+            $falseRuns++;
+            return false;
+        });
+        $secondFalse = $service->execute($falseKey, 'noop', function () use (&$falseRuns) {
+            $falseRuns++;
+            return true;
+        });
+        $this->assertSame(1, $falseRuns);
+        $this->assertFalse($firstFalse);
+        $this->assertFalse($secondFalse);
     }
 }
