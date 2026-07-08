@@ -61,4 +61,13 @@ class InertiaSharedPropsTest extends TestCase
                 ->where('companies', [])
             );
     }
+
+    public function test_guest_request_shares_an_empty_can_map(): void
+    {
+        $this->get('/login')
+            ->assertOk()
+            ->assertInertia(fn (AssertableInertia $page) => $page
+                ->where('can', [])
+            );
+    }
 }

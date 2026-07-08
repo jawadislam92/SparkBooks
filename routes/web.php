@@ -4,6 +4,7 @@ use App\Http\Controllers\AccountController;
 use App\Http\Controllers\BankAccountController;
 use App\Http\Controllers\CompanySwitchController;
 use App\Http\Controllers\ContactController;
+use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\HealthController;
 use App\Http\Controllers\ItemController;
 use App\Http\Controllers\ManualJournalController;
@@ -29,9 +30,9 @@ Route::get('/', function () {
     ]);
 });
 
-Route::get('/dashboard', function () {
-    return Inertia::render('Dashboard');
-})->middleware(['auth', 'verified', 'company'])->name('dashboard');
+Route::get('/dashboard', [DashboardController::class, 'show'])
+    ->middleware(['auth', 'verified', 'company'])
+    ->name('dashboard');
 
 Route::middleware('auth')->group(function () {
     Route::get('/onboarding/company', [OnboardingController::class, 'create'])->name('onboarding.company');

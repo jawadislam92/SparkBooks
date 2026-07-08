@@ -140,7 +140,8 @@ everything touches them) so they're drawn once.
     PeriodLockController ─▶ Company.books_locked_through (+ AuditLogger)   [enforcement lives in LedgerService]
     CompanySwitchController ─▶ User.current_company_id (+ AuditLogger)
     AppServiceProvider ─▶ registers permission Gates from config/permissions.php; binds CompanyContext + IdempotencyService (scoped)
-    HandleInertiaRequests ─▶ shares auth.user, companies, currentCompany (as closures) to every React page
+    HandleInertiaRequests ─▶ shares auth.user, companies, currentCompany, can (as closures) to every React page
+    DashboardController ─▶ AccountBalances (cash position) + BankAccount/Contact counts (read-only)
 ```
 
 ---
@@ -208,6 +209,10 @@ Exceptions/
   Ledger/LedgerException.php  base for all ledger errors; + UnbalancedEntry, EmptyEntry,
                               LockedPeriod, ControlAccountViolation, ArchivedAccount, ImmutableLedger.
 Http/Controllers/
+  DashboardController.php       /dashboard — cash position (sum of non-archived
+                                bank/cash accounts' linked ledger balances via
+                                AccountBalances) + customer/vendor counts.
+                                Phase 2 "light" pass; real widgets are Phase 5.
   OnboardingController.php     create company → CompanySetupService.
   CompanySwitchController.php  switch current company (audit-logged, tenant-checked → 404).
   AccountController.php         CoA index/show(drill-down)/store/update/archive/unarchive. Reads AccountBalances.
@@ -219,7 +224,10 @@ Http/Controllers/
 Http/Middleware/
   SetCompanyContext.php        resolves current company → CompanyContext; repairs stale/foreign id.
   RequireCompany.php           redirects users with no company to onboarding.
-  HandleInertiaRequests.php    shares auth.user, companies, currentCompany (CLOSURES) to React.
+  HandleInertiaRequests.php    shares auth.user, companies, currentCompany, can (CLOSURES) to React.
+                                `can` is a minimal ability map (config/permissions.php
+                                subset) the sidebar nav uses to decide what to render —
+                                every linked route still has its own server-side gate.
 Http/Requests/
   StoreCompanyRequest, StoreAccountRequest, UpdateAccountRequest, StoreManualJournalRequest,
   ProfileUpdateRequest, Auth/LoginRequest   — form validation.
@@ -254,7 +262,7 @@ Support/
 ```
 lib/
   money.ts (+ money.test.ts)   formatMoney (forced 2dp) + parseMoneyInput (string→minor units). No float.
-Components/ui/                  Button, Sheet, Field, MoneyText — design-system primitives.
+Components/ui/                  Button, Sheet, Field, MoneyText, StatTile — design-system primitives.
 Components/ledger/
   BalanceBeam.tsx              ⭐ signature element: tilts to the heavier side, settles level + glows when balanced.
   LineEditor.tsx               the debit/credit line grid for the JE editor.
@@ -264,7 +272,9 @@ Layouts/
   AppShell.tsx                 ⭐ the ink-sidebar shell wrapping every in-app page.
   GuestLayout.tsx              centered card for auth pages. AuthenticatedLayout.tsx = Breeze leftover (unused).
 Pages/
-  Dashboard.tsx                empty-state placeholder (real widgets in Phase 5).
+  Dashboard.tsx                cash position + customer/vendor stat tiles (Phase 2 "light"
+                                pass via DashboardController); friendly empty-state hint
+                                when there's nothing yet. Real widgets are Phase 5.
   Onboarding/CreateCompany.tsx company setup form.
   Accounts/Index.tsx, Show.tsx chart of accounts + account ledger drill-down.
   Journal/New.tsx, Index.tsx   ⭐ manual JE editor (BalanceBeam home) + journal list.

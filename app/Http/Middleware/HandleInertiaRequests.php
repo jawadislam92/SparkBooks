@@ -4,6 +4,7 @@ namespace App\Http\Middleware;
 
 use App\Support\CompanyContext;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Gate;
 use Inertia\Middleware;
 
 class HandleInertiaRequests extends Middleware
@@ -14,6 +15,29 @@ class HandleInertiaRequests extends Middleware
      * @var string
      */
     protected $rootView = 'app';
+
+    /**
+     * The subset of config('permissions.catalog') the sidebar nav (see
+     * resources/js/Layouts/AppShell.tsx) needs to decide what to render for
+     * the current role. This is NOT a general-purpose authorization export —
+     * every route those links point at is still independently gated by its
+     * own `can:` middleware/Gate::allows check; this list only has to stay in
+     * sync with whatever abilities the nav conditionally renders on.
+     *
+     * @var list<string>
+     */
+    private const NAV_ABILITIES = [
+        'contacts.manage',
+        'items.manage',
+        'accounts.manage',
+        'ledger.post_manual',
+        'bank_accounts.manage',
+        'reports.view',
+        'tax_rates.manage',
+        'periods.lock',
+        'settings.manage',
+        'audit.view',
+    ];
 
     /**
      * Determine the current asset version.
@@ -66,6 +90,14 @@ class HandleInertiaRequests extends Middleware
                     'base_currency' => $company->base_currency,
                 ];
             },
+            // Same closure-timing reasoning as currentCompany above: Gate
+            // checks depend on CompanyContext, which isn't set yet at the
+            // point `share()` runs.
+            'can' => fn () => $request->user()
+                ? collect(self::NAV_ABILITIES)
+                    ->mapWithKeys(fn (string $ability) => [$ability => Gate::allows($ability)])
+                    ->all()
+                : [],
         ];
     }
 }
