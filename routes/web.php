@@ -12,6 +12,7 @@ use App\Http\Controllers\PeriodLockController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\Reports\TrialBalanceController;
 use App\Http\Controllers\TaxRateController;
+use App\Http\Controllers\TransferController;
 use Illuminate\Foundation\Application;
 use Illuminate\Support\Facades\Route;
 use Inertia\Inertia;
@@ -101,6 +102,11 @@ Route::middleware(['auth', 'verified', 'company', 'can:bank_accounts.manage'])->
     Route::patch('/bank-accounts/{bankAccount}', [BankAccountController::class, 'update'])->name('bank-accounts.update');
     Route::post('/bank-accounts/{bankAccount}/archive', [BankAccountController::class, 'archive'])->name('bank-accounts.archive');
     Route::post('/bank-accounts/{bankAccount}/unarchive', [BankAccountController::class, 'unarchive'])->name('bank-accounts.unarchive');
+});
+
+Route::middleware(['auth', 'verified', 'company', 'can:transfers.create'])->group(function () {
+    Route::get('/transfers/new', [TransferController::class, 'create'])->name('transfers.new');
+    Route::post('/transfers', [TransferController::class, 'store'])->name('transfers.store');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:tax_rates.manage'])->group(function () {
