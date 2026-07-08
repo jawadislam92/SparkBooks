@@ -2,6 +2,13 @@ import Button from '@/Components/ui/Button';
 import Field from '@/Components/ui/Field';
 import Sheet from '@/Components/ui/Sheet';
 import AppShell from '@/Layouts/AppShell';
+import {
+    ContactType,
+    TYPE_CHIP_CLASSES,
+    TYPE_LABELS,
+    isCustomerType,
+    isVendorType,
+} from '@/lib/contactLabels';
 import { PageProps } from '@/types';
 import { Head, router, useForm } from '@inertiajs/react';
 import {
@@ -14,7 +21,7 @@ import { FormEventHandler, useMemo, useState } from 'react';
 
 interface ContactRow {
     id: number;
-    type: 'customer' | 'vendor' | 'both';
+    type: ContactType;
     name: string;
     email: string | null;
     phone: string | null;
@@ -28,17 +35,14 @@ interface IndexPageProps extends PageProps {
     contacts: ContactRow[];
 }
 
-const TYPE_LABELS: Record<string, string> = {
-    customer: 'Customer',
-    vendor: 'Vendor',
-    both: 'Customer & vendor',
-};
+/** Which type of contacts the index list is filtered to. */
+type TypeFilter = 'all' | 'customer' | 'vendor';
 
-const TYPE_CHIP_CLASSES: Record<string, string> = {
-    customer: 'bg-spark-50 text-ink',
-    vendor: 'bg-lagoon/10 text-lagoon',
-    both: 'bg-amber-50 text-ink',
-};
+const TYPE_FILTER_OPTIONS: { value: TypeFilter; label: string }[] = [
+    { value: 'all', label: 'All' },
+    { value: 'customer', label: 'Customers' },
+    { value: 'vendor', label: 'Vendors' },
+];
 
 const INPUT_CLASSES =
     'h-10 rounded-md border border-rule bg-paper-raised px-3 text-sm text-ink transition duration-[120ms] ease-out motion-reduce:transition-none focus:outline-none focus:ring-2 focus:ring-spark';
@@ -220,13 +224,28 @@ function ContactFormDialog({
 
 export default function Index({ contacts }: IndexPageProps) {
     const [showArchived, setShowArchived] = useState(false);
+    const [typeFilter, setTypeFilter] = useState<TypeFilter>('all');
     const [editingContact, setEditingContact] = useState<ContactRow | null>(null);
     const [creating, setCreating] = useState(false);
 
-    const visibleContacts = useMemo(
-        () => (showArchived ? contacts : contacts.filter((c) => !c.is_archived)),
-        [contacts, showArchived],
-    );
+    // Type filter mirrors the server-side ContactType semantics: "customer"
+    // shows customer + both, "vendor" shows vendor + both, "all" shows every
+    // type. Applied client-side alongside the archived toggle (both filters
+    // work the same way — the full list is already loaded).
+    const visibleContacts = useMemo(() => {
+        return contacts.filter((c) => {
+            if (!showArchived && c.is_archived) {
+                return false;
+            }
+            if (typeFilter === 'customer') {
+                return isCustomerType(c.type);
+            }
+            if (typeFilter === 'vendor') {
+                return isVendorType(c.type);
+            }
+            return true;
+        });
+    }, [contacts, showArchived, typeFilter]);
 
     function toggleArchive(contact: ContactRow) {
         const routeName = contact.is_archived ? 'contacts.unarchive' : 'contacts.archive';
@@ -237,16 +256,40 @@ export default function Index({ contacts }: IndexPageProps) {
         <AppShell title="Contacts">
             <Head title="Contacts" />
 
-            <div className="mb-4 flex items-center justify-between">
-                <label className="flex items-center gap-2 text-sm text-ink-700">
-                    <input
-                        type="checkbox"
-                        checked={showArchived}
-                        onChange={(event) => setShowArchived(event.target.checked)}
-                        className="h-4 w-4 rounded border-rule text-spark focus:ring-spark"
-                    />
-                    Show archived
-                </label>
+            <div className="mb-4 flex items-center justify-between gap-4">
+                <div className="flex items-center gap-4">
+                    <div
+                        role="group"
+                        aria-label="Filter by type"
+                        className="inline-flex rounded-lg border border-rule bg-paper-raised p-0.5"
+                    >
+                        {TYPE_FILTER_OPTIONS.map((option) => (
+                            <button
+                                key={option.value}
+                                type="button"
+                                aria-pressed={typeFilter === option.value}
+                                onClick={() => setTypeFilter(option.value)}
+                                className={
+                                    `rounded-md px-3 py-1 text-sm font-medium transition duration-[120ms] ease-out motion-reduce:transition-none focus:outline-none focus-visible:ring-2 focus-visible:ring-spark ` +
+                                    (typeFilter === option.value
+                                        ? 'bg-ink text-white'
+                                        : 'text-ink-700 hover:bg-paper')
+                                }
+                            >
+                                {option.label}
+                            </button>
+                        ))}
+                    </div>
+                    <label className="flex items-center gap-2 text-sm text-ink-700">
+                        <input
+                            type="checkbox"
+                            checked={showArchived}
+                            onChange={(event) => setShowArchived(event.target.checked)}
+                            className="h-4 w-4 rounded border-rule text-spark focus:ring-spark"
+                        />
+                        Show archived
+                    </label>
+                </div>
                 <Button type="button" onClick={() => setCreating(true)}>
                     New contact
                 </Button>
@@ -255,7 +298,9 @@ export default function Index({ contacts }: IndexPageProps) {
             <Sheet>
                 {visibleContacts.length === 0 ? (
                     <p className="py-8 text-center text-sm text-ink-700">
-                        No contacts yet.
+                        {contacts.length === 0
+                            ? 'No contacts yet.'
+                            : 'No contacts match this filter.'}
                     </p>
                 ) : (
                     <table className="w-full border-collapse text-left text-sm">

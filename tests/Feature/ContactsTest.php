@@ -111,6 +111,46 @@ class ContactsTest extends TestCase
     }
 
     // ---------------------------------------------------------------
+    // Type filter
+    //
+    // The index list is filtered by type client-side (mirroring the
+    // archived toggle, which is also client-side — the full list is already
+    // loaded). So the controller always returns every contact; the two tests
+    // below pin down (a) that the controller does return all types, and
+    // (b) the ContactType "Both counts as either" semantics the client-side
+    // filter relies on ("customers" = customer + both, "vendors" = vendor +
+    // both).
+    // ---------------------------------------------------------------
+
+    public function test_index_returns_all_contact_types_for_client_side_filtering(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        Contact::factory()->create(['company_id' => $company->id, 'type' => ContactType::Customer->value, 'name' => 'Cust Co']);
+        Contact::factory()->create(['company_id' => $company->id, 'type' => ContactType::Vendor->value, 'name' => 'Vend Co']);
+        Contact::factory()->create(['company_id' => $company->id, 'type' => ContactType::Both->value, 'name' => 'Both Co']);
+
+        $this->get('/contacts')
+            ->assertOk()
+            ->assertInertia(fn (AssertableInertia $page) => $page
+                ->component('Contacts/Index')
+                ->has('contacts', 3)
+            );
+    }
+
+    public function test_contact_type_filter_semantics_match_is_customer_and_is_vendor(): void
+    {
+        // "Customers" filter = customer + both; "Vendors" filter = vendor + both.
+        $this->assertTrue(ContactType::Customer->isCustomer());
+        $this->assertTrue(ContactType::Both->isCustomer());
+        $this->assertFalse(ContactType::Vendor->isCustomer());
+
+        $this->assertTrue(ContactType::Vendor->isVendor());
+        $this->assertTrue(ContactType::Both->isVendor());
+        $this->assertFalse(ContactType::Customer->isVendor());
+    }
+
+    // ---------------------------------------------------------------
     // Validation
     // ---------------------------------------------------------------
 

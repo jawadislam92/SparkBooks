@@ -1,12 +1,17 @@
 import MoneyText from '@/Components/ui/MoneyText';
 import Sheet from '@/Components/ui/Sheet';
 import AppShell from '@/Layouts/AppShell';
+import {
+    ContactType,
+    TYPE_CHIP_CLASSES,
+    TYPE_LABELS,
+} from '@/lib/contactLabels';
 import { PageProps } from '@/types';
 import { Head, Link, usePage } from '@inertiajs/react';
 
 interface ContactHeader {
     id: number;
-    type: 'customer' | 'vendor' | 'both';
+    type: ContactType;
     name: string;
     email: string | null;
     phone: string | null;
@@ -20,18 +25,6 @@ interface ShowPageProps extends PageProps {
     contact: ContactHeader;
     outstanding_balance: number;
 }
-
-const TYPE_LABELS: Record<string, string> = {
-    customer: 'Customer',
-    vendor: 'Vendor',
-    both: 'Customer & vendor',
-};
-
-const TYPE_CHIP_CLASSES: Record<string, string> = {
-    customer: 'bg-spark-50 text-ink',
-    vendor: 'bg-lagoon/10 text-lagoon',
-    both: 'bg-amber-50 text-ink',
-};
 
 function TypeChip({ type }: { type: string }) {
     return (
