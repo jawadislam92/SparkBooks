@@ -1,26 +1,23 @@
-import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout';
+import Sheet from '@/Components/ui/Sheet';
+import AppShell from '@/Layouts/AppShell';
 import { Head } from '@inertiajs/react';
 
 export default function Dashboard() {
     return (
-        <AuthenticatedLayout
-            header={
-                <h2 className="text-xl font-semibold leading-tight text-gray-800">
-                    Dashboard
-                </h2>
-            }
-        >
+        <AppShell title="Dashboard">
             <Head title="Dashboard" />
 
-            <div className="py-12">
-                <div className="mx-auto max-w-7xl sm:px-6 lg:px-8">
-                    <div className="overflow-hidden bg-white shadow-sm sm:rounded-lg">
-                        <div className="p-6 text-gray-900">
-                            You're logged in!
-                        </div>
-                    </div>
+            <Sheet>
+                <div className="flex flex-col items-center gap-2 py-16 text-center">
+                    <p className="font-display text-lg font-semibold text-ink">
+                        Your books are ready.
+                    </p>
+                    <p className="max-w-sm text-sm text-ink-700">
+                        Add your chart of accounts and record your first
+                        entries to start tracking your finances here.
+                    </p>
                 </div>
-            </div>
-        </AuthenticatedLayout>
+            </Sheet>
+        </AppShell>
     );
 }
