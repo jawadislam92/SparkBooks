@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Enums\AccountSubtype;
+use App\Exceptions\IneligibleCategoryAccount;
 use App\Exceptions\Ledger\LedgerException;
 use App\Http\Requests\StoreOtherReceiptRequest;
 use App\Models\Account;
@@ -64,12 +65,18 @@ class OtherReceiptController extends Controller
     {
         try {
             $service->record($request->header('X-Idempotency-Key'), $request->validated());
+        } catch (IneligibleCategoryAccount $e) {
+            // Service-level eligibility guard (defense-in-depth below
+            // StoreOtherReceiptRequest's own field check). Surface it on the
+            // same field the request validator uses, so the message lands next
+            // to the category picker.
+            throw ValidationException::withMessages(['category_account_id' => $e->getMessage()]);
         } catch (LedgerException $e) {
             // The only LedgerException an other-receipt can realistically hit
             // is a locked period (the category account's eligibility is
-            // already enforced by StoreOtherReceiptRequest, and the entry
-            // always balances) — the date field is the most natural place to
-            // surface it. Mirrors TransferController.
+            // already enforced above, and the entry always balances) — the
+            // date field is the most natural place to surface it. Mirrors
+            // TransferController.
             throw ValidationException::withMessages(['receipt_date' => $e->getMessage()]);
         }
 

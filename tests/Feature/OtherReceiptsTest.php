@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Enums\AccountSubtype;
 use App\Enums\AccountType;
 use App\Enums\Role;
+use App\Exceptions\IneligibleCategoryAccount;
 use App\Models\Account;
 use App\Models\ActivityLog;
 use App\Models\BankAccount;
@@ -394,6 +395,102 @@ class OtherReceiptsTest extends TestCase
         });
 
         $this->assertSame(0, OtherReceipt::query()->count());
+    }
+
+    /**
+     * The category-eligibility rule is enforced by the SERVICE itself, not
+     * only by StoreOtherReceiptRequest — so a direct caller that bypasses the
+     * HTTP request (e.g. the Task 9 CSV import) still can't post a disguised
+     * transfer by handing a bank/cash account as the category. This is the
+     * key backstop: bank/cash-as-category has no LedgerService guard (the gate
+     * legitimately accepts bank/cash lines for real transfers), so if the
+     * service didn't refuse it here, money-in would silently post against a
+     * second bank/cash account.
+     */
+    public function test_service_refuses_a_bank_or_cash_category_account_and_posts_nothing(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $bank = $this->bankAccount($company);
+
+        // actingAsRole doesn't run an HTTP request, so nothing sets
+        // CompanyContext for the direct service call (and the count assertions
+        // afterward) — set it explicitly, like PermissionMatrixTest does.
+        app(CompanyContext::class)->set($company);
+
+        foreach ([
+            ['code' => '1010', 'subtype' => AccountSubtype::Cash],
+            ['code' => '1020', 'subtype' => AccountSubtype::Bank],
+        ] as $spec) {
+            $moneyAccount = $this->categoryAccount($company, [
+                'code' => $spec['code'],
+                'type' => AccountType::Asset->value,
+                'subtype' => $spec['subtype']->value,
+            ]);
+
+            $threw = false;
+            try {
+                app(OtherReceiptService::class)->record((string) Str::uuid(), [
+                    'bank_account_id' => $bank->id,
+                    'category_account_id' => $moneyAccount->id,
+                    'receipt_date' => '2026-07-01',
+                    'amount' => 10000,
+                    'memo' => 'Disguised transfer attempt',
+                ]);
+            } catch (IneligibleCategoryAccount $e) {
+                $threw = true;
+                $this->assertStringContainsString('income or equity', $e->getMessage());
+            }
+
+            $this->assertTrue($threw, "record() must throw IneligibleCategoryAccount for a {$spec['subtype']->value} category account.");
+        }
+
+        // The guard runs before any write inside the transaction, so nothing
+        // is persisted — no receipt, no journal entry, and the global ledger
+        // invariant is untouched.
+        $this->assertSame(0, OtherReceipt::query()->count());
+        $this->assertSame(0, JournalEntry::query()->count());
+        $this->assertLedgerBalances();
+    }
+
+    /**
+     * A control account (AR/AP) handed straight to the service is refused too
+     * — money-in must never fake a receivable/payable. (On the HTTP path this
+     * is also caught by StoreOtherReceiptRequest and, as a further backstop,
+     * by LedgerService's ControlAccountViolation; this proves the service's
+     * own guard stands on its own.)
+     */
+    public function test_service_refuses_a_control_category_account_and_posts_nothing(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $bank = $this->bankAccount($company);
+        $receivable = $this->categoryAccount($company, [
+            'code' => '1100',
+            'type' => AccountType::Asset->value,
+            'subtype' => AccountSubtype::Receivable->value,
+        ]);
+
+        app(CompanyContext::class)->set($company);
+
+        $threw = false;
+        try {
+            app(OtherReceiptService::class)->record((string) Str::uuid(), [
+                'bank_account_id' => $bank->id,
+                'category_account_id' => $receivable->id,
+                'receipt_date' => '2026-07-01',
+                'amount' => 10000,
+                'memo' => 'Receivable-faking attempt',
+            ]);
+        } catch (IneligibleCategoryAccount $e) {
+            $threw = true;
+            $this->assertStringContainsString('owed', $e->getMessage());
+        }
+
+        $this->assertTrue($threw, 'record() must throw IneligibleCategoryAccount for a control (AR/AP) category account.');
+        $this->assertSame(0, OtherReceipt::query()->count());
+        $this->assertSame(0, JournalEntry::query()->count());
+        $this->assertLedgerBalances();
     }
 
     // ---------------------------------------------------------------
