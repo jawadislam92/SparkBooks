@@ -1,4 +1,5 @@
 <?php
+
 namespace App\Http\Controllers;
 
 use App\Http\Requests\StoreCompanyRequest;
@@ -25,6 +26,7 @@ class OnboardingController extends Controller
         }
 
         $setup->create($request->user(), $request->validated());
+
         return redirect()->route('dashboard');
     }
 }

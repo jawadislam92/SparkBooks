@@ -1,4 +1,5 @@
 <?php
+
 namespace Tests\Feature;
 
 use App\Enums\Role;

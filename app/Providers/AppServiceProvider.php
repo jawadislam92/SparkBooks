@@ -3,6 +3,7 @@
 namespace App\Providers;
 
 use App\Support\CompanyContext;
+use App\Support\IdempotencyService;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Vite;
 use Illuminate\Support\ServiceProvider;
@@ -14,8 +15,8 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        $this->app->scoped(\App\Support\CompanyContext::class);
-        $this->app->scoped(\App\Support\IdempotencyService::class);
+        $this->app->scoped(CompanyContext::class);
+        $this->app->scoped(IdempotencyService::class);
     }
 
     /**
@@ -31,6 +32,7 @@ class AppServiceProvider extends ServiceProvider
                 if (! $context->has()) {
                     return false;
                 }
+
                 return $user->roleIn($context->get())?->allows($permission) ?? false;
             });
         }

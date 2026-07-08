@@ -1,9 +1,13 @@
-<?php // tests/Feature/CompanyMembershipTest.php
+<?php
+
+// tests/Feature/CompanyMembershipTest.php
+
 namespace Tests\Feature;
 
 use App\Enums\Role;
 use App\Models\Company;
 use App\Models\User;
+use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -30,7 +34,7 @@ class CompanyMembershipTest extends TestCase
         $user = User::factory()->create();
         $c = Company::factory()->create();
         $user->companies()->attach($c, ['role' => Role::Owner->value]);
-        $this->expectException(\Illuminate\Database\QueryException::class);
+        $this->expectException(QueryException::class);
         $user->companies()->attach($c, ['role' => Role::Admin->value]);
     }
 }

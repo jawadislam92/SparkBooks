@@ -42,6 +42,7 @@ class IdempotencyService
         $existing = IdempotencyKey::query()->where('key', $key)->first();
         if ($existing) {
             $this->assertActionMatches($existing, $action);
+
             return $existing->response_snapshot;
         }
 
@@ -50,6 +51,7 @@ class IdempotencyService
                 $record = $this->claimKey($key, $action);
                 $result = $operation();
                 $record->forceFill(['response_snapshot' => $result])->save();
+
                 return $result;
             });
         } catch (UniqueConstraintViolationException $e) {

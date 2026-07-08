@@ -1,4 +1,5 @@
 <?php
+
 namespace App\Support;
 
 use App\Exceptions\MissingCompanyContext;
@@ -26,7 +27,7 @@ class CompanyContext
 
     public function get(): Company
     {
-        return $this->company ?? throw new MissingCompanyContext();
+        return $this->company ?? throw new MissingCompanyContext;
     }
 
     public function id(): int

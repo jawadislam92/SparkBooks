@@ -1,4 +1,5 @@
 <?php
+
 namespace App\Http\Middleware;
 
 use App\Support\CompanyContext;
@@ -24,6 +25,7 @@ class SetCompanyContext
                 $this->context->set($company);
             }
         }
+
         return $next($request);
     }
 }

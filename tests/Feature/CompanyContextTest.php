@@ -1,11 +1,12 @@
 <?php
+
 namespace Tests\Feature;
 
 use App\Enums\Role;
+use App\Exceptions\MissingCompanyContext;
 use App\Models\Company;
 use App\Models\User;
 use App\Support\CompanyContext;
-use App\Exceptions\MissingCompanyContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 

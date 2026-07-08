@@ -1,4 +1,5 @@
 <?php
+
 namespace App\Services;
 
 use App\Enums\Role;
@@ -25,6 +26,7 @@ class CompanySetupService
             return $this->context->runFor($company, function () use ($company) {
                 $this->seedDefaults($company);
                 $this->audit->log('company.created', $company, after: ['name' => $company->name]);
+
                 return $company;
             });
         });

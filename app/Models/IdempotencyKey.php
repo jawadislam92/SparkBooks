@@ -10,6 +10,7 @@ class IdempotencyKey extends Model
     use BelongsToCompany;
 
     public const UPDATED_AT = null;
+
     protected $guarded = [];
 
     protected function casts(): array

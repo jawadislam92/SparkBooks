@@ -46,6 +46,7 @@ class User extends Authenticatable
     public function roleIn(Company $company): ?Role
     {
         $pivot = $this->companies()->whereKey($company->id)->first()?->pivot;
+
         return $pivot ? Role::from($pivot->role) : null;
     }
 

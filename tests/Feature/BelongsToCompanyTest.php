@@ -16,7 +16,9 @@ use Tests\TestCase;
 class TenantWidget extends Model
 {
     use BelongsToCompany;
+
     protected $guarded = [];
+
     protected $table = 'tenant_widgets';
 }
 

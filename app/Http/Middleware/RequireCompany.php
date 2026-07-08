@@ -1,4 +1,5 @@
 <?php
+
 namespace App\Http\Middleware;
 
 use Closure;
@@ -11,6 +12,7 @@ class RequireCompany
         if ($request->user() && ! $request->user()->companies()->exists()) {
             return redirect()->route('onboarding.company');
         }
+
         return $next($request);
     }
 }

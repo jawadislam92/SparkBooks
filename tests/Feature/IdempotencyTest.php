@@ -28,10 +28,12 @@ class IdempotencyTest extends TestCase
 
         $first = $service->execute($key, 'invoice.send', function () use (&$runs) {
             $runs++;
+
             return ['invoice_id' => 42];
         });
         $second = $service->execute($key, 'invoice.send', function () use (&$runs) {
             $runs++;
+
             return ['invoice_id' => 99];
         });
 
@@ -81,7 +83,8 @@ class IdempotencyTest extends TestCase
         // separate connection, then delegates to the real claimKey(), whose
         // insert now hits the real unique index — exercising the actual
         // catch(UniqueConstraintViolationException) path end-to-end.
-        $service = new class extends IdempotencyService {
+        $service = new class extends IdempotencyService
+        {
             protected function claimKey(string $key, string $action): IdempotencyKey
             {
                 config(['database.connections.idempotency_race_sim' => config('database.connections.mysql')]);
@@ -109,6 +112,7 @@ class IdempotencyTest extends TestCase
         $ranOperation = false;
         $result = $service->execute($key, 'invoice.send', function () use (&$ranOperation) {
             $ranOperation = true;
+
             return ['invoice_id' => 'mine'];
         });
 
@@ -204,10 +208,12 @@ class IdempotencyTest extends TestCase
         $nullRuns = 0;
         $firstNull = $service->execute($nullKey, 'noop', function () use (&$nullRuns) {
             $nullRuns++;
+
             return null;
         });
         $secondNull = $service->execute($nullKey, 'noop', function () use (&$nullRuns) {
             $nullRuns++;
+
             return ['should-not-run' => true];
         });
         $this->assertSame(1, $nullRuns);
@@ -218,10 +224,12 @@ class IdempotencyTest extends TestCase
         $falseRuns = 0;
         $firstFalse = $service->execute($falseKey, 'noop', function () use (&$falseRuns) {
             $falseRuns++;
+
             return false;
         });
         $secondFalse = $service->execute($falseKey, 'noop', function () use (&$falseRuns) {
             $falseRuns++;
+
             return true;
         });
         $this->assertSame(1, $falseRuns);

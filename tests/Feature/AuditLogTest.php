@@ -1,7 +1,7 @@
 <?php
+
 namespace Tests\Feature;
 
-use App\Models\ActivityLog;
 use App\Models\Company;
 use App\Models\User;
 use App\Support\AuditLogger;

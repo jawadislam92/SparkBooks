@@ -10,7 +10,9 @@ class ActivityLog extends Model
     use BelongsToCompany;
 
     public const UPDATED_AT = null;
+
     protected $table = 'activity_log';
+
     protected $guarded = [];
 
     protected function casts(): array
