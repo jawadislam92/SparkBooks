@@ -34,6 +34,6 @@ class CompanySetupService
 
     protected function seedDefaults(Company $company): void
     {
-        // Phase 1 seeds the §5 chart of accounts here.
+        app(ChartOfAccountsSeeder::class)->seed($company);
     }
 }
