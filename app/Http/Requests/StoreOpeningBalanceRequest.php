@@ -72,8 +72,18 @@ class StoreOpeningBalanceRequest extends FormRequest
         $validator->after(function (Validator $validator) {
             $this->validateAtLeastOneLine($validator);
             $this->validateBankAccounts($validator);
-            $this->validateContacts($validator, 'customer_lines');
-            $this->validateContacts($validator, 'vendor_lines');
+            $this->validateContacts(
+                $validator,
+                'customer_lines',
+                fn (Contact $contact) => $contact->type->isCustomer(),
+                "This contact isn't a customer. Choose a customer, or edit the contact to also be a customer.",
+            );
+            $this->validateContacts(
+                $validator,
+                'vendor_lines',
+                fn (Contact $contact) => $contact->type->isVendor(),
+                "This contact isn't a vendor. Choose a vendor, or edit the contact to also be a vendor.",
+            );
             $this->validateDueDates($validator, 'customer_lines');
             $this->validateDueDates($validator, 'vendor_lines');
         });
@@ -115,7 +125,18 @@ class StoreOpeningBalanceRequest extends FormRequest
         }
     }
 
-    private function validateContacts(Validator $validator, string $field): void
+    /**
+     * @param  \Closure(Contact): bool  $typeMatches  the field-appropriate type predicate: a
+     *                                                customer_lines contact must isCustomer()
+     *                                                (Customer or Both), a vendor_lines contact
+     *                                                must isVendor() (Vendor or Both). A mismatch
+     *                                                would attribute a receivable to a vendor (or
+     *                                                vice-versa), corrupting the AR/AP subledger
+     *                                                that Phase 5 aging reads — even though the
+     *                                                ledger still balances. Rejected here at the
+     *                                                same field the picker sits on.
+     */
+    private function validateContacts(Validator $validator, string $field, \Closure $typeMatches, string $typeMismatchMessage): void
     {
         foreach ($this->input($field, []) as $index => $line) {
             $id = $line['contact_id'] ?? null;
@@ -136,6 +157,12 @@ class StoreOpeningBalanceRequest extends FormRequest
 
             if ($contact->is_archived) {
                 $validator->errors()->add("{$field}.{$index}.contact_id", 'The selected contact is archived.');
+
+                continue;
+            }
+
+            if (! $typeMatches($contact)) {
+                $validator->errors()->add("{$field}.{$index}.contact_id", $typeMismatchMessage);
             }
         }
     }

@@ -426,6 +426,73 @@ class OpeningBalancesTest extends TestCase
         $this->assertLedgerBalances();
     }
 
+    // ---------------------------------------------------------------
+    // Contact type must match the line array (protects AR/AP attribution)
+    // ---------------------------------------------------------------
+
+    public function test_vendor_only_contact_in_customer_lines_is_rejected_and_nothing_is_posted(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $this->chart($company);
+        $vendorOnly = $this->vendor($company);
+
+        $response = $this->postOpeningBalances([
+            'customer_lines' => [
+                ['contact_id' => $vendorOnly->id, 'original_date' => '2026-05-01', 'due_date' => '2026-06-01', 'amount' => 10000],
+            ],
+        ]);
+
+        $response->assertSessionHasErrors('customer_lines.0.contact_id');
+        $this->assertStringContainsString("isn't a customer", session('errors')->first('customer_lines.0.contact_id'));
+        $this->assertSame(0, OpeningBalanceRun::query()->count());
+        $this->assertSame(0, JournalEntry::query()->count());
+        $this->assertLedgerBalances();
+    }
+
+    public function test_customer_only_contact_in_vendor_lines_is_rejected_and_nothing_is_posted(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $this->chart($company);
+        $customerOnly = $this->customer($company);
+
+        $response = $this->postOpeningBalances([
+            'vendor_lines' => [
+                ['contact_id' => $customerOnly->id, 'original_date' => '2026-05-01', 'due_date' => '2026-06-01', 'amount' => 10000],
+            ],
+        ]);
+
+        $response->assertSessionHasErrors('vendor_lines.0.contact_id');
+        $this->assertStringContainsString("isn't a vendor", session('errors')->first('vendor_lines.0.contact_id'));
+        $this->assertSame(0, OpeningBalanceRun::query()->count());
+        $this->assertSame(0, JournalEntry::query()->count());
+        $this->assertLedgerBalances();
+    }
+
+    public function test_both_type_contact_is_accepted_in_either_line_array(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $this->chart($company);
+        $both = $this->contact($company, ['type' => ContactType::Both->value]);
+
+        $this->postOpeningBalances([
+            'customer_lines' => [
+                ['contact_id' => $both->id, 'original_date' => '2026-05-01', 'due_date' => '2026-06-01', 'amount' => 30000],
+            ],
+            'vendor_lines' => [
+                ['contact_id' => $both->id, 'original_date' => '2026-05-01', 'due_date' => '2026-06-01', 'amount' => 20000],
+            ],
+        ])->assertRedirect();
+
+        $run = OpeningBalanceRun::query()->sole();
+        $this->assertSame(1, OpeningDocument::query()->where('kind', 'receivable')->where('contact_id', $both->id)->count());
+        $this->assertSame(1, OpeningDocument::query()->where('kind', 'payable')->where('contact_id', $both->id)->count());
+        $this->assertSame(1, JournalEntry::query()->where('source_type', 'opening_balance_run')->where('source_id', $run->id)->count());
+        $this->assertLedgerBalances();
+    }
+
     public function test_archived_bank_account_is_rejected_with_a_friendly_error(): void
     {
         $company = Company::factory()->create();
