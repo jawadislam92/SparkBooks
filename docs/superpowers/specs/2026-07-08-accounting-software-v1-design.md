@@ -1,8 +1,8 @@
 # SparkBooks — v1 Design
 
 **Name:** SparkBooks (decided 2026-07-08; repo at `C:\laragon\www\SparkBooks`)
-**Date:** 2026-07-08 (rev 3 — rev 2 folded in 27 adversarial-review findings; rev 3 adds the §17 production-safety addendum)
-**Status:** Pending written-spec review by Jawad
+**Date:** 2026-07-08 (rev 4 — approved & in build; Phases 0–1 merged. Currency decision made: §17.1 **Path 2 / FX-lite** — PKR base + USD option, built in Phase 2. Accountant/Gate A deferred at owner's request until an accountant is hired.)
+**Status:** Approved; in active build (Phases 0–1 done, Phase 2 next)
 **First real user:** SparkingAsia (services company — agency work, no physical inventory)
 **Long-term goal:** If the product proves itself internally, sell it as a multi-tenant SaaS (QuickBooks-class, built up in phases)
 
@@ -14,7 +14,7 @@ Build a web-based accounting application that does what QuickBooks does — even
 
 **Success criteria for v1:**
 
-1. SparkingAsia runs its real books on it for a full month. **Precondition (checked before Phase 3):** all billing in the trial month can be done in the base currency (PKR). If SparkingAsia must issue USD invoices in that month, the FX-lite slice is pulled forward (binding decision rule: §17.1) — this assumption is recorded here so it is a checked precondition, not a surprise at Gate B.
+1. SparkingAsia runs its real books on it for a full month. **Currency: DECIDED (2026-07-08) — PKR base with a USD option.** The §17.1 Path 2 FX-lite slice is built into v1 (Phase 2), so USD invoicing is available for the trial month; this is no longer a deferred precondition.
 2. A hired accountant reviews the Trial Balance, General Ledger, and reports from that month and signs off that the books are correct (Gate B, §13).
 3. Every test in the required test suite (§12) passes.
 4. The books cannot be corrupted through the UI — by construction, not by discipline.
@@ -419,9 +419,9 @@ Ledger core, chart of accounts, journal entries, opening balances, and reports a
 
 1. ~~Product name~~ — **resolved: SparkBooks** (2026-07-08); folder renamed to `C:\laragon\www\SparkBooks`.
 2. **Hosting** — Hostinger like SA Track, or a VPS for cron/queue/backup control? Decide by Phase 6.
-3. **Accountant sourcing** — who performs Gates A and B (former company accountant? hired freelancer?). Needed by end of Phase 2.
+3. **Accountant sourcing** — **DEFERRED at owner's request (2026-07-08): no accountant hired yet.** Gate A (posting-rules review) and Gate B (real-month sign-off) are paused; the build proceeds without them for now. Revisit when an accountant is hired — the FX rules (§17.1) and the posting catalog (§6) go into that review then. Do **not** gate phases on it in the meantime.
 4. **Fiscal year** — company setting exists (§7.1); confirm SparkingAsia's fiscal year start for Retained Earnings behavior.
-5. **SparkingAsia's invoicing currency mix** — resolved into a binding decision rule: see Addendum §17.1.
+5. ~~SparkingAsia's invoicing currency mix~~ — **RESOLVED (2026-07-08): PKR base + USD option → §17.1 Path 2 FX-lite, built in Phase 2.**
 
 ---
 
@@ -431,10 +431,10 @@ Added at Jawad's direction before implementation. Nothing here expands v1's feat
 
 ### 17.1 Multi-currency: the binding decision rule (before Phase 3)
 
-At **Phase 2 exit**, Jawad confirms SparkingAsia's billing plan for the trial month. Exactly one of two paths is taken — no third option, no deferral:
+**DECISION (2026-07-08): Path 2 (FX-lite) is chosen.** SparkingAsia keeps books in PKR but wants the ability to invoice in USD, so the FX-lite slice is built into v1 during Phase 2 (before Phase 3's invoicing, since it shapes payment posting). Path 1 below is retained only as the historical alternative. (Gate A accountant review is deferred until an accountant is hired — see §16.3; the FX posting rules P1fx/P2fx will be part of that review when it happens, but do not gate the build in the meantime.)
 
-- **Path 1 — PKR-only trial:** every invoice in the Gate B month is PKR. Recorded as a checked item in §14; USD stays launch track.
-- **Path 2 — FX-lite pulled into v1** (built before Phase 3's invoicing, since it shapes payment posting). A Path 2 decision **triggers a Gate A addendum review** of the rules below before Phase 3 begins.
+- **Path 1 — PKR-only trial (NOT chosen):** every invoice PKR; USD stays launch track.
+- **Path 2 — FX-lite pulled into v1 (CHOSEN):** built in Phase 2.
   - **P1fx — foreign-currency invoice sent.** `currency_code` + `fx_rate` captured at **send** (manually entered, editable suggested value). The full posting, all at the send rate — e.g. USD 1,000 + 18% tax @ 280: **Dr 1100 AR 330,400; Cr 4000 Income 280,000; Cr 2100 Tax Payable 50,400.**
     - *Conversion rounding rule (mirrors §7.6):* each component (per line, and the tax per line) converts to base and rounds half-up; `base_total` = the **sum** of converted components, never an independent round(total × rate). The AR debit equals that sum by construction, so the entry always balances.
     - *Tax is a base-currency liability from that moment:* 2100 is owed to a domestic authority in PKR; it is **never re-measured** at payment date, and P12 tax remittance is unchanged with no FX plug. **Gate A question:** does the tax authority mandate an official rate for converting tax on foreign-currency invoices (FBR practice)? If so, that rate is captured/displayed for the tax component.
