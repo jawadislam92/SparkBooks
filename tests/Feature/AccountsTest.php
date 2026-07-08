@@ -26,18 +26,18 @@ class AccountsTest extends TestCase
         );
     }
 
-    public function test_seeding_creates_exactly_23_accounts_with_expected_codes(): void
+    public function test_seeding_creates_exactly_25_accounts_with_expected_codes(): void
     {
         $company = Company::factory()->create();
         $this->seedInto($company);
 
         app(CompanyContext::class)->set($company);
-        $this->assertSame(23, Account::query()->count());
+        $this->assertSame(25, Account::query()->count());
 
         $expectedCodes = [
             '1000', '1010', '1100', '1500', '2000', '2100', '3000', '3100', '3200', '3900',
-            '4000', '4900', '5000', '5100', '5200', '5300', '5400', '5500', '5600', '5700',
-            '5800', '5900', '5990',
+            '4000', '4900', '4950', '5000', '5100', '5200', '5300', '5400', '5500', '5600', '5700',
+            '5800', '5900', '5950', '5990',
         ];
         $this->assertSame($expectedCodes, Account::query()->orderBy('code')->pluck('code')->all());
     }
@@ -48,7 +48,7 @@ class AccountsTest extends TestCase
         $this->seedInto($company);
         app(CompanyContext::class)->set($company);
 
-        $systemCodes = ['1000', '1010', '1100', '2000', '2100', '3100', '3200'];
+        $systemCodes = ['1000', '1010', '1100', '2000', '2100', '3100', '3200', '4950', '5950'];
         foreach ($systemCodes as $code) {
             $this->assertTrue(
                 Account::query()->where('code', $code)->sole()->is_system,
@@ -87,6 +87,7 @@ class AccountsTest extends TestCase
             '3900' => ['Owner Drawings', AccountType::Equity, AccountSubtype::Equity],
             '4000' => ['Service Income', AccountType::Income, AccountSubtype::OperatingIncome],
             '4900' => ['Other Income', AccountType::Income, AccountSubtype::OtherIncome],
+            '4950' => ['FX Gain', AccountType::Income, AccountSubtype::OtherIncome],
             '5000' => ['Salaries & Wages', AccountType::Expense, AccountSubtype::OperatingExpense],
             '5100' => ['Rent', AccountType::Expense, AccountSubtype::OperatingExpense],
             '5200' => ['Utilities', AccountType::Expense, AccountSubtype::OperatingExpense],
@@ -97,6 +98,7 @@ class AccountsTest extends TestCase
             '5700' => ['Bank Fees & Charges', AccountType::Expense, AccountSubtype::OperatingExpense],
             '5800' => ['Travel', AccountType::Expense, AccountSubtype::OperatingExpense],
             '5900' => ['Professional Fees', AccountType::Expense, AccountSubtype::OperatingExpense],
+            '5950' => ['FX Loss', AccountType::Expense, AccountSubtype::OperatingExpense],
             '5990' => ['Miscellaneous Expense', AccountType::Expense, AccountSubtype::OperatingExpense],
         ];
 
@@ -332,6 +334,6 @@ class AccountsTest extends TestCase
 
         $company = $user->fresh()->currentCompany;
         app(CompanyContext::class)->set($company);
-        $this->assertSame(23, Account::query()->count());
+        $this->assertSame(25, Account::query()->count());
     }
 }
