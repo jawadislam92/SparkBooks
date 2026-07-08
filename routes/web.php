@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\AccountController;
 use App\Http\Controllers\CompanySwitchController;
 use App\Http\Controllers\ManualJournalController;
 use App\Http\Controllers\OnboardingController;
@@ -36,6 +37,15 @@ Route::middleware(['auth', 'verified', 'company', 'can:ledger.post_manual'])->gr
     Route::get('/journal-entries/new', [ManualJournalController::class, 'create'])->name('journal-entries.new');
     Route::post('/journal-entries', [ManualJournalController::class, 'store'])->name('journal-entries.store');
     Route::post('/journal-entries/{manualJournal}/reverse', [ManualJournalController::class, 'reverse'])->name('journal-entries.reverse');
+});
+
+Route::middleware(['auth', 'verified', 'company', 'can:accounts.manage'])->group(function () {
+    Route::get('/accounts', [AccountController::class, 'index'])->name('accounts.index');
+    Route::post('/accounts', [AccountController::class, 'store'])->name('accounts.store');
+    Route::patch('/accounts/{account}', [AccountController::class, 'update'])->name('accounts.update');
+    Route::post('/accounts/{account}/archive', [AccountController::class, 'archive'])->name('accounts.archive');
+    Route::post('/accounts/{account}/unarchive', [AccountController::class, 'unarchive'])->name('accounts.unarchive');
+    Route::get('/accounts/{account}', [AccountController::class, 'show'])->name('accounts.show');
 });
 
 require __DIR__.'/auth.php';
