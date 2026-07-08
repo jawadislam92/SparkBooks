@@ -6,6 +6,7 @@ use App\Http\Controllers\ManualJournalController;
 use App\Http\Controllers\OnboardingController;
 use App\Http\Controllers\PeriodLockController;
 use App\Http\Controllers\ProfileController;
+use App\Http\Controllers\Reports\TrialBalanceController;
 use Illuminate\Foundation\Application;
 use Illuminate\Support\Facades\Route;
 use Inertia\Inertia;
@@ -48,6 +49,14 @@ Route::middleware(['auth', 'verified', 'company'])->group(function () {
     Route::post('/settings/books', [PeriodLockController::class, 'update'])
         ->middleware('can:periods.lock')
         ->name('settings.books.update');
+});
+
+Route::middleware(['auth', 'verified', 'company', 'can:reports.view'])->group(function () {
+    Route::get('/reports/trial-balance', [TrialBalanceController::class, 'show'])->name('reports.trial-balance');
+    // Export is stricter than view: reports.view (group) AND exports.run (here).
+    Route::get('/reports/trial-balance/export.csv', [TrialBalanceController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('reports.trial-balance.export');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:accounts.manage'])->group(function () {
