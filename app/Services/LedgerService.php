@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Domain\Ledger\EntryDraft;
 use App\Domain\Ledger\LineDraft;
 use App\Enums\EntryRole;
+use App\Exceptions\Ledger\ArchivedAccount;
 use App\Exceptions\Ledger\ControlAccountViolation;
 use App\Exceptions\Ledger\EmptyEntry;
 use App\Exceptions\Ledger\LockedPeriod;
@@ -42,8 +43,8 @@ class LedgerService
             'created_by' => auth()->id(),
         ]);
         foreach ($draft->lines as $line) {
+            // company_id is set by the BelongsToCompany creating hook from context
             $entry->lines()->create([
-                'company_id' => $entry->company_id,
                 'account_id' => $line->accountId,
                 'debit' => $line->debit,
                 'credit' => $line->credit,
@@ -87,8 +88,11 @@ class LedgerService
             $debits += $line->debit;
             $credits += $line->credit;
             $account = Account::query()->findOrFail($line->accountId); // tenant-scoped => foreign account 404s
-            if ($account->is_archived) {
-                throw new ControlAccountViolation("Account {$account->code} is archived.");
+            // Archived accounts are blocked only on NEW (primary) entries. Reversals must
+            // always be postable — reversal is the ONLY correction path for immutable
+            // entries, so an account archived AFTER an entry posts must not trap it forever.
+            if ($account->is_archived && $draft->role === EntryRole::Primary) {
+                throw new ArchivedAccount("Account {$account->code} is archived and cannot be used on a new entry.");
             }
             if ($account->isControlAccount()) {
                 if ($line->contactId === null) {

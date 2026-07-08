@@ -7,6 +7,7 @@ use App\Domain\Ledger\LineDraft;
 use App\Enums\AccountSubtype;
 use App\Enums\AccountType;
 use App\Enums\EntryRole;
+use App\Exceptions\Ledger\ArchivedAccount;
 use App\Exceptions\Ledger\ControlAccountViolation;
 use App\Exceptions\Ledger\EmptyEntry;
 use App\Exceptions\Ledger\ImmutableLedger;
@@ -311,18 +312,21 @@ class LedgerServiceTest extends TestCase
             DB::table('companies')->where('id', $company->id)->delete();
             DB::beginTransaction();
         }
-
-        $this->assertLedgerBalances();
+        // No assertion past the try/finally: the LogicException from post()
+        // propagates out (expectException catches it at the test boundary), so
+        // any line here would be unreachable.
     }
 
     // ---------------------------------------------------------------
     // Account-state guards
     // ---------------------------------------------------------------
 
-    public function test_archived_account_line_throws_control_account_violation(): void
+    public function test_primary_entry_touching_archived_account_throws_archived_account(): void
     {
         $company = Company::factory()->create();
         app(CompanyContext::class)->set($company);
+        // A plain (non-control) archived account: proves the archived guard is its
+        // own concern, not conflated with the control-account rule.
         $bank = $this->bankAccount(['is_archived' => true]);
         $income = $this->incomeAccount();
 
@@ -339,12 +343,53 @@ class LedgerServiceTest extends TestCase
 
         try {
             DB::transaction(fn () => app(LedgerService::class)->post($draft));
-            $this->fail('Expected ControlAccountViolation to be thrown.');
-        } catch (ControlAccountViolation $e) {
+            $this->fail('Expected ArchivedAccount to be thrown.');
+        } catch (ControlAccountViolation) {
+            $this->fail('A non-control archived account must not throw ControlAccountViolation.');
+        } catch (ArchivedAccount $e) {
             $this->assertStringContainsString('archived', $e->getMessage());
+            $this->assertStringContainsString($bank->code, $e->getMessage());
         }
 
         $this->assertSame(0, JournalEntry::query()->count());
+        $this->assertLedgerBalances();
+    }
+
+    public function test_entry_can_be_reversed_after_its_account_is_archived(): void
+    {
+        // The load-bearing case: an entry posts while its account is active, the
+        // account is later archived, and the entry must STILL be reversible —
+        // reversal is the only correction path for immutable entries.
+        $company = Company::factory()->create();
+        app(CompanyContext::class)->set($company);
+        $bank = $this->bankAccount();
+        $income = $this->incomeAccount();
+
+        $original = DB::transaction(fn () => app(LedgerService::class)->post(new EntryDraft(
+            entryDate: CarbonImmutable::parse('2026-07-01'),
+            memo: 'Original before archive',
+            sourceType: 'manual_journal',
+            sourceId: 23,
+            lines: [
+                new LineDraft(accountId: $bank->id, debit: 10000, credit: 0),
+                new LineDraft(accountId: $income->id, debit: 0, credit: 10000),
+            ],
+        )));
+
+        // Archive both accounts AFTER the entry posted.
+        $bank->update(['is_archived' => true]);
+        $income->update(['is_archived' => true]);
+
+        $reversal = DB::transaction(
+            fn () => app(LedgerService::class)->reverse($original, CarbonImmutable::parse('2026-07-05'), 'Reversal despite archive')
+        );
+
+        $this->assertSame(EntryRole::Reversal, $reversal->entry_role);
+        $this->assertSame($original->id, $reversal->reverses_entry_id);
+        $this->assertCount(2, $reversal->lines);
+        $this->assertSame(0, $reversal->lines->firstWhere('account_id', $bank->id)->debit);
+        $this->assertSame(10000, $reversal->lines->firstWhere('account_id', $bank->id)->credit);
+        $this->assertSame(2, JournalEntry::query()->count());
         $this->assertLedgerBalances();
     }
 
