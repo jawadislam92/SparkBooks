@@ -250,6 +250,13 @@ export default function Index({ bankAccounts }: IndexPageProps) {
                     <Button
                         type="button"
                         variant="quiet"
+                        onClick={() => router.visit(route('other-receipts.new'))}
+                    >
+                        Record receipt
+                    </Button>
+                    <Button
+                        type="button"
+                        variant="quiet"
                         onClick={() => router.visit(route('transfers.new'))}
                     >
                         Transfer

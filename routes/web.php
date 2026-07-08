@@ -8,6 +8,7 @@ use App\Http\Controllers\HealthController;
 use App\Http\Controllers\ItemController;
 use App\Http\Controllers\ManualJournalController;
 use App\Http\Controllers\OnboardingController;
+use App\Http\Controllers\OtherReceiptController;
 use App\Http\Controllers\PeriodLockController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\Reports\TrialBalanceController;
@@ -107,6 +108,11 @@ Route::middleware(['auth', 'verified', 'company', 'can:bank_accounts.manage'])->
 Route::middleware(['auth', 'verified', 'company', 'can:transfers.create'])->group(function () {
     Route::get('/transfers/new', [TransferController::class, 'create'])->name('transfers.new');
     Route::post('/transfers', [TransferController::class, 'store'])->name('transfers.store');
+});
+
+Route::middleware(['auth', 'verified', 'company', 'can:other_receipts.create'])->group(function () {
+    Route::get('/other-receipts/new', [OtherReceiptController::class, 'create'])->name('other-receipts.new');
+    Route::post('/other-receipts', [OtherReceiptController::class, 'store'])->name('other-receipts.store');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:tax_rates.manage'])->group(function () {
