@@ -207,27 +207,46 @@ function Pagination({ journals }: { journals: Paginated<ManualJournalData> }) {
             aria-label="Journal entries pages"
             className="mt-4 flex items-center justify-center gap-1"
         >
-            {journals.links.map((link, index) => (
-                <Link
-                    key={`${link.label}-${index}`}
-                    href={link.url ?? '#'}
-                    preserveScroll
-                    aria-current={link.active ? 'page' : undefined}
-                    aria-disabled={link.url === null}
-                    className={
-                        'flex h-8 min-w-8 items-center justify-center rounded-md px-2 text-sm transition duration-[120ms] ease-out motion-reduce:transition-none ' +
-                        (link.active
-                            ? 'bg-ink text-white'
-                            : link.url === null
-                              ? 'pointer-events-none text-ink-700/40'
-                              : 'text-ink-700 hover:bg-paper')
-                    }
-                    // Laravel's own paginator supplies these labels ("&laquo;
-                    // Previous", page numbers, "Next &raquo;") server-side —
-                    // never user input — so rendering the HTML entity is safe.
-                    dangerouslySetInnerHTML={{ __html: link.label }}
-                />
-            ))}
+            {journals.links.map((link, index) => {
+                const baseClasses =
+                    'flex h-8 min-w-8 items-center justify-center rounded-md px-2 text-sm transition duration-[120ms] ease-out motion-reduce:transition-none ';
+
+                // Laravel's own paginator supplies these labels ("&laquo;
+                // Previous", page numbers, "Next &raquo;") server-side —
+                // never user input — so rendering the HTML entity is safe.
+                const label = { __html: link.label };
+
+                // A disabled link (first/last page's Prev/Next) has no url.
+                // Render it as an inert <span>, not a focusable <Link> — so a
+                // keyboard user can't Tab to it and Enter-activate a visit to
+                // "#". pointer-events:none alone only blocks the mouse.
+                if (link.url === null) {
+                    return (
+                        <span
+                            key={`${link.label}-${index}`}
+                            aria-disabled="true"
+                            className={baseClasses + 'text-ink-700/40'}
+                            dangerouslySetInnerHTML={label}
+                        />
+                    );
+                }
+
+                return (
+                    <Link
+                        key={`${link.label}-${index}`}
+                        href={link.url}
+                        preserveScroll
+                        aria-current={link.active ? 'page' : undefined}
+                        className={
+                            baseClasses +
+                            (link.active
+                                ? 'bg-ink text-white'
+                                : 'text-ink-700 hover:bg-paper')
+                        }
+                        dangerouslySetInnerHTML={label}
+                    />
+                );
+            })}
         </nav>
     );
 }

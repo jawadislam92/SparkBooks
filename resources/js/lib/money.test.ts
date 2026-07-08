@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { formatMoney, parseMoneyInput } from './money';
 
-// Exact expected strings pinned from the actual runtime output of
-// `Intl.NumberFormat('en-PK', { style: 'currency', currency })` — captured via:
-//   node -e "console.log(new Intl.NumberFormat('en-PK',{style:'currency',currency:'PKR'}).format(1500.50))"
-// Do NOT hand-guess these; re-capture if the Node/ICU version ever changes.
+// Exact expected strings for the output of `formatMoney`, which pins the
+// Intl.NumberFormat to exactly 2 fraction digits (minimum + maximum). Because
+// the digit count is forced in code (not inherited from per-ICU CLDR
+// defaults), these strings are stable across Node/ICU versions — the earlier
+// fragility ("re-capture if the ICU version changes") is gone: the ledger
+// stores 2-decimal minor units, so display is deliberately 2 digits always.
 //
 // IMPORTANT: PKR's Intl output separates "Rs" from the digits with a
 // NON-BREAKING SPACE (U+00A0), not a regular space — confirmed by inspecting
@@ -31,6 +33,27 @@ describe('formatMoney', () => {
     ])('formats %i minor units of USD as %s', (minor, expected) => {
         expect(formatMoney(minor, 'USD')).toBe(expected);
     });
+
+    // Determinism guard: the fraction part must ALWAYS be exactly 2 digits,
+    // regardless of the viewer's ICU/CLDR currency defaults. This is what
+    // stops paisa/cents being silently rounded off the display. The regex
+    // asserts a '.' followed by exactly two digits, then a non-digit or
+    // end-of-string (so a 3rd fraction digit would fail).
+    const TWO_FRACTION_DIGITS = /\.\d{2}(\D|$)/;
+
+    it.each([
+        [150000, 'PKR', '.00'],
+        [150050, 'PKR', '.50'],
+        [150000, 'USD', '.00'],
+        [150050, 'USD', '.50'],
+    ])(
+        'renders %i %s with exactly two fraction digits (contains %s)',
+        (minor, currency, ending) => {
+            const output = formatMoney(minor, currency);
+            expect(output).toContain(ending);
+            expect(output).toMatch(TWO_FRACTION_DIGITS);
+        },
+    );
 });
 
 describe('parseMoneyInput', () => {

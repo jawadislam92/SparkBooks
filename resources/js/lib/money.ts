@@ -18,7 +18,19 @@ function getFormatter(currency: string): Intl.NumberFormat {
     let formatter = formatterCache.get(currency);
 
     if (!formatter) {
-        formatter = new Intl.NumberFormat(LOCALE, { style: 'currency', currency });
+        // Fraction digits are pinned to exactly 2, deliberately: the ledger
+        // stores 2-decimal minor units, so display must always show both.
+        // Without this, Intl.NumberFormat inherits per-currency CLDR defaults
+        // that vary by the viewer's ICU version (e.g. some ICU data renders
+        // PKR with 0 fraction digits), which would silently drop paisa/cents
+        // off the DISPLAY while the stored value stayed exact. Forcing 2
+        // digits makes every money value render identically across browsers.
+        formatter = new Intl.NumberFormat(LOCALE, {
+            style: 'currency',
+            currency,
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+        });
         formatterCache.set(currency, formatter);
     }
 
