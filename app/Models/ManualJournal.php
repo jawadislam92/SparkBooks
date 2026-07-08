@@ -6,6 +6,7 @@ use App\Enums\EntryRole;
 use App\Models\Concerns\BelongsToCompany;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class ManualJournal extends Model
@@ -31,5 +32,11 @@ class ManualJournal extends Model
         return $this->hasOne(JournalEntry::class, 'source_id', 'id')
             ->where('source_type', 'manual_journal')
             ->where('entry_role', EntryRole::Primary->value);
+    }
+
+    /** The user who posted this manual journal — nullable, matching the column. */
+    public function creator(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'created_by');
     }
 }

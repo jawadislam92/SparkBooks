@@ -20,10 +20,31 @@ class ManualJournalController extends Controller
     public function index(): Response
     {
         $journals = ManualJournal::query()
-            ->with('journalEntry.lines')
+            ->with(['journalEntry.lines.account', 'creator'])
             ->orderByDesc('entry_date')
             ->orderByDesc('id')
-            ->paginate(20);
+            ->paginate(20)
+            ->through(fn (ManualJournal $journal) => [
+                'id' => $journal->id,
+                'entry_date' => $journal->entry_date->toDateString(),
+                'memo' => $journal->memo,
+                'status' => $journal->status,
+                'created_by' => $journal->creator?->name,
+                'journal_entry' => $journal->journalEntry === null ? null : [
+                    'id' => $journal->journalEntry->id,
+                    'lines' => $journal->journalEntry->lines->map(fn ($line) => [
+                        'id' => $line->id,
+                        'debit' => $line->debit,
+                        'credit' => $line->credit,
+                        'memo' => $line->memo,
+                        'account' => [
+                            'id' => $line->account->id,
+                            'code' => $line->account->code,
+                            'name' => $line->account->name,
+                        ],
+                    ])->values(),
+                ],
+            ]);
 
         return Inertia::render('Journal/Index', [
             'journals' => $journals,
