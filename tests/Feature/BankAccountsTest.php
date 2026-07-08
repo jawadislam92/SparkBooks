@@ -13,6 +13,7 @@ use App\Models\User;
 use App\Services\BankAccountService;
 use App\Support\CompanyContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Inertia\Testing\AssertableInertia;
 use Tests\Support\AssertsLedgerBalanced;
@@ -127,6 +128,97 @@ class BankAccountsTest extends TestCase
         // Seed already plants 1000/1010 — the service must not collide with those.
         $this->assertNotContains('1000', $codes);
         $this->assertNotContains('1010', $codes);
+    }
+
+    // ---------------------------------------------------------------
+    // Concurrency: per-company code allocation is lock-serialized
+    // ---------------------------------------------------------------
+
+    public function test_code_allocation_reads_the_band_with_a_locking_select(): void
+    {
+        // Primary concurrency guard: nextAccountCode() reads the company's
+        // 1000–1099 band with lockForUpdate() so two simultaneous same-company
+        // creates can't pick the same code (the second blocks until the first
+        // commits, then reads the new code). A genuine two-connection race is
+        // deliberately NOT simulated here — under RefreshDatabase's outer
+        // transaction it deadlocks/times out (the reason IdempotencyTest needs
+        // its elaborate separate-connection setup), which the task brief flags
+        // as expensive/flaky. Instead assert the SELECT is actually a
+        // FOR UPDATE, which is what makes the lock hold.
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+
+        app(CompanyContext::class)->set($company);
+        DB::enableQueryLog();
+        $this->createBankAccount($company);
+        $queries = collect(DB::getQueryLog())->pluck('query');
+        DB::disableQueryLog();
+
+        $this->assertTrue(
+            $queries->contains(fn (string $q) => str_contains(strtolower($q), 'from `accounts`')
+                && str_contains(strtolower($q), 'for update')),
+            'nextAccountCode() must read the accounts band with a locking (FOR UPDATE) select.'
+        );
+    }
+
+    public function test_two_creates_in_one_transaction_allocate_distinct_codes(): void
+    {
+        // Proxy for the serialized path: back-to-back allocations (here within
+        // one outer transaction) must never reuse a code — the second read
+        // sees the first's freshly inserted account and steps past it.
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+
+        [$firstCode, $secondCode] = app(CompanyContext::class)->runFor($company, fn () => DB::transaction(function () {
+            $service = app(BankAccountService::class);
+            $first = $service->create(['name' => 'A', 'type' => 'bank', 'currency_code' => 'PKR']);
+            $second = $service->create(['name' => 'B', 'type' => 'bank', 'currency_code' => 'PKR']);
+
+            return [$first->ledgerAccount->code, $second->ledgerAccount->code];
+        }));
+
+        $this->assertNotSame(
+            $firstCode,
+            $secondCode,
+            'Two sequential allocations must never reuse the same code.'
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Band exhaustion → friendly validation error (not a 500)
+    // ---------------------------------------------------------------
+
+    public function test_exhausting_the_code_band_returns_a_friendly_validation_error(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+
+        // Fill every code in the 1000–1099 band so there is no free code left.
+        app(CompanyContext::class)->set($company);
+        for ($code = 1000; $code <= 1099; $code++) {
+            Account::factory()->create([
+                'company_id' => $company->id,
+                'code' => (string) $code,
+                'type' => AccountType::Asset->value,
+                'subtype' => AccountSubtype::CurrentAsset->value,
+            ]);
+        }
+
+        $response = $this->post('/bank-accounts', [
+            'name' => 'One Too Many',
+            'type' => 'bank',
+            'currency_code' => 'PKR',
+        ]);
+
+        // A friendly 422 (redirect-back with a session error), not a 500.
+        $response->assertSessionHasErrors('name');
+        $this->assertStringContainsString(
+            'maximum number of bank and cash accounts',
+            (string) session('errors')->first('name')
+        );
+
+        // And nothing partial was persisted.
+        $this->assertSame(0, BankAccount::query()->count());
     }
 
     // ---------------------------------------------------------------
