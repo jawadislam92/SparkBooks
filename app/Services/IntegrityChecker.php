@@ -7,14 +7,17 @@ use App\Models\Company;
 use App\Models\JournalEntry;
 use App\Models\JournalLine;
 use App\Models\ManualJournal;
+use App\Models\OpeningBalanceRun;
+use App\Models\OtherReceipt;
+use App\Models\Transfer;
 use App\Support\CompanyContext;
 use Illuminate\Support\Facades\DB;
 
 /**
  * §9 correctness watchdog: verifies one company's ledger is internally
  * consistent. Every check runs inside a single CompanyContext::runFor +
- * DB::transaction so all four checks see one consistent snapshot of the
- * company's data, rather than four separate reads that could race against
+ * DB::transaction so all checks see one consistent snapshot of the
+ * company's data, rather than separate reads that could race against
  * concurrent posting.
  *
  * This class must never pass vacuously: an empty findings array means the
@@ -24,6 +27,24 @@ use Illuminate\Support\Facades\DB;
  */
 class IntegrityChecker
 {
+    /**
+     * Every ledger source_type this checker knows how to verify, mapped to
+     * the model whose table holds the source document. Reversal entries are
+     * NOT a source_type of their own — LedgerService::reverse() stamps a
+     * reversal with the SAME source_type/source_id as the entry it reverses
+     * (spec §4 iron rule), so they are covered by these same lookups without
+     * any special-casing: the source row they point at is the original
+     * document, which still exists.
+     *
+     * @var array<string, class-string<ManualJournal|Transfer|OtherReceipt|OpeningBalanceRun>>
+     */
+    private const SOURCE_TABLES = [
+        'manual_journal' => ManualJournal::class,
+        'transfer' => Transfer::class,
+        'other_receipt' => OtherReceipt::class,
+        'opening_balance_run' => OpeningBalanceRun::class,
+    ];
+
     /** @return list<array{check:string, detail:string}> findings (empty = clean) */
     public function checkCompany(Company $company): array
     {
@@ -65,12 +86,30 @@ class IntegrityChecker
                     $findings[] = ['check' => 'control_contact', 'detail' => "{$missing} control-account line(s) missing contact"];
                 }
 
-                // (e-lite) every manual_journal-sourced ledger entry must
-                // reference a manual journal document that still exists.
-                $orphaned = JournalEntry::query()->where('source_type', 'manual_journal')
-                    ->whereNotIn('source_id', ManualJournal::query()->pluck('id'))->count();
-                if ($orphaned > 0) {
-                    $findings[] = ['check' => 'orphan_entries', 'detail' => "{$orphaned} ledger entr(ies) reference missing manual journals"];
+                // (e) every ledger entry's source document must still exist.
+                // Source-type-aware: for each source_type actually present on
+                // this company's entries, look it up against the table
+                // SOURCE_TABLES says it lives in. A source_type that ISN'T in
+                // that map is not silently skipped — it is its own finding
+                // (unrecognized_source), so a future source type someone
+                // forgot to register here fails loud instead of quietly
+                // passing every check.
+                $sourceTypesPresent = JournalEntry::query()->distinct()->pluck('source_type');
+
+                foreach ($sourceTypesPresent as $sourceType) {
+                    if (! array_key_exists($sourceType, self::SOURCE_TABLES)) {
+                        $count = JournalEntry::query()->where('source_type', $sourceType)->count();
+                        $findings[] = ['check' => 'unrecognized_source', 'detail' => "{$count} ledger entr(ies) reference unrecognized source_type '{$sourceType}' (not registered in IntegrityChecker::SOURCE_TABLES)"];
+
+                        continue;
+                    }
+
+                    $model = self::SOURCE_TABLES[$sourceType];
+                    $orphaned = JournalEntry::query()->where('source_type', $sourceType)
+                        ->whereNotIn('source_id', $model::query()->pluck('id'))->count();
+                    if ($orphaned > 0) {
+                        $findings[] = ['check' => 'orphan_entries', 'detail' => "{$orphaned} ledger entr(ies) reference missing {$sourceType}(s)"];
+                    }
                 }
 
                 return $findings;
