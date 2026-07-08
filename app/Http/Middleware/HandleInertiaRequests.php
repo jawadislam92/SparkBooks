@@ -2,6 +2,7 @@
 
 namespace App\Http\Middleware;
 
+use App\Support\CompanyContext;
 use Illuminate\Http\Request;
 use Inertia\Middleware;
 
@@ -31,9 +32,40 @@ class HandleInertiaRequests extends Middleware
     {
         return [
             ...parent::share($request),
+            // These are closures on purpose: SetCompanyContext runs later in the
+            // `web` middleware group than this middleware does, and Inertia doesn't
+            // invoke shared-prop closures until it serializes the response — by
+            // which point SetCompanyContext (and any current-company repair it does)
+            // has already run. Eagerly reading $request->user()->currentCompany here
+            // would race that repair and could share a stale/wrong company.
             'auth' => [
-                'user' => $request->user(),
+                'user' => fn () => $request->user(),
             ],
+            'companies' => fn () => $request->user()
+                ? $request->user()->companies()->get()
+                    ->map(fn ($company) => [
+                        'id' => $company->id,
+                        'name' => $company->name,
+                        'role' => $company->pivot->role,
+                    ])
+                    ->values()
+                    ->all()
+                : [],
+            'currentCompany' => function () {
+                $context = app(CompanyContext::class);
+
+                if (! $context->has()) {
+                    return null;
+                }
+
+                $company = $context->get();
+
+                return [
+                    'id' => $company->id,
+                    'name' => $company->name,
+                    'base_currency' => $company->base_currency,
+                ];
+            },
         ];
     }
 }

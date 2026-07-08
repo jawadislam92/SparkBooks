@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Enums\Role;
 use App\Exceptions\MissingCompanyContext;
+use App\Models\ActivityLog;
 use App\Models\Company;
 use App\Models\User;
 use App\Support\CompanyContext;
@@ -65,6 +66,34 @@ class CompanyContextTest extends TestCase
         $this->actingAs($user)->post(route('company.switch'), ['company_id' => $b->id])
             ->assertRedirect();
         $this->assertSame($b->id, $user->fresh()->current_company_id);
+    }
+
+    public function test_switch_writes_exactly_one_audit_row_in_the_target_company(): void
+    {
+        $user = User::factory()->create();
+        [$a, $b] = Company::factory()->count(2)->create();
+        $user->companies()->attach($a, ['role' => Role::Owner->value]);
+        $user->companies()->attach($b, ['role' => Role::Staff->value]);
+        $user->forceFill(['current_company_id' => $a->id])->save();
+
+        $this->actingAs($user)->post(route('company.switch'), ['company_id' => $b->id])
+            ->assertRedirect();
+
+        $ctx = app(CompanyContext::class);
+
+        // Visible from the TARGET company's context (b) — exactly one row.
+        $ctx->set($b);
+        $rows = ActivityLog::query()->where('action', 'company.switched')->get();
+        $this->assertCount(1, $rows);
+        $row = $rows->first();
+        $this->assertSame($b->id, $row->company_id);
+        $this->assertSame(['company_id' => $a->id], $row->before);
+        $this->assertSame(['company_id' => $b->id], $row->after);
+
+        // Not visible from the OLD company's context (a) — the tenant scope proves it
+        // was logged in b, not a.
+        $ctx->set($a);
+        $this->assertSame(0, ActivityLog::query()->where('action', 'company.switched')->count());
     }
 
     public function test_middleware_repairs_stale_current_company(): void

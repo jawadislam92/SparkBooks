@@ -1,7 +1,7 @@
 import InputError from '@/Components/InputError';
 import InputLabel from '@/Components/InputLabel';
-import PrimaryButton from '@/Components/PrimaryButton';
 import TextInput from '@/Components/TextInput';
+import Button from '@/Components/ui/Button';
 import GuestLayout from '@/Layouts/GuestLayout';
 import { Head, useForm } from '@inertiajs/react';
 import { FormEventHandler } from 'react';
@@ -38,10 +38,10 @@ export default function CreateCompany({ currencies }: { currencies: string[] }) 
         <GuestLayout>
             <Head title="Create your company" />
 
-            <h1 className="text-lg font-medium text-gray-900">
+            <h1 className="font-display text-lg font-semibold text-ink">
                 Set up your company
             </h1>
-            <p className="mt-1 text-sm text-gray-600">
+            <p className="mt-1 text-sm text-ink-700">
                 Tell us a little about your business to get started.
             </p>
 
@@ -53,7 +53,7 @@ export default function CreateCompany({ currencies }: { currencies: string[] }) 
                         id="name"
                         name="name"
                         value={data.name}
-                        className="mt-1 block w-full"
+                        className="mt-1 block w-full focus:border-spark focus:ring-spark"
                         isFocused={true}
                         onChange={(e) => setData('name', e.target.value)}
                         required
@@ -69,7 +69,7 @@ export default function CreateCompany({ currencies }: { currencies: string[] }) 
                         id="base_currency"
                         name="base_currency"
                         value={data.base_currency}
-                        className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
+                        className="mt-1 block w-full rounded-md border-rule shadow-sm focus:border-spark focus:ring-spark"
                         onChange={(e) => setData('base_currency', e.target.value)}
                         required
                     >
@@ -96,7 +96,7 @@ export default function CreateCompany({ currencies }: { currencies: string[] }) 
                         id="fiscal_year_start_month"
                         name="fiscal_year_start_month"
                         value={data.fiscal_year_start_month}
-                        className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
+                        className="mt-1 block w-full rounded-md border-rule shadow-sm focus:border-spark focus:ring-spark"
                         onChange={(e) =>
                             setData(
                                 'fiscal_year_start_month',
@@ -119,9 +119,7 @@ export default function CreateCompany({ currencies }: { currencies: string[] }) 
                 </div>
 
                 <div className="mt-6 flex items-center justify-end">
-                    <PrimaryButton disabled={processing}>
-                        Create company
-                    </PrimaryButton>
+                    <Button disabled={processing}>Create company</Button>
                 </div>
             </form>
         </GuestLayout>

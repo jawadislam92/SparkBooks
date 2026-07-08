@@ -23,6 +23,26 @@ class IdempotencyService
      * was constructed. execute() must not observe a HIGHER level than this,
      * otherwise it is running inside someone else's open transaction and its
      * rollback semantics would silently degrade to a savepoint.
+     *
+     * WHY the baseline is captured here, in the constructor, rather than
+     * lazily on first execute() call: this class is bound `scoped()`, so the
+     * container constructs it (running this constructor) the FIRST time
+     * anything resolves it during the current request/job lifecycle, then
+     * reuses that same instance for the rest of it. If that first resolution
+     * happened to occur while a transaction was already open — e.g. a
+     * controller opened DB::transaction() before anything had touched this
+     * service — the baseline would be captured at the ALREADY-raised level.
+     * A same-level execute() call would then look "at baseline" to the guard
+     * below and slip through uncaught, defeating the guard entirely.
+     *
+     * To guarantee the baseline is always the true, pre-transaction request
+     * level, App\Http\Middleware\SetCompanyContext eagerly resolves this
+     * service (`app(IdempotencyService::class)`) immediately after the
+     * company context is set — i.e. before any controller or route handler
+     * has had a chance to open a transaction. Do NOT remove that eager
+     * resolution: without it, the very first transaction opened in a
+     * request can raise the baseline before construction and turn the check
+     * below into a no-op.
      */
     private readonly int $baselineTransactionLevel;
 
