@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\AccountController;
+use App\Http\Controllers\BankAccountController;
 use App\Http\Controllers\CompanySwitchController;
 use App\Http\Controllers\ContactController;
 use App\Http\Controllers\HealthController;
@@ -92,6 +93,14 @@ Route::middleware(['auth', 'verified', 'company', 'can:items.manage'])->group(fu
     Route::patch('/items/{item}', [ItemController::class, 'update'])->name('items.update');
     Route::post('/items/{item}/archive', [ItemController::class, 'archive'])->name('items.archive');
     Route::post('/items/{item}/unarchive', [ItemController::class, 'unarchive'])->name('items.unarchive');
+});
+
+Route::middleware(['auth', 'verified', 'company', 'can:bank_accounts.manage'])->group(function () {
+    Route::get('/bank-accounts', [BankAccountController::class, 'index'])->name('bank-accounts.index');
+    Route::post('/bank-accounts', [BankAccountController::class, 'store'])->name('bank-accounts.store');
+    Route::patch('/bank-accounts/{bankAccount}', [BankAccountController::class, 'update'])->name('bank-accounts.update');
+    Route::post('/bank-accounts/{bankAccount}/archive', [BankAccountController::class, 'archive'])->name('bank-accounts.archive');
+    Route::post('/bank-accounts/{bankAccount}/unarchive', [BankAccountController::class, 'unarchive'])->name('bank-accounts.unarchive');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:tax_rates.manage'])->group(function () {

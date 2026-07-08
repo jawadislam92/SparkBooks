@@ -28,6 +28,7 @@ function navGroups(): NavGroup[] {
                 { label: 'Journal entries', href: '/journal-entries' },
                 { label: 'Contacts', href: '/contacts' },
                 { label: 'Items', href: '/items' },
+                { label: 'Banking', href: '/bank-accounts' },
             ],
         },
         {
