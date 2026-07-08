@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\AccountController;
 use App\Http\Controllers\CompanySwitchController;
+use App\Http\Controllers\HealthController;
 use App\Http\Controllers\ManualJournalController;
 use App\Http\Controllers\OnboardingController;
 use App\Http\Controllers\PeriodLockController;
@@ -57,6 +58,11 @@ Route::middleware(['auth', 'verified', 'company', 'can:reports.view'])->group(fu
     Route::get('/reports/trial-balance/export.csv', [TrialBalanceController::class, 'exportCsv'])
         ->middleware('can:exports.run')
         ->name('reports.trial-balance.export');
+});
+
+Route::middleware(['auth', 'verified', 'company', 'can:audit.view'])->group(function () {
+    Route::get('/settings/health', [HealthController::class, 'show'])->name('settings.health');
+    Route::post('/settings/health/run', [HealthController::class, 'run'])->name('settings.health.run');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:accounts.manage'])->group(function () {

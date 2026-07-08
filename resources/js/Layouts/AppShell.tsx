@@ -36,7 +36,10 @@ function navGroups(): NavGroup[] {
         },
         {
             label: 'Settings',
-            items: [{ label: 'Books', href: '/settings/books' }],
+            items: [
+                { label: 'Books', href: '/settings/books' },
+                { label: 'Health', href: '/settings/health' },
+            ],
         },
     ];
 }
