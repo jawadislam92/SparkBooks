@@ -2,6 +2,8 @@
 
 namespace Tests\Feature;
 
+use App\Enums\Role;
+use App\Models\Company;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
@@ -95,5 +97,26 @@ class ProfileTest extends TestCase
             ->assertRedirect('/profile');
 
         $this->assertNotNull($user->fresh());
+    }
+
+    public function test_user_with_a_company_membership_cannot_delete_their_account_yet(): void
+    {
+        $user = User::factory()->create();
+        $company = Company::factory()->create();
+        $user->companies()->attach($company, ['role' => Role::Owner->value]);
+
+        $response = $this
+            ->actingAs($user)
+            ->from('/profile')
+            ->delete('/profile', [
+                'password' => 'password',
+            ]);
+
+        $response
+            ->assertSessionHasErrors('password')
+            ->assertRedirect('/profile');
+
+        $this->assertNotNull($user->fresh());
+        $this->assertAuthenticatedAs($user);
     }
 }

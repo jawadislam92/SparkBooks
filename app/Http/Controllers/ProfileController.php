@@ -8,6 +8,7 @@ use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Redirect;
+use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
 use Inertia\Response;
 
@@ -50,6 +51,12 @@ class ProfileController extends Controller
         ]);
 
         $user = $request->user();
+
+        if ($user->companies()->exists()) {
+            throw ValidationException::withMessages([
+                'password' => 'Your account belongs to one or more companies. Company ownership transfer and deletion are coming in a later release — contact support if you need this now.',
+            ]);
+        }
 
         Auth::logout();
 
