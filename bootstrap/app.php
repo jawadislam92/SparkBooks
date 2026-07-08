@@ -18,6 +18,10 @@ return Application::configure(basePath: dirname(__DIR__))
             \App\Http\Middleware\SetCompanyContext::class,
         ]);
 
+        $middleware->alias([
+            'company' => \App\Http\Middleware\RequireCompany::class,
+        ]);
+
         //
     })
     ->withExceptions(function (Exceptions $exceptions): void {

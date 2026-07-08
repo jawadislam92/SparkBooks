@@ -83,7 +83,10 @@ class CompanyContextTest extends TestCase
     {
         $user = User::factory()->create();
 
-        $this->actingAs($user)->get('/dashboard')->assertOk();
+        // Since Task 8, a user with no company is redirected to onboarding
+        // (RequireCompany) rather than reaching the dashboard. SetCompanyContext
+        // still runs beforehand and must not crash for a user with no companies.
+        $this->actingAs($user)->get('/dashboard')->assertRedirect(route('onboarding.company'));
         $this->assertNull($user->fresh()->current_company_id);
         $this->assertFalse(app(CompanyContext::class)->has());
     }
