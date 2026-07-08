@@ -38,6 +38,7 @@ function navGroups(): NavGroup[] {
         {
             label: 'Settings',
             items: [
+                { label: 'Tax rates', href: '/tax-rates' },
                 { label: 'Books', href: '/settings/books' },
                 { label: 'Health', href: '/settings/health' },
             ],

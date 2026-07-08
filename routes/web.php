@@ -9,6 +9,7 @@ use App\Http\Controllers\OnboardingController;
 use App\Http\Controllers\PeriodLockController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\Reports\TrialBalanceController;
+use App\Http\Controllers\TaxRateController;
 use Illuminate\Foundation\Application;
 use Illuminate\Support\Facades\Route;
 use Inertia\Inertia;
@@ -82,6 +83,14 @@ Route::middleware(['auth', 'verified', 'company', 'can:contacts.manage'])->group
     Route::post('/contacts/{contact}/archive', [ContactController::class, 'archive'])->name('contacts.archive');
     Route::post('/contacts/{contact}/unarchive', [ContactController::class, 'unarchive'])->name('contacts.unarchive');
     Route::get('/contacts/{contact}', [ContactController::class, 'show'])->name('contacts.show');
+});
+
+Route::middleware(['auth', 'verified', 'company', 'can:tax_rates.manage'])->group(function () {
+    Route::get('/tax-rates', [TaxRateController::class, 'index'])->name('tax-rates.index');
+    Route::post('/tax-rates', [TaxRateController::class, 'store'])->name('tax-rates.store');
+    Route::patch('/tax-rates/{taxRate}', [TaxRateController::class, 'update'])->name('tax-rates.update');
+    Route::post('/tax-rates/{taxRate}/archive', [TaxRateController::class, 'archive'])->name('tax-rates.archive');
+    Route::post('/tax-rates/{taxRate}/unarchive', [TaxRateController::class, 'unarchive'])->name('tax-rates.unarchive');
 });
 
 require __DIR__.'/auth.php';
