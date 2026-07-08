@@ -202,6 +202,38 @@ class AccountsTest extends TestCase
         $account->update(['subtype' => AccountSubtype::Bank->value]);
     }
 
+    public function test_system_account_cannot_be_demoted_and_retyped_in_one_call(): void
+    {
+        $company = Company::factory()->create();
+        $this->seedInto($company);
+        app(CompanyContext::class)->set($company);
+
+        $account = Account::query()->where('code', '1100')->sole();
+
+        try {
+            $account->update(['is_system' => false, 'code' => '9999']);
+            $this->fail('Expected LogicException when demoting and retyping a system account.');
+        } catch (LogicException) {
+            // expected
+        }
+
+        $fresh = Account::query()->where('code', '1100')->sole();
+        $this->assertSame('1100', $fresh->code);
+        $this->assertTrue($fresh->is_system);
+    }
+
+    public function test_system_account_cannot_change_is_system(): void
+    {
+        $company = Company::factory()->create();
+        $this->seedInto($company);
+        app(CompanyContext::class)->set($company);
+
+        $account = Account::query()->where('code', '1000')->sole();
+
+        $this->expectException(LogicException::class);
+        $account->update(['is_system' => false]);
+    }
+
     public function test_system_account_can_be_renamed(): void
     {
         $company = Company::factory()->create();
