@@ -2,14 +2,17 @@
 
 namespace Tests\Feature;
 
+use App\Enums\Role;
 use App\Models\Company;
 use App\Models\IdempotencyKey;
+use App\Models\User;
 use App\Support\CompanyContext;
 use App\Support\IdempotencyService;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use LogicException;
@@ -235,5 +238,72 @@ class IdempotencyTest extends TestCase
         $this->assertSame(1, $falseRuns);
         $this->assertFalse($firstFalse);
         $this->assertFalse($secondFalse);
+    }
+
+    /**
+     * Characterizes the defect this task closes. IdempotencyService is bound
+     * scoped(), so its baseline is captured whenever the container FIRST
+     * constructs it during the request. If that first resolution happens to
+     * occur while a transaction is already open — because nothing forced
+     * earlier resolution — the baseline is captured at the already-raised
+     * level, and a same-level execute() call looks "at baseline" to the
+     * guard and slips through uncaught. This is exactly the hole that makes
+     * SetCompanyContext's eager, pre-transaction resolution necessary (see
+     * the next test, and the constructor comment on IdempotencyService).
+     */
+    public function test_lazy_first_resolution_inside_an_open_transaction_defeats_the_guard(): void
+    {
+        app(CompanyContext::class)->set(Company::factory()->create());
+
+        $ranOperation = false;
+        $result = DB::transaction(function () use (&$ranOperation) {
+            // First-ever resolution of the scoped instance happens HERE,
+            // already inside a transaction — the bug scenario.
+            $service = app(IdempotencyService::class);
+
+            return $service->execute((string) Str::uuid(), 'demo', function () use (&$ranOperation) {
+                $ranOperation = true;
+
+                return ['ok' => true];
+            });
+        });
+
+        $this->assertTrue($ranOperation, 'Documents the hole: lazy in-transaction resolution defeats the baseline guard, so the operation runs uncaught.');
+        $this->assertSame(['ok' => true], $result);
+    }
+
+    /**
+     * Proves the fix: SetCompanyContext eagerly resolves IdempotencyService
+     * immediately after setting the company context, i.e. before any route
+     * handler gets a chance to open a transaction. Because of that, a
+     * handler which opens DB::transaction() and only THEN resolves/uses the
+     * (already-constructed) service correctly hits the guard and throws,
+     * instead of silently defeating it as in the previous test.
+     */
+    public function test_middleware_eager_resolution_makes_execute_inside_request_transaction_throw(): void
+    {
+        $user = User::factory()->create();
+        $company = Company::factory()->create();
+        $user->companies()->attach($company, ['role' => Role::Owner->value]);
+        $user->forceFill(['current_company_id' => $company->id])->save();
+
+        Route::middleware('web')->get('/__test/idempotency-guard-probe', function () {
+            return DB::transaction(function () {
+                $service = app(IdempotencyService::class);
+                $service->execute((string) Str::uuid(), 'demo', fn () => ['probed' => true]);
+
+                return response()->json(['probed' => true]);
+            });
+        });
+
+        $this->actingAs($user);
+        $this->withoutExceptionHandling();
+
+        $this->expectException(LogicException::class);
+        $this->expectExceptionMessage(
+            'IdempotencyService::execute must not be called inside an open transaction; it owns the transaction boundary.'
+        );
+
+        $this->get('/__test/idempotency-guard-probe');
     }
 }

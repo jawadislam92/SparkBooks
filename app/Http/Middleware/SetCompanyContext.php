@@ -3,6 +3,7 @@
 namespace App\Http\Middleware;
 
 use App\Support\CompanyContext;
+use App\Support\IdempotencyService;
 use Closure;
 use Illuminate\Http\Request;
 
@@ -23,6 +24,14 @@ class SetCompanyContext
             }
             if ($company) {
                 $this->context->set($company);
+
+                // Force the scoped IdempotencyService singleton to be built now,
+                // at the true pre-transaction request level, instead of lazily
+                // the first time a controller happens to resolve it — possibly
+                // from inside a transaction it already opened, which would
+                // capture too high a baseline and defeat its guard. See the
+                // constructor comment on IdempotencyService for the full story.
+                app(IdempotencyService::class);
             }
         }
 
