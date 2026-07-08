@@ -77,3 +77,21 @@ export function parseMoneyInput(text: string): number | null {
 
     return wholeUnits * 100 + fractionUnits;
 }
+
+/**
+ * The inverse of parseMoneyInput: an integer minor-unit amount back into the
+ * plain decimal string an amount `<input>` expects (e.g. 150050 -> "1500.50").
+ * Used to populate the opening-balances form fields from server-parsed CSV
+ * rows (which arrive as minor-unit integers, per the no-float money rule) so
+ * the same text inputs and parseMoneyInput round-trip on submit stay in play
+ * — never a display-only float division that could round differently than
+ * the integer math everywhere else on this path.
+ */
+export function minorToDecimalString(minor: number): string {
+    const sign = minor < 0 ? '-' : '';
+    const abs = Math.abs(minor);
+    const whole = Math.trunc(abs / 100);
+    const fraction = abs % 100;
+
+    return `${sign}${whole}.${String(fraction).padStart(2, '0')}`;
+}

@@ -3,10 +3,10 @@ import Field from '@/Components/ui/Field';
 import MoneyText from '@/Components/ui/MoneyText';
 import Sheet from '@/Components/ui/Sheet';
 import AppShell from '@/Layouts/AppShell';
-import { parseMoneyInput } from '@/lib/money';
+import { minorToDecimalString, parseMoneyInput } from '@/lib/money';
 import { PageProps } from '@/types';
 import { Head, useForm, usePage } from '@inertiajs/react';
-import { FormEventHandler, useState } from 'react';
+import { FormEventHandler, useRef, useState } from 'react';
 
 interface BankAccountOption {
     id: number;
@@ -64,6 +64,102 @@ interface ContactLineRow {
 
 function newKey(): string {
     return crypto.randomUUID();
+}
+
+interface CsvRowError {
+    line: number;
+    message: string;
+}
+
+interface ParsedBankLine {
+    bank_account_id: number;
+    amount: number;
+}
+
+interface ParsedContactLine {
+    contact_id: number;
+    reference: string | null;
+    original_date: string;
+    due_date: string;
+    amount: number;
+}
+
+/**
+ * Download-template link + "Upload CSV" control for one opening-balances CSV
+ * template (spec §17.7). Uploads go straight to OpeningCsvController@import,
+ * which validates and parses but never posts — a success hands parsed rows
+ * back to `onImported` for the caller to merge into its own line list, a
+ * failure surfaces the line-numbered errors right here so the user can fix
+ * the file and re-upload without losing anything already on the screen.
+ */
+function CsvImportControls({ kind, onImported }: { kind: string; onImported: (rows: Record<string, unknown>[]) => void }) {
+    const inputRef = useRef<HTMLInputElement>(null);
+    const [uploading, setUploading] = useState(false);
+    const [errors, setErrors] = useState<CsvRowError[]>([]);
+
+    const handleFile = async (file: File) => {
+        setUploading(true);
+        setErrors([]);
+
+        try {
+            const formData = new FormData();
+            formData.append('file', file);
+
+            const response = await window.axios.post(route('setup.opening-balances.import', kind), formData);
+            const { rows, errors: rowErrors } = response.data as {
+                rows: Record<string, unknown>[];
+                errors: CsvRowError[];
+            };
+
+            if (rowErrors.length > 0) {
+                setErrors(rowErrors);
+
+                return;
+            }
+
+            onImported(rows);
+        } catch {
+            setErrors([{ line: 0, message: "Something went wrong reading that file — check it's a CSV and try again." }]);
+        } finally {
+            setUploading(false);
+        }
+    };
+
+    return (
+        <div className="flex flex-col gap-2">
+            <div className="flex items-center gap-2">
+                <a
+                    href={route('setup.opening-balances.template', kind)}
+                    className="inline-flex h-8 items-center justify-center gap-2 rounded-lg px-3 font-sans text-xs font-semibold text-ink-700 transition duration-[120ms] ease-out hover:bg-paper"
+                >
+                    Download template
+                </a>
+                <Button type="button" variant="quiet" size="sm" disabled={uploading} onClick={() => inputRef.current?.click()}>
+                    {uploading ? 'Uploading…' : 'Upload CSV'}
+                </Button>
+                <input
+                    ref={inputRef}
+                    type="file"
+                    accept=".csv,text/csv"
+                    className="hidden"
+                    onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        event.target.value = '';
+                        if (file) {
+                            void handleFile(file);
+                        }
+                    }}
+                />
+            </div>
+            {errors.length > 0 && (
+                <ul role="alert" className="flex flex-col gap-1 rounded-md bg-clay-50 px-3 py-2 text-sm text-clay">
+                    {errors.map((error, index) => (
+                        <li key={index}>{error.message}</li>
+                    ))}
+                </ul>
+            )}
+        </div>
+    );
 }
 
 function emptyBankLine(): BankLineRow {
@@ -283,6 +379,36 @@ export default function OpeningBalances({
             form.data[field].map((row) => (row.key === key ? { ...row, ...patch } : row)),
         );
 
+    /** Merges server-parsed bank_balances CSV rows into bank_lines: any
+     * still-untouched placeholder rows are dropped first so a fresh form
+     * doesn't end up with a dangling blank row after the import. Rows the
+     * user already filled in by hand are kept, with the imported rows
+     * appended after them for review before submit. */
+    const importBankLines = (rows: Record<string, unknown>[]) => {
+        const parsed = rows as unknown as ParsedBankLine[];
+        const imported: BankLineRow[] = parsed.map((row) => ({
+            key: newKey(),
+            bank_account_id: String(row.bank_account_id),
+            amount: minorToDecimalString(row.amount),
+        }));
+        const kept = form.data.bank_lines.filter((row) => row.bank_account_id !== '' || row.amount !== '');
+        form.setData('bank_lines', [...kept, ...imported]);
+    };
+
+    const importContactLines = (field: 'customer_lines' | 'vendor_lines', rows: Record<string, unknown>[]) => {
+        const parsed = rows as unknown as ParsedContactLine[];
+        const imported: ContactLineRow[] = parsed.map((row) => ({
+            key: newKey(),
+            contact_id: String(row.contact_id),
+            reference: row.reference ?? '',
+            original_date: row.original_date,
+            due_date: row.due_date,
+            amount: minorToDecimalString(row.amount),
+        }));
+        const kept = form.data[field].filter((row) => row.contact_id !== '' || row.amount !== '');
+        form.setData(field, [...kept, ...imported]);
+    };
+
     const submit: FormEventHandler = (event) => {
         event.preventDefault();
 
@@ -440,69 +566,72 @@ export default function OpeningBalances({
                                 </Button>
                             }
                         >
-                            <div className="flex flex-col gap-3">
-                                {form.data.bank_lines.map((row, index) => (
-                                    <div
-                                        key={row.key}
-                                        className="grid grid-cols-[2fr_1fr_auto] items-end gap-3"
-                                    >
-                                        <Field
-                                            label="Account"
-                                            htmlFor={`bank-account-${row.key}`}
-                                            error={errors[`bank_lines.${index}.bank_account_id`]}
+                            <div className="flex flex-col gap-4">
+                                <CsvImportControls kind="bank_balances" onImported={importBankLines} />
+                                <div className="flex flex-col gap-3">
+                                    {form.data.bank_lines.map((row, index) => (
+                                        <div
+                                            key={row.key}
+                                            className="grid grid-cols-[2fr_1fr_auto] items-end gap-3"
                                         >
-                                            <select
-                                                id={`bank-account-${row.key}`}
-                                                value={row.bank_account_id}
-                                                onChange={(event) =>
-                                                    updateBankLine(row.key, {
-                                                        bank_account_id: event.target.value,
-                                                    })
-                                                }
-                                                className={INPUT_CLASSES}
+                                            <Field
+                                                label="Account"
+                                                htmlFor={`bank-account-${row.key}`}
+                                                error={errors[`bank_lines.${index}.bank_account_id`]}
                                             >
-                                                <option value="">Select an account</option>
-                                                {bankAccounts.map((account) => (
-                                                    <option key={account.id} value={account.id}>
-                                                        {account.name}
-                                                    </option>
-                                                ))}
-                                            </select>
-                                        </Field>
-                                        <Field
-                                            label="Balance"
-                                            htmlFor={`bank-amount-${row.key}`}
-                                            error={errors[`bank_lines.${index}.amount`]}
-                                        >
-                                            <input
-                                                id={`bank-amount-${row.key}`}
-                                                type="text"
-                                                inputMode="decimal"
-                                                placeholder="0.00"
-                                                value={row.amount}
-                                                onChange={(event) =>
-                                                    updateBankLine(row.key, {
-                                                        amount: event.target.value,
-                                                    })
-                                                }
-                                                className={`${INPUT_CLASSES} text-right font-mono tabular-nums`}
-                                            />
-                                        </Field>
-                                        <Button
-                                            type="button"
-                                            variant="quiet"
-                                            size="sm"
-                                            onClick={() => removeBankLine(row.key)}
-                                        >
-                                            Remove
-                                        </Button>
-                                    </div>
-                                ))}
-                                {bankAccounts.length === 0 && (
-                                    <p className="text-sm text-ink-700">
-                                        Add a bank or cash account first, then come back here.
-                                    </p>
-                                )}
+                                                <select
+                                                    id={`bank-account-${row.key}`}
+                                                    value={row.bank_account_id}
+                                                    onChange={(event) =>
+                                                        updateBankLine(row.key, {
+                                                            bank_account_id: event.target.value,
+                                                        })
+                                                    }
+                                                    className={INPUT_CLASSES}
+                                                >
+                                                    <option value="">Select an account</option>
+                                                    {bankAccounts.map((account) => (
+                                                        <option key={account.id} value={account.id}>
+                                                            {account.name}
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                            </Field>
+                                            <Field
+                                                label="Balance"
+                                                htmlFor={`bank-amount-${row.key}`}
+                                                error={errors[`bank_lines.${index}.amount`]}
+                                            >
+                                                <input
+                                                    id={`bank-amount-${row.key}`}
+                                                    type="text"
+                                                    inputMode="decimal"
+                                                    placeholder="0.00"
+                                                    value={row.amount}
+                                                    onChange={(event) =>
+                                                        updateBankLine(row.key, {
+                                                            amount: event.target.value,
+                                                        })
+                                                    }
+                                                    className={`${INPUT_CLASSES} text-right font-mono tabular-nums`}
+                                                />
+                                            </Field>
+                                            <Button
+                                                type="button"
+                                                variant="quiet"
+                                                size="sm"
+                                                onClick={() => removeBankLine(row.key)}
+                                            >
+                                                Remove
+                                            </Button>
+                                        </div>
+                                    ))}
+                                    {bankAccounts.length === 0 && (
+                                        <p className="text-sm text-ink-700">
+                                            Add a bank or cash account first, then come back here.
+                                        </p>
+                                    )}
+                                </div>
                             </div>
                         </Sheet>
 
@@ -519,18 +648,24 @@ export default function OpeningBalances({
                                 </Button>
                             }
                         >
-                            <ContactLineFields
-                                field="customer_lines"
-                                rows={form.data.customer_lines}
-                                options={customers}
-                                optionLabel="Customer"
-                                referencePlaceholder="Invoice #"
-                                errors={errors}
-                                onUpdate={(key, patch) =>
-                                    updateContactLine('customer_lines', key, patch)
-                                }
-                                onRemove={(key) => removeContactLine('customer_lines', key)}
-                            />
+                            <div className="flex flex-col gap-4">
+                                <CsvImportControls
+                                    kind="open_customer_invoices"
+                                    onImported={(rows) => importContactLines('customer_lines', rows)}
+                                />
+                                <ContactLineFields
+                                    field="customer_lines"
+                                    rows={form.data.customer_lines}
+                                    options={customers}
+                                    optionLabel="Customer"
+                                    referencePlaceholder="Invoice #"
+                                    errors={errors}
+                                    onUpdate={(key, patch) =>
+                                        updateContactLine('customer_lines', key, patch)
+                                    }
+                                    onRemove={(key) => removeContactLine('customer_lines', key)}
+                                />
+                            </div>
                         </Sheet>
 
                         <Sheet
@@ -546,18 +681,24 @@ export default function OpeningBalances({
                                 </Button>
                             }
                         >
-                            <ContactLineFields
-                                field="vendor_lines"
-                                rows={form.data.vendor_lines}
-                                options={vendors}
-                                optionLabel="Vendor"
-                                referencePlaceholder="Bill #"
-                                errors={errors}
-                                onUpdate={(key, patch) =>
-                                    updateContactLine('vendor_lines', key, patch)
-                                }
-                                onRemove={(key) => removeContactLine('vendor_lines', key)}
-                            />
+                            <div className="flex flex-col gap-4">
+                                <CsvImportControls
+                                    kind="open_vendor_bills"
+                                    onImported={(rows) => importContactLines('vendor_lines', rows)}
+                                />
+                                <ContactLineFields
+                                    field="vendor_lines"
+                                    rows={form.data.vendor_lines}
+                                    options={vendors}
+                                    optionLabel="Vendor"
+                                    referencePlaceholder="Bill #"
+                                    errors={errors}
+                                    onUpdate={(key, patch) =>
+                                        updateContactLine('vendor_lines', key, patch)
+                                    }
+                                    onRemove={(key) => removeContactLine('vendor_lines', key)}
+                                />
+                            </div>
                         </Sheet>
 
                         <Sheet title="Opening Balance Equity">

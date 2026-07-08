@@ -9,6 +9,7 @@ use App\Http\Controllers\ItemController;
 use App\Http\Controllers\ManualJournalController;
 use App\Http\Controllers\OnboardingController;
 use App\Http\Controllers\OpeningBalanceController;
+use App\Http\Controllers\OpeningCsvController;
 use App\Http\Controllers\OtherReceiptController;
 use App\Http\Controllers\PeriodLockController;
 use App\Http\Controllers\ProfileController;
@@ -119,6 +120,12 @@ Route::middleware(['auth', 'verified', 'company', 'can:other_receipts.create'])-
 Route::middleware(['auth', 'verified', 'company', 'can:settings.manage'])->group(function () {
     Route::get('/setup/opening-balances', [OpeningBalanceController::class, 'create'])->name('setup.opening-balances');
     Route::post('/setup/opening-balances', [OpeningBalanceController::class, 'store'])->name('setup.opening-balances.store');
+    Route::get('/setup/opening-balances/template/{kind}.csv', [OpeningCsvController::class, 'template'])
+        ->where('kind', '[a-z_]+')
+        ->name('setup.opening-balances.template');
+    Route::post('/setup/opening-balances/import/{kind}', [OpeningCsvController::class, 'import'])
+        ->where('kind', '[a-z_]+')
+        ->name('setup.opening-balances.import');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:tax_rates.manage'])->group(function () {
