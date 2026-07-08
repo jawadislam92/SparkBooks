@@ -4,6 +4,7 @@ use App\Http\Controllers\AccountController;
 use App\Http\Controllers\CompanySwitchController;
 use App\Http\Controllers\ManualJournalController;
 use App\Http\Controllers\OnboardingController;
+use App\Http\Controllers\PeriodLockController;
 use App\Http\Controllers\ProfileController;
 use Illuminate\Foundation\Application;
 use Illuminate\Support\Facades\Route;
@@ -37,6 +38,16 @@ Route::middleware(['auth', 'verified', 'company', 'can:ledger.post_manual'])->gr
     Route::get('/journal-entries/new', [ManualJournalController::class, 'create'])->name('journal-entries.new');
     Route::post('/journal-entries', [ManualJournalController::class, 'store'])->name('journal-entries.store');
     Route::post('/journal-entries/{manualJournal}/reverse', [ManualJournalController::class, 'reverse'])->name('journal-entries.reverse');
+});
+
+Route::middleware(['auth', 'verified', 'company'])->group(function () {
+    // GET is gated inside the controller (periods.lock OR reports.view — a
+    // broader "may view" check than a single `can:` middleware ability
+    // expresses); POST is narrowed to periods.lock only.
+    Route::get('/settings/books', [PeriodLockController::class, 'edit'])->name('settings.books');
+    Route::post('/settings/books', [PeriodLockController::class, 'update'])
+        ->middleware('can:periods.lock')
+        ->name('settings.books.update');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:accounts.manage'])->group(function () {

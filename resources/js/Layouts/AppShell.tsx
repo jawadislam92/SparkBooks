@@ -34,6 +34,10 @@ function navGroups(): NavGroup[] {
                 { label: 'Trial balance', href: '/reports/trial-balance' },
             ],
         },
+        {
+            label: 'Settings',
+            items: [{ label: 'Books', href: '/settings/books' }],
+        },
     ];
 }
 
