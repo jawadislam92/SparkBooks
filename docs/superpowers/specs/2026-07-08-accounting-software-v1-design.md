@@ -29,7 +29,7 @@ Build a web-based accounting application that does what QuickBooks does — even
 |---|---|---|
 | Build vs. fork | Own build | Full ownership, sellable, no GPL/AGPL constraints; open-source apps (Akaunting, BigCapital) studied for schema ideas only |
 | Market | Country-agnostic core | Double-entry is universal; country compliance (FBR, US sales tax, payroll) added later as localization packs |
-| Stack | Laravel 12 + Inertia + React + TypeScript + Tailwind + MySQL | Same stack as SA Track / Tracksuite — zero new-framework risk |
+| Stack | Laravel 13 + Inertia + React + TypeScript + Tailwind + MySQL | Same stack family as SA Track / Tracksuite. (Spec originally said Laravel 12; Phase 0 scaffolding landed on the current stable Laravel 13 — accepted 2026-07-08: identical structure, all tests green, and a new product shouldn't start one major behind.) |
 | Tenancy | Single database, `company_id` on every tenant table, global scopes | Proven pattern in Tracksuite; simplest correct multi-tenancy |
 | Money storage | Integers in minor units (paisa/cents) | Floats are how books stop balancing. Non-negotiable |
 | Ledger visibility | Users never see debits/credits | QuickBooks' key product decision; ledger writes itself under invoice/expense screens. Accountant role and reports expose it for those who want it |
@@ -40,9 +40,9 @@ Build a web-based accounting application that does what QuickBooks does — even
 
 ## 3. Architecture Overview
 
-A fresh Laravel 12 application:
+A fresh Laravel 13 application (see §2 stack note):
 
-- **Backend:** Laravel 12, PHP 8.2+, MySQL. Domain logic in service classes (`LedgerService`, `InvoiceService`, …), thin controllers, form requests for validation, policies for authorization.
+- **Backend:** Laravel 13, PHP 8.3, MySQL. Domain logic in service classes (`LedgerService`, `InvoiceService`, …), thin controllers, form requests for validation, policies for authorization.
 - **Frontend:** Inertia + React + TypeScript + Tailwind. Chart.js for dashboard/report charts (already familiar).
 - **Environments:** local Laragon for development. Deployment target decided later (Hostinger pattern is known from SA Track). Nothing in v1 assumes a specific host.
 
