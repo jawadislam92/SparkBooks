@@ -5,6 +5,8 @@ namespace App\Http\Controllers;
 use App\Enums\AccountType;
 use App\Enums\ContactType;
 use App\Enums\InvoiceStatus;
+use App\Exceptions\Invoicing\InvoiceSendException;
+use App\Exceptions\Ledger\LedgerException;
 use App\Http\Requests\StoreInvoiceRequest;
 use App\Http\Requests\UpdateInvoiceRequest;
 use App\Models\Account;
@@ -14,11 +16,14 @@ use App\Models\InvoiceLine;
 use App\Models\Item;
 use App\Models\TaxRate;
 use App\Services\InvoiceCalculator;
+use App\Services\InvoiceService;
 use App\Support\AuditLogger;
 use App\Support\Currencies;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -185,6 +190,40 @@ class InvoiceController extends Controller
         $audit->log('invoice.draft_deleted', $model, before: $before);
 
         return redirect()->route('invoices.index');
+    }
+
+    /**
+     * Assigns the invoice's document number, posts posting rule P1 (Dr AR /
+     * Cr income per line / Cr Tax Payable) via InvoiceService, and flips the
+     * draft to Sent. $invoice is a plain route parameter (not implicit
+     * binding) for the same reason as edit()/update()/destroy() above.
+     *
+     * The idempotency key travels in a header (like every other posting
+     * action in this app) rather than the body — there's no other form data
+     * to send here. Both InvoiceSendException (this controller's own domain
+     * guards: not-a-draft, no lines, ineligible contact) and LedgerException
+     * (e.g. a locked period) are surfaced the same way: a 422 with the
+     * message on a generic `status` field, since there's no single natural
+     * form field for a whole-invoice action like this one.
+     */
+    public function send(Request $request, string $invoice, InvoiceService $service): RedirectResponse
+    {
+        $model = Invoice::query()->findOrFail($invoice);
+
+        $idempotencyKey = $request->header('X-Idempotency-Key');
+        if (! is_string($idempotencyKey) || ! Str::isUuid($idempotencyKey)) {
+            throw ValidationException::withMessages([
+                'idempotency_key' => 'A valid X-Idempotency-Key header (UUID) is required.',
+            ]);
+        }
+
+        try {
+            $service->send($idempotencyKey, $model);
+        } catch (InvoiceSendException|LedgerException $e) {
+            throw ValidationException::withMessages(['status' => $e->getMessage()]);
+        }
+
+        return redirect()->route('invoices.edit', $model->id);
     }
 
     /**

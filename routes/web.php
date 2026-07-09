@@ -102,6 +102,12 @@ Route::middleware(['auth', 'verified', 'company', 'can:invoices.draft'])->group(
     Route::delete('/invoices/{invoice}', [InvoiceController::class, 'destroy'])->name('invoices.destroy');
 });
 
+// invoices.send is a narrower gate than invoices.draft (Staff can draft but
+// not send, see config/permissions.php §7.14), so it needs its own group.
+Route::middleware(['auth', 'verified', 'company', 'can:invoices.send'])->group(function () {
+    Route::post('/invoices/{invoice}/send', [InvoiceController::class, 'send'])->name('invoices.send');
+});
+
 Route::middleware(['auth', 'verified', 'company', 'can:items.manage'])->group(function () {
     Route::get('/items', [ItemController::class, 'index'])->name('items.index');
     Route::post('/items', [ItemController::class, 'store'])->name('items.store');
