@@ -3,6 +3,7 @@
 namespace Tests\Unit;
 
 use App\Support\Money;
+use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -89,6 +90,98 @@ class MoneyTest extends TestCase
     // report). Not encoded as a PHPUnit assertion here — a test that reads
     // its own production file's bytes back doesn't pin down behavior, only
     // prose, and CI already enforces the real gate across all of app/.
+
+    // -----------------------------------------------------------------
+    // taxMinorUnits hardening (Phase 3 Task 2) — loud guards, carried from
+    // Phase 2's "upstream validation prevents it today, invoicing must not
+    // rely on that same upstream guard holding" note (PROJECT_MAP §10).
+    // -----------------------------------------------------------------
+
+    public function test_negative_line_net_minor_throws(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        Money::taxMinorUnits(-1, '18');
+    }
+
+    public function test_negative_rate_throws(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        Money::taxMinorUnits(3333, '-18');
+    }
+
+    public function test_rate_with_five_decimal_places_throws(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        Money::taxMinorUnits(3333, '18.12345');
+    }
+
+    /** A rate at exactly the 4-decimal boundary must still round correctly, not throw. */
+    public function test_rate_with_exactly_four_decimal_places_still_rounds_correctly(): void
+    {
+        $this->assertSame(600, Money::taxMinorUnits(3333, '18.0000'));
+    }
+
+    // -----------------------------------------------------------------
+    // multiplyByQuantity — minor x decimal quantity (<=4dp), half-up,
+    // integer/bcmath only (no float).
+    // -----------------------------------------------------------------
+
+    public function test_exact_multiplication_by_a_half_quantity(): void
+    {
+        $this->assertSame(25000, Money::multiplyByQuantity(10000, '2.5'));
+    }
+
+    public function test_exact_multiplication_by_a_whole_quantity(): void
+    {
+        $this->assertSame(9999, Money::multiplyByQuantity(3333, '3'));
+    }
+
+    /** The brief's own worked tie: 3333 x 1.5 = 4999.5 -> half-up rounds to 5000, not 4999. */
+    public function test_genuine_half_tie_rounds_up(): void
+    {
+        $this->assertSame(5000, Money::multiplyByQuantity(3333, '1.5'));
+    }
+
+    /**
+     * A large minor-unit amount whose product with the scaled quantity would
+     * sit well past float's 2^53 exact-integer ceiling if this were ever
+     * computed via float math — proves bcmath (not native int/float
+     * multiplication) is actually doing the work.
+     */
+    public function test_multiply_by_quantity_large_amount_has_no_float_drift(): void
+    {
+        $this->assertSame(2999999999997, Money::multiplyByQuantity(999999999999, '3'));
+    }
+
+    /** The smallest representable quantity step: 0.0001. */
+    public function test_smallest_quantity_step_rounds_correctly(): void
+    {
+        // 12345 * 0.0001 = 1.2345 -> half-up rounds to 1.
+        $this->assertSame(1, Money::multiplyByQuantity(12345, '0.0001'));
+    }
+
+    public function test_zero_quantity_yields_zero(): void
+    {
+        $this->assertSame(0, Money::multiplyByQuantity(10000, '0'));
+    }
+
+    public function test_negative_quantity_throws(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        Money::multiplyByQuantity(10000, '-2.5');
+    }
+
+    public function test_quantity_with_five_decimal_places_throws(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        Money::multiplyByQuantity(10000, '2.50001');
+    }
+
+    public function test_negative_minor_throws(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        Money::multiplyByQuantity(-1, '1');
+    }
 
     // -----------------------------------------------------------------
     // parseToMinor — PHP mirror of resources/js/lib/money.ts::parseMoneyInput

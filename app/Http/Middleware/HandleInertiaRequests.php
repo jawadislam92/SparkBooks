@@ -27,6 +27,7 @@ class HandleInertiaRequests extends Middleware
      * @var list<string>
      */
     private const NAV_ABILITIES = [
+        'invoices.draft',
         'contacts.manage',
         'items.manage',
         'accounts.manage',

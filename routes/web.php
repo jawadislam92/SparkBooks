@@ -6,6 +6,7 @@ use App\Http\Controllers\CompanySwitchController;
 use App\Http\Controllers\ContactController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\HealthController;
+use App\Http\Controllers\InvoiceController;
 use App\Http\Controllers\ItemController;
 use App\Http\Controllers\ManualJournalController;
 use App\Http\Controllers\OnboardingController;
@@ -90,6 +91,15 @@ Route::middleware(['auth', 'verified', 'company', 'can:contacts.manage'])->group
     Route::post('/contacts/{contact}/archive', [ContactController::class, 'archive'])->name('contacts.archive');
     Route::post('/contacts/{contact}/unarchive', [ContactController::class, 'unarchive'])->name('contacts.unarchive');
     Route::get('/contacts/{contact}', [ContactController::class, 'show'])->name('contacts.show');
+});
+
+Route::middleware(['auth', 'verified', 'company', 'can:invoices.draft'])->group(function () {
+    Route::get('/invoices', [InvoiceController::class, 'index'])->name('invoices.index');
+    Route::get('/invoices/new', [InvoiceController::class, 'create'])->name('invoices.new');
+    Route::post('/invoices', [InvoiceController::class, 'store'])->name('invoices.store');
+    Route::get('/invoices/{invoice}/edit', [InvoiceController::class, 'edit'])->name('invoices.edit');
+    Route::patch('/invoices/{invoice}', [InvoiceController::class, 'update'])->name('invoices.update');
+    Route::delete('/invoices/{invoice}', [InvoiceController::class, 'destroy'])->name('invoices.destroy');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:items.manage'])->group(function () {
