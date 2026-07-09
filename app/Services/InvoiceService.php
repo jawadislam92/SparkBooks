@@ -7,6 +7,7 @@ use App\Domain\Ledger\LineDraft;
 use App\Enums\InvoiceStatus;
 use App\Exceptions\Invoicing\InvoiceContactNotEligible;
 use App\Exceptions\Invoicing\InvoiceHasNoLines;
+use App\Exceptions\Invoicing\InvoiceHasNoValue;
 use App\Exceptions\Invoicing\InvoiceNotDraft;
 use App\Models\Account;
 use App\Models\Invoice;
@@ -59,6 +60,18 @@ class InvoiceService
                 // once status leaves draft, so this MUST happen before the
                 // status flip below (see T1 carry note / PROJECT_MAP §6).
                 $computed = $this->freezeLines($invoice);
+
+                // Degenerate case: every line is $0 and there's no tax, so
+                // the computed total is 0. There is nothing to post, and a
+                // zero AR debit would violate LedgerService's "each line
+                // one-sided" rule — reject BEFORE burning a document number.
+                // Checked here (not in guard()) because it needs the freshly
+                // computed total; freezeLines() has no other side effect that
+                // a rejection here would leave stranded (the invoice stays
+                // draft, so its just-refrozen lines remain freely editable).
+                if ($computed['total'] <= 0) {
+                    throw new InvoiceHasNoValue('An invoice must have a total greater than zero to be sent.');
+                }
 
                 $number = $this->numbers->next('INV', 'INV');
                 $issueDate = $invoice->issue_date?->toDateString() ?? CarbonImmutable::today()->toDateString();
@@ -162,6 +175,15 @@ class InvoiceService
      * omitted entirely when there's no tax at all. AR always equals
      * Σincome + tax, so the entry balances by construction.
      *
+     * A $0-value line (line_subtotal === 0 — a legitimate free/promo line,
+     * allowed by StoreInvoiceRequest's unit_price min:0) contributes nothing
+     * to the ledger, so it produces NO Cr income LineDraft: a zero-value line
+     * would trip LedgerService's "exactly one side positive" rule. The line
+     * still exists on the invoice document (for display) — it just isn't
+     * posted. The AR debit and tax are unaffected (a $0 line already adds 0
+     * to both). The all-lines-$0 case can't reach here — send() rejects a
+     * zero total with InvoiceHasNoValue before this method is called.
+     *
      * @param  array{lines: array<int, array{line_subtotal:int, line_tax:int}>, subtotal:int, tax_total:int, total:int}  $computed
      * @return list<LineDraft>
      */
@@ -174,10 +196,14 @@ class InvoiceService
         ];
 
         foreach ($invoice->lines->values() as $index => $line) {
+            $lineSubtotal = $computed['lines'][$index]['line_subtotal'];
+            if ($lineSubtotal === 0) {
+                continue;
+            }
             $lines[] = new LineDraft(
                 accountId: $line->income_account_id,
                 debit: 0,
-                credit: $computed['lines'][$index]['line_subtotal'],
+                credit: $lineSubtotal,
             );
         }
 

@@ -274,6 +274,87 @@ class InvoiceSendTest extends TestCase
     }
 
     // ---------------------------------------------------------------
+    // $0-value lines: a free/promo line (unit_price 0, allowed by
+    // StoreInvoiceRequest's min:0) must not produce a zero-value income
+    // ledger line (which would trip LedgerService's one-sided rule), but
+    // stays on the invoice document; an all-$0 invoice (total 0) is rejected.
+    // ---------------------------------------------------------------
+
+    public function test_a_zero_value_line_is_not_posted_but_stays_on_the_invoice(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $contact = $this->customer($company);
+        $chart = $this->chart($company);
+        $freeIncome = $this->incomeAccount($company, ['code' => '4000']);
+        $paidIncome = $this->incomeAccount($company, ['code' => '4010']);
+        $eighteenPercent = $this->taxRate($company, ['rate' => '18.0000']);
+
+        $invoice = $this->draftInvoice($company, $contact);
+        // A $0 free/promo line (unit_price 0) — allowed by validation.
+        $freeLine = $this->invoiceLine($invoice, $freeIncome, ['quantity' => '1', 'unit_price' => 0, 'tax_rate_id' => null]);
+        // A normal 100,000 @ 18% line.
+        $this->invoiceLine($invoice, $paidIncome, ['quantity' => '1', 'unit_price' => 100000, 'tax_rate_id' => $eighteenPercent->id]);
+
+        $this->sendInvoice($invoice)->assertRedirect();
+
+        $entry = JournalEntry::query()->where('source_type', 'invoice')->where('source_id', $invoice->id)->sole();
+        // ONLY AR + the paid income line + tax — the $0 line produces NO line.
+        $this->assertCount(3, $entry->lines);
+        $this->assertNull($entry->lines->firstWhere('account_id', $freeIncome->id));
+
+        $arLine = $entry->lines->firstWhere('account_id', $chart['ar']->id);
+        $this->assertSame(118000, $arLine->debit);
+        $this->assertSame($contact->id, $arLine->contact_id);
+
+        $paidLine = $entry->lines->firstWhere('account_id', $paidIncome->id);
+        $this->assertSame(100000, $paidLine->credit);
+
+        $taxLine = $entry->lines->firstWhere('account_id', $chart['taxPayable']->id);
+        $this->assertSame(18000, $taxLine->credit);
+
+        $this->assertSame($entry->lines->sum('debit'), $entry->lines->sum('credit'));
+        $this->assertLedgerBalances();
+
+        // The $0 line still exists on the invoice document (frozen, not deleted).
+        $invoice->refresh();
+        $this->assertSame(2, $invoice->lines()->count());
+        $freeLine->refresh();
+        $this->assertSame(0, $freeLine->line_subtotal);
+        $this->assertSame(100000, $invoice->subtotal);
+        $this->assertSame(118000, $invoice->total);
+    }
+
+    public function test_an_all_zero_invoice_with_no_value_is_rejected_and_burns_no_number(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $contact = $this->customer($company);
+        $this->chart($company);
+        $income = $this->incomeAccount($company);
+
+        // The ONLY line is $0 and untaxed — the invoice total is 0.
+        $invoice = $this->draftInvoice($company, $contact);
+        $this->invoiceLine($invoice, $income, ['quantity' => '1', 'unit_price' => 0, 'tax_rate_id' => null]);
+
+        $response = $this->sendInvoice($invoice);
+
+        $response->assertSessionHasErrors('status');
+        $this->assertSame(0, JournalEntry::query()->where('source_type', 'invoice')->count());
+
+        $invoice->refresh();
+        $this->assertSame(InvoiceStatus::Draft, $invoice->status);
+        $this->assertNull($invoice->number);
+        $this->assertLedgerBalances();
+
+        // No number burned: a fresh, non-zero invoice sent afterwards gets INV-0001.
+        $real = $this->draftInvoice($company, $contact);
+        $this->invoiceLine($real, $income, ['quantity' => '1', 'unit_price' => 5000]);
+        $this->sendInvoice($real)->assertRedirect();
+        $this->assertSame('INV-0001', $real->fresh()->number);
+    }
+
+    // ---------------------------------------------------------------
     // Document number: gap-free across sends
     // ---------------------------------------------------------------
 
