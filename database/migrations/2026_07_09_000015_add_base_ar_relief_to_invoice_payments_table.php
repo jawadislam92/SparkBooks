@@ -25,12 +25,21 @@ return new class extends Migration
             // never a re-derivation from amount x rate that could drift from
             // what was actually posted to the ledger.
             //
-            // Nullable: existing Task 4 domestic-payment rows predate this
-            // column. Every payment recorded from here on (domestic or FX)
-            // always populates it — for a domestic payment it's simply equal
-            // to base_amount/amount (fx_rate 1 collapses the FX formula to
-            // the Task 4 identity, no special case needed).
-            $t->unsignedBigInteger('base_ar_relief')->nullable()->after('base_amount');
+            // NOT NULL (no default): SparkBooks has zero production data (the
+            // product hasn't launched), and EVERY invoice_payments row in
+            // every real or test environment is created by
+            // InvoicePaymentService::recordPayment (the sole creation path in
+            // the app) or the factory — both of which ALWAYS populate
+            // base_ar_relief. So there is no "legacy row that predates this
+            // column" to accommodate; a nullable column would only invite the
+            // exact bug it's meant to prevent. The settlement-rounding math
+            // sums prior payments' base_ar_relief via SQL SUM(), which
+            // silently treats a NULL as 0 — so a single nullable prior row
+            // could understate the remaining base AR and leave a phantom
+            // paisa on a fully paid invoice. NOT NULL makes that class of bug
+            // structurally impossible (the DB rejects any row missing it),
+            // rather than deferring it to a backfill-someday note.
+            $t->unsignedBigInteger('base_ar_relief')->after('base_amount');
         });
     }
 

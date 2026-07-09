@@ -221,6 +221,13 @@ class InvoiceFxPaymentTest extends TestCase
         ]);
     }
 
+    private function voidPayment(Invoice $invoice, InvoicePayment $payment, ?string $key = null): TestResponse
+    {
+        return $this->postJson("/invoices/{$invoice->id}/payments/{$payment->id}/void", [], [
+            'X-Idempotency-Key' => $key ?? (string) Str::uuid(),
+        ]);
+    }
+
     /** Net (debit - credit) journal_lines balance for one account, scoped to one contact — mirrors InvoicePaymentTest's "clears AR" query. */
     private function contactAccountBalance(Account $account, Contact $contact): int
     {
@@ -428,6 +435,84 @@ class InvoiceFxPaymentTest extends TestCase
 
         $this->assertSame(3, InvoicePayment::query()->count());
         $this->assertSame(3, JournalEntry::query()->where('source_type', 'invoice_payment')->count());
+        $this->assertLedgerBalances();
+    }
+
+    // ---------------------------------------------------------------
+    // Void-then-refinal: the settlement-rounding "remaining base AR" sum
+    // filters status != 'void', so a VOIDED partial's relief must NOT be
+    // subtracted when a later payment goes final. This proves the
+    // load-bearing void filter in resolveBaseArRelief()'s Σ-prior query.
+    //
+    // Real send flow (genuine 28,000,000 AR debit) so "base AR zeroes"
+    // actually means something. USD 1,000 @ 280. Record a partial (40,000
+    // USD -> base_ar_relief round_half_up(280 x 40000) = 11,200,000), VOID
+    // it (its P2fx entry is reversed: the Cr AR 11,200,000 is cancelled by
+    // a Dr AR 11,200,000, net 0), then pay the invoice to FINAL. Because
+    // the voided payment is excluded from the prior-relief sum, the final
+    // relief is the FULL base_total (28,000,000 - 0), not 28,000,000 minus
+    // the voided 11,200,000 (= 16,800,000, which would leave a phantom
+    // 11,200,000 of AR behind). base AR nets to exactly 0.
+    // ---------------------------------------------------------------
+
+    public function test_a_voided_partial_is_excluded_from_the_final_payments_remaining_base_ar_sum(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $contact = $this->customer($company);
+        $chart = $this->chart($company);
+        $income = $this->incomeAccount($company);
+        $bank = $this->bankAccount($company);
+
+        $invoice = $this->usdDraftInvoice($company, $contact);
+        $this->invoiceLine($invoice, $income, ['quantity' => '1', 'unit_price' => 100000, 'tax_rate_id' => null]);
+        $this->sendInvoice($invoice, null, ['fx_rate' => '280'])->assertRedirect();
+        $invoice = $invoice->fresh();
+        $this->assertSame(28000000, $invoice->base_total);
+
+        // Partial FX payment: USD 400 of the USD 1,000, bank credits an
+        // arbitrary 11,300,000 (a small gain vs. the 11,200,000 relief).
+        $this->pay($invoice, [
+            'amount' => 40000, 'base_amount' => 11300000,
+            'bank_account_id' => $bank->id, 'payment_date' => '2026-07-10',
+        ])->assertRedirect();
+
+        $partial = InvoicePayment::query()->sole();
+        $this->assertSame(11200000, $partial->base_ar_relief); // round_half_up(280 x 40000)
+
+        // VOID the partial — invoice returns to Sent, balance back to full.
+        $this->voidPayment($invoice, $partial)->assertRedirect();
+        $partial->refresh();
+        $this->assertSame('void', $partial->status);
+
+        $invoice->refresh();
+        $this->assertSame(InvoiceStatus::Sent, $invoice->status);
+        $this->assertSame(0, $invoice->amount_paid);
+        $this->assertSame(100000, $invoice->balance);
+
+        // Pay to FINAL (the whole doc balance). Bank credits 28,600,000 (a
+        // 600,000 gain over the 28,000,000 relief).
+        $this->pay($invoice, [
+            'amount' => 100000, 'base_amount' => 28600000,
+            'bank_account_id' => $bank->id, 'payment_date' => '2026-07-14',
+        ])->assertRedirect();
+
+        $final = InvoicePayment::query()->where('status', 'posted')->sole();
+
+        // The proof: the voided partial's 11,200,000 relief is EXCLUDED, so
+        // the final relief is the full base_total, not base_total minus the
+        // voided relief.
+        $this->assertSame(28000000, $final->base_ar_relief);
+        $this->assertNotSame(16800000, $final->base_ar_relief); // == 28,000,000 - 11,200,000, the broken-filter result
+
+        $invoice->refresh();
+        $this->assertSame(InvoiceStatus::Paid, $invoice->status);
+        $this->assertSame(0, $invoice->balance);
+
+        // base AR for the contact nets to EXACTLY 0: send Dr 28,000,000;
+        // partial Cr 11,200,000 then its void Dr 11,200,000 (net 0); final
+        // Cr 28,000,000.
+        $this->assertSame(0, $this->contactAccountBalance($chart['ar'], $contact));
         $this->assertLedgerBalances();
     }
 

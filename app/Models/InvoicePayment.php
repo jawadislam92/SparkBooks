@@ -35,9 +35,10 @@ class InvoicePayment extends Model
             'payment_date' => 'date',
             'amount' => 'integer',
             'base_amount' => 'integer',
-            // Nullable (Task 8, spec §17.1 P2fx) — see the migration's own
-            // docblock for why: null only for pre-Task-8 rows, always
-            // populated for every payment recorded from here on.
+            // NOT NULL (Task 8, spec §17.1 P2fx) — always populated by
+            // InvoicePaymentService::recordPayment (the sole creation path)
+            // and the factory; see the migration docblock for why nullability
+            // would reintroduce the SUM()-treats-NULL-as-0 settlement bug.
             'base_ar_relief' => 'integer',
             'fx_rate' => 'decimal:8',
         ];
