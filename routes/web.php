@@ -108,6 +108,12 @@ Route::middleware(['auth', 'verified', 'company', 'can:invoices.send'])->group(f
     Route::post('/invoices/{invoice}/send', [InvoiceController::class, 'send'])->name('invoices.send');
 });
 
+// payments.record is its own permission (Owner/Admin/Accountant, not Staff —
+// config/permissions.php §7.14), independent of invoices.send.
+Route::middleware(['auth', 'verified', 'company', 'can:payments.record'])->group(function () {
+    Route::post('/invoices/{invoice}/payments', [InvoiceController::class, 'recordPayment'])->name('invoices.payments.record');
+});
+
 Route::middleware(['auth', 'verified', 'company', 'can:items.manage'])->group(function () {
     Route::get('/items', [ItemController::class, 'index'])->name('items.index');
     Route::post('/items', [ItemController::class, 'store'])->name('items.store');

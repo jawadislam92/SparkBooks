@@ -6,8 +6,10 @@ use App\Enums\AccountType;
 use App\Enums\ContactType;
 use App\Enums\InvoiceStatus;
 use App\Exceptions\Invoicing\InvoiceSendException;
+use App\Exceptions\Invoicing\PaymentException;
 use App\Exceptions\Ledger\LedgerException;
 use App\Http\Requests\StoreInvoiceRequest;
+use App\Http\Requests\StorePaymentRequest;
 use App\Http\Requests\UpdateInvoiceRequest;
 use App\Models\Account;
 use App\Models\Contact;
@@ -16,6 +18,7 @@ use App\Models\InvoiceLine;
 use App\Models\Item;
 use App\Models\TaxRate;
 use App\Services\InvoiceCalculator;
+use App\Services\InvoicePaymentService;
 use App\Services\InvoiceService;
 use App\Support\AuditLogger;
 use App\Support\Currencies;
@@ -220,6 +223,31 @@ class InvoiceController extends Controller
         try {
             $service->send($idempotencyKey, $model);
         } catch (InvoiceSendException|LedgerException $e) {
+            throw ValidationException::withMessages(['status' => $e->getMessage()]);
+        }
+
+        return redirect()->route('invoices.edit', $model->id);
+    }
+
+    /**
+     * Records a payment (posting rules P2 full / P3 partial, spec §6)
+     * against a sent/partially-paid invoice via InvoicePaymentService.
+     * $invoice is a plain route parameter (not implicit binding) for the
+     * same reason as edit()/update()/destroy()/send() above. Both
+     * PaymentException (this action's own domain guards: not payable,
+     * invalid amount, overpayment, ineligible bank account) and
+     * LedgerException (e.g. a locked period) surface as a 422 on a generic
+     * `status` field, mirroring send() — there's no single natural form
+     * field for a whole-invoice guard like "already paid" or "locked period".
+     */
+    public function recordPayment(StorePaymentRequest $request, string $invoice, InvoicePaymentService $service): RedirectResponse
+    {
+        $model = Invoice::query()->findOrFail($invoice);
+        $data = $request->validated();
+
+        try {
+            $service->recordPayment($data['idempotency_key'], $model, $data);
+        } catch (PaymentException|LedgerException $e) {
             throw ValidationException::withMessages(['status' => $e->getMessage()]);
         }
 
