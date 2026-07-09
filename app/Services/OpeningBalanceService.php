@@ -8,6 +8,7 @@ use App\Enums\EntryRole;
 use App\Exceptions\OpeningBalancesLocked;
 use App\Models\Account;
 use App\Models\BankAccount;
+use App\Models\Company;
 use App\Models\JournalEntry;
 use App\Models\OpeningBalanceRun;
 use App\Models\OpeningDocument;
@@ -45,6 +46,20 @@ class OpeningBalanceService
      * §17.2 unique index (company_id, source_type, source_id, entry_role) is
      * never at risk — nothing is ever edited in place or duplicated on top.
      *
+     * Concurrency: this whole method runs inside ONE DB transaction (opened
+     * by IdempotencyService::execute), and the very first thing it does is
+     * take a `lockForUpdate()` on the current company's row. That serializes
+     * concurrent apply() calls for the SAME company — two calls racing with
+     * DIFFERENT idempotency keys (two browser tabs, or Owner + Admin both on
+     * the setup wizard) can no longer both read "no active run" and both
+     * post; the second caller blocks on the lock until the first commits,
+     * then correctly observes (and voids, as a re-run) the first's
+     * now-active run. Mirrors BankAccountService::nextAccountCode's
+     * per-company lockForUpdate. ALL active runs found are voided (not just
+     * one), which is normally exactly one — but also recovers a pre-existing
+     * duplicate left over from a race that predates this lock, instead of
+     * leaving it permanently un-voidable.
+     *
      * @param  array{
      *     books_start_date: string,
      *     bank_lines?: list<array{bank_account_id:int, amount:int}>,
@@ -58,9 +73,16 @@ class OpeningBalanceService
     {
         $result = $this->idempotency->execute($idempotencyKey, 'opening_balances.applied', function () use ($data) {
             return DB::transaction(function () use ($data) {
-                // Re-run handling FIRST, before anything new is created.
-                $priorRun = OpeningBalanceRun::query()->where('status', 'active')->first();
-                if ($priorRun) {
+                // Lock the company row FIRST, before reading anything else —
+                // see the class docblock above for why. The row itself isn't
+                // used; only the lock it holds for the rest of this
+                // transaction matters.
+                Company::query()->whereKey($this->context->id())->lockForUpdate()->first();
+
+                // Re-run handling FIRST, before anything new is created. Void
+                // EVERY active run found — see class docblock.
+                $priorRuns = OpeningBalanceRun::query()->where('status', 'active')->get();
+                foreach ($priorRuns as $priorRun) {
                     $this->voidPriorRun($priorRun);
                 }
 
@@ -88,7 +110,7 @@ class OpeningBalanceService
                     'entry_id' => $entry->id,
                     'books_start_date' => $data['books_start_date'],
                     'opening_document_count' => $documentCount,
-                    'voided_run_id' => $priorRun?->id,
+                    'voided_run_ids' => $priorRuns->pluck('id')->all(),
                 ]);
 
                 return ['id' => $run->id];
@@ -99,12 +121,17 @@ class OpeningBalanceService
     }
 
     /**
-     * Voids a prior active run before a re-run creates its replacement:
+     * Voids one prior active run before a re-run creates its replacement:
      * reverses the run's own posted entry (mirror-image lines, same source,
      * entry_role=reversal) and marks the run + its opening documents void.
      * Refuses outright — leaving everything untouched — if a real
      * (non-opening) transaction has already posted (spec §7.1's "first real
      * transaction" rule): once that happens, setup is locked.
+     *
+     * Called once per active run apply() finds — normally that's a single
+     * call, but if a pre-existing duplicate active run is found (a
+     * leftover race artifact, see class docblock), this is called once per
+     * run so every one of them gets voided, not just the first.
      */
     private function voidPriorRun(OpeningBalanceRun $priorRun): void
     {

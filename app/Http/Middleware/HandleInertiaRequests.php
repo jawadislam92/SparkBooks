@@ -32,6 +32,8 @@ class HandleInertiaRequests extends Middleware
         'accounts.manage',
         'ledger.post_manual',
         'bank_accounts.manage',
+        'transfers.create',
+        'other_receipts.create',
         'reports.view',
         'tax_rates.manage',
         'periods.lock',

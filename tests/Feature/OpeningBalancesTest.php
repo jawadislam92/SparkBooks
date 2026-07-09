@@ -2,6 +2,8 @@
 
 namespace Tests\Feature;
 
+use App\Domain\Ledger\EntryDraft;
+use App\Domain\Ledger\LineDraft;
 use App\Enums\AccountSubtype;
 use App\Enums\AccountType;
 use App\Enums\ContactType;
@@ -17,8 +19,11 @@ use App\Models\OpeningBalanceRun;
 use App\Models\OpeningDocument;
 use App\Models\User;
 use App\Services\AccountBalances;
+use App\Services\LedgerService;
 use App\Support\CompanyContext;
+use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Illuminate\Testing\TestResponse;
 use Inertia\Testing\AssertableInertia;
@@ -115,6 +120,42 @@ class OpeningBalancesTest extends TestCase
             'ap' => $this->apAccount($company),
             'obe' => $this->obeAccount($company),
         ];
+    }
+
+    /**
+     * Directly creates an 'active' OpeningBalanceRun + a balanced posted
+     * primary entry sourced from it, entirely bypassing
+     * OpeningBalanceService::apply(). Used to simulate a pre-existing race
+     * artifact — two (or more) 'active' runs for the same company — which is
+     * exactly what two concurrent apply() calls used to produce before
+     * apply() took a row lock on the company. apply() itself can no longer
+     * create this state; this helper exists purely so a later corrective
+     * apply() call can be tested against a company that already has it,
+     * proving the recovery path (voiding ALL active runs, not just one).
+     * Requires chart($company) + a bank account to already exist.
+     */
+    private function activeRunArtifact(Company $company, BankAccount $bank, int $amount): OpeningBalanceRun
+    {
+        return app(CompanyContext::class)->runFor($company, fn () => DB::transaction(function () use ($bank, $amount) {
+            $run = OpeningBalanceRun::query()->create([
+                'books_start_date' => '2026-07-01',
+                'status' => 'active',
+            ]);
+
+            $obe = Account::query()->where('code', '3100')->firstOrFail();
+            app(LedgerService::class)->post(new EntryDraft(
+                entryDate: CarbonImmutable::parse('2026-06-30'),
+                memo: 'Opening balances',
+                sourceType: 'opening_balance_run',
+                sourceId: $run->id,
+                lines: [
+                    new LineDraft(accountId: $bank->ledger_account_id, debit: $amount, credit: 0),
+                    new LineDraft(accountId: $obe->id, debit: 0, credit: $amount),
+                ],
+            ));
+
+            return $run;
+        }));
     }
 
     /** @param array<string, mixed> $data */
@@ -647,6 +688,84 @@ class OpeningBalancesTest extends TestCase
         $this->assertSame(50000, $balances[$ap->id] ?? 0, 'AP must reflect only run2\'s new vendor line.');
 
         $this->assertSame(2, ActivityLog::query()->where('action', 'opening_balances.applied')->count());
+        $this->assertLedgerBalances();
+    }
+
+    // ---------------------------------------------------------------
+    // Concurrency: apply() locks the company row and voids ALL prior
+    // active runs it finds, not just one
+    // ---------------------------------------------------------------
+
+    public function test_apply_locks_the_company_row_with_a_locking_select(): void
+    {
+        // Primary concurrency guard: apply() takes lockForUpdate() on the
+        // company row before reading any active run, serializing concurrent
+        // same-company apply() calls — two calls with different idempotency
+        // keys (two tabs, or Owner + Admin both mid-wizard) can no longer
+        // both observe "no active run" and both post. Mirrors
+        // BankAccountService::nextAccountCode's lockForUpdate on the
+        // account-code band (see BankAccountsTest::
+        // test_code_allocation_reads_the_band_with_a_locking_select). A
+        // genuine two-connection race is deliberately NOT simulated here —
+        // same RefreshDatabase deadlock/flakiness concern documented there.
+        // Instead assert the SELECT is actually a FOR UPDATE, which is what
+        // makes the lock hold.
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $this->chart($company);
+        $bank = $this->bankAccount($company);
+
+        DB::enableQueryLog();
+        $this->postOpeningBalances([
+            'bank_lines' => [['bank_account_id' => $bank->id, 'amount' => 10000]],
+        ])->assertRedirect();
+        $queries = collect(DB::getQueryLog())->pluck('query');
+        DB::disableQueryLog();
+
+        $this->assertTrue(
+            $queries->contains(fn (string $q) => str_contains(strtolower($q), 'from `companies`')
+                && str_contains(strtolower($q), 'for update')),
+            'apply() must lock the company row (lockForUpdate) before reading active runs, to serialize concurrent same-company calls.'
+        );
+    }
+
+    public function test_apply_voids_all_prior_active_runs_not_just_one(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $this->chart($company);
+        $bank = $this->bankAccount($company);
+
+        // Simulate a pre-existing race artifact: TWO 'active' runs for the
+        // same company, each with its own posted primary entry — exactly
+        // what two concurrent apply() calls used to produce before the
+        // company-row lock existed. voidPriorRun() used to be called with
+        // only ->first() of these, so a corrective re-run could never clean
+        // up the second one.
+        $raceRun1 = $this->activeRunArtifact($company, $bank, 100000);
+        $raceRun2 = $this->activeRunArtifact($company, $bank, 200000);
+        $this->assertSame(
+            2,
+            app(CompanyContext::class)->runFor($company, fn () => OpeningBalanceRun::query()->where('status', 'active')->count())
+        );
+
+        $response = $this->postOpeningBalances([
+            'books_start_date' => '2026-08-01',
+            'bank_lines' => [['bank_account_id' => $bank->id, 'amount' => 50000]],
+        ]);
+
+        $response->assertRedirect();
+
+        $this->assertSame('voided', $raceRun1->fresh()->status, 'The first pre-existing duplicate active run must be voided.');
+        $this->assertSame('voided', $raceRun2->fresh()->status, 'The second pre-existing duplicate active run must ALSO be voided, not left dangling.');
+
+        $activeRuns = app(CompanyContext::class)->runFor($company, fn () => OpeningBalanceRun::query()->where('status', 'active')->get());
+        $this->assertCount(1, $activeRuns, 'Exactly one active run must remain: the fresh one just created.');
+        $newRun = $activeRuns->sole();
+        $this->assertNotSame($raceRun1->id, $newRun->id);
+        $this->assertNotSame($raceRun2->id, $newRun->id);
+        $this->assertSame('2026-08-01', $newRun->books_start_date->toDateString());
+
         $this->assertLedgerBalances();
     }
 

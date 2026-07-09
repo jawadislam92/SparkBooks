@@ -213,7 +213,7 @@ function RenameAccountDialog({
 }
 
 export default function Index({ bankAccounts }: IndexPageProps) {
-    const { currentCompany } = usePage<PageProps>().props;
+    const { currentCompany, can } = usePage<PageProps>().props;
     const baseCurrency = currentCompany?.base_currency ?? 'USD';
 
     const [showArchived, setShowArchived] = useState(false);
@@ -247,20 +247,24 @@ export default function Index({ bankAccounts }: IndexPageProps) {
                     Show archived
                 </label>
                 <div className="flex items-center gap-2">
-                    <Button
-                        type="button"
-                        variant="quiet"
-                        onClick={() => router.visit(route('other-receipts.new'))}
-                    >
-                        Record receipt
-                    </Button>
-                    <Button
-                        type="button"
-                        variant="quiet"
-                        onClick={() => router.visit(route('transfers.new'))}
-                    >
-                        Transfer
-                    </Button>
+                    {can['other_receipts.create'] && (
+                        <Button
+                            type="button"
+                            variant="quiet"
+                            onClick={() => router.visit(route('other-receipts.new'))}
+                        >
+                            Record receipt
+                        </Button>
+                    )}
+                    {can['transfers.create'] && (
+                        <Button
+                            type="button"
+                            variant="quiet"
+                            onClick={() => router.visit(route('transfers.new'))}
+                        >
+                            Transfer
+                        </Button>
+                    )}
                     <Button type="button" onClick={() => setCreating(true)}>
                         New account
                     </Button>
