@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Enums\AccountType;
 use App\Enums\ContactType;
 use App\Enums\InvoiceStatus;
+use App\Exceptions\Invoicing\InvoiceEmailException;
 use App\Exceptions\Invoicing\InvoiceFxRateInvalid;
 use App\Exceptions\Invoicing\InvoiceSendException;
 use App\Exceptions\Invoicing\InvoiceVoidException;
@@ -267,6 +268,47 @@ class InvoiceController extends Controller
             // would otherwise swallow it onto `status`.
             throw ValidationException::withMessages(['fx_rate' => $e->getMessage()]);
         } catch (InvoiceSendException|LedgerException $e) {
+            throw ValidationException::withMessages(['status' => $e->getMessage()]);
+        }
+
+        return redirect()->route('invoices.edit', $model->id);
+    }
+
+    /**
+     * Queues the invoice email (spec §17.6) via InvoiceService::sendEmail —
+     * the FIRST send. $invoice is a plain route parameter (not implicit
+     * binding), same reasoning as edit()/update()/destroy()/send() above. No
+     * idempotency key is required here (unlike send()/void()): queuing an
+     * email is not a ledger-posting action, so a duplicate queue+dispatch on
+     * a double-click merely logs a second EmailAttempt — not a correctness
+     * hazard. Guarded to a posted invoice only (draft/void -> 422 on
+     * `status`, mirroring send()/void()'s classification).
+     */
+    public function email(string $invoice, InvoiceService $service): RedirectResponse
+    {
+        $model = Invoice::query()->findOrFail($invoice);
+
+        try {
+            $service->sendEmail($model);
+        } catch (InvoiceEmailException $e) {
+            throw ValidationException::withMessages(['status' => $e->getMessage()]);
+        }
+
+        return redirect()->route('invoices.edit', $model->id);
+    }
+
+    /**
+     * Re-queues the invoice email (spec §17.6) via InvoiceService::resendEmail
+     * — a Resend, available regardless of the invoice's current email_status.
+     * Same routing/guard shape as email() above.
+     */
+    public function resendEmail(string $invoice, InvoiceService $service): RedirectResponse
+    {
+        $model = Invoice::query()->findOrFail($invoice);
+
+        try {
+            $service->resendEmail($model);
+        } catch (InvoiceEmailException $e) {
             throw ValidationException::withMessages(['status' => $e->getMessage()]);
         }
 

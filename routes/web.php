@@ -105,8 +105,12 @@ Route::middleware(['auth', 'verified', 'company', 'can:invoices.draft'])->group(
 
 // invoices.send is a narrower gate than invoices.draft (Staff can draft but
 // not send, see config/permissions.php §7.14), so it needs its own group.
+// Emailing (spec §17.6) shares this gate: the person who sends invoices
+// emails them too — there is no separate email permission in the catalog.
 Route::middleware(['auth', 'verified', 'company', 'can:invoices.send'])->group(function () {
     Route::post('/invoices/{invoice}/send', [InvoiceController::class, 'send'])->name('invoices.send');
+    Route::post('/invoices/{invoice}/email', [InvoiceController::class, 'email'])->name('invoices.email');
+    Route::post('/invoices/{invoice}/email/resend', [InvoiceController::class, 'resendEmail'])->name('invoices.email.resend');
 });
 
 // payments.record is its own permission (Owner/Admin/Accountant, not Staff —

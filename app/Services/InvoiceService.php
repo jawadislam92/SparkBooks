@@ -12,7 +12,9 @@ use App\Exceptions\Invoicing\InvoiceHasLivePayments;
 use App\Exceptions\Invoicing\InvoiceHasNoLines;
 use App\Exceptions\Invoicing\InvoiceHasNoValue;
 use App\Exceptions\Invoicing\InvoiceNotDraft;
+use App\Exceptions\Invoicing\InvoiceNotEmailable;
 use App\Exceptions\Invoicing\InvoiceNotVoidable;
+use App\Jobs\SendInvoiceEmail;
 use App\Models\Account;
 use App\Models\Invoice;
 use App\Models\InvoiceLine;
@@ -329,6 +331,79 @@ class InvoiceService
             throw new InvoiceHasLivePayments(
                 "Reverse the invoice's payment(s) first (payment ID(s): {$ids})."
             );
+        }
+    }
+
+    /**
+     * Queues the invoice email (spec §17.6) — the FIRST send. Guards that the
+     * invoice is posted (Sent/PartiallyPaid/Paid; a draft has never been sent
+     * and a void invoice is dead), flips email_status to 'queued', and
+     * dispatches SendInvoiceEmail AFTER this transaction commits. Everything
+     * from here on (PDF render, mail transport, success/failure) happens
+     * entirely inside that job, OUTSIDE this transaction — by construction,
+     * nothing this method does can ever be undone by an email failure: the
+     * transaction below only ever touches email_status, never the ledger or
+     * any other invoice column.
+     */
+    public function sendEmail(Invoice $invoice): Invoice
+    {
+        return $this->queueEmail($invoice, 'invoice.email_queued');
+    }
+
+    /**
+     * Re-queues the invoice email (spec §17.6) — a Resend. Identical guard
+     * and mechanics to sendEmail(); the only difference is the audit action
+     * name. Allowed regardless of the invoice's CURRENT email_status (queued/
+     * sent/failed) — a Resend is a legitimate action even after a successful
+     * send (e.g. the customer says they never got it), not just a retry path
+     * for a failed one.
+     */
+    public function resendEmail(Invoice $invoice): Invoice
+    {
+        return $this->queueEmail($invoice, 'invoice.email_resent');
+    }
+
+    private function queueEmail(Invoice $invoice, string $auditAction): Invoice
+    {
+        $locked = DB::transaction(function () use ($invoice, $auditAction) {
+            // Row-lock + re-read FRESH state, same reasoning as send()/void()'s
+            // locked reads above: this must see the CURRENT status, not
+            // whatever the controller resolved moments before this closure
+            // runs.
+            $current = Invoice::query()->where('id', $invoice->id)->lockForUpdate()->firstOrFail();
+
+            $this->guardEmailable($current);
+
+            $current->forceFill(['email_status' => 'queued'])->save();
+
+            $this->audit->log($auditAction, $current);
+
+            return $current;
+        });
+
+        // Dispatched OUTSIDE the transaction above — by the time this line
+        // runs, that transaction has already committed (the closure returned
+        // normally), so this already achieves "dispatch after commit"
+        // without chaining ->afterCommit(). Deliberately NOT ->afterCommit():
+        // this action has no ambient OUTER transaction of its own to wait on
+        // (unlike send()/void(), this is its own whole transaction), and
+        // ->afterCommit() callbacks only fire once the transaction level
+        // truly reaches 0 — under a test's RefreshDatabase-wrapping
+        // transaction that level never reaches 0 (it rolls back, not
+        // commits), which would silently make the job never dispatch in any
+        // test. Carries invoice_id + company_id rather than a bound Invoice
+        // model, since the job runs on a worker process with no
+        // CompanyContext yet (see the job's own docblock).
+        SendInvoiceEmail::dispatch($this->context->id(), $locked->id);
+
+        return $locked;
+    }
+
+    /** Only a posted invoice (sent/partially_paid/paid) can be emailed — not a draft, not void. */
+    private function guardEmailable(Invoice $invoice): void
+    {
+        if (! $invoice->status->isPosted()) {
+            throw new InvoiceNotEmailable('Only a sent, partially paid, or paid invoice can be emailed.');
         }
     }
 
