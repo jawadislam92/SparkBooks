@@ -100,6 +100,7 @@ Route::middleware(['auth', 'verified', 'company', 'can:invoices.draft'])->group(
     Route::get('/invoices/{invoice}/edit', [InvoiceController::class, 'edit'])->name('invoices.edit');
     Route::patch('/invoices/{invoice}', [InvoiceController::class, 'update'])->name('invoices.update');
     Route::delete('/invoices/{invoice}', [InvoiceController::class, 'destroy'])->name('invoices.destroy');
+    Route::get('/invoices/{invoice}/pdf', [InvoiceController::class, 'pdf'])->name('invoices.pdf');
 });
 
 // invoices.send is a narrower gate than invoices.draft (Staff can draft but

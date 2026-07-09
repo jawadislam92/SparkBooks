@@ -22,6 +22,7 @@ use App\Models\Item;
 use App\Models\TaxRate;
 use App\Services\InvoiceCalculator;
 use App\Services\InvoicePaymentService;
+use App\Services\InvoicePdf;
 use App\Services\InvoiceService;
 use App\Support\AuditLogger;
 use App\Support\Currencies;
@@ -30,6 +31,7 @@ use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\Response as HttpResponse;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
@@ -130,6 +132,25 @@ class InvoiceController extends Controller
             ['invoice' => $this->invoiceEditPayload($model)],
             $this->formOptions(),
         ));
+    }
+
+    /**
+     * Streams the branded invoice PDF inline (Phase 3 Task 9). $invoice is a
+     * plain route parameter (not implicit binding), same reasoning as every
+     * other action here — SubstituteBindings runs before SetCompanyContext,
+     * so an implicit binding would 404 before the tenant scope even exists.
+     *
+     * Gated by can:invoices.draft (same route group as index/create/store/
+     * edit/update/destroy) rather than a narrower ability: every role that
+     * can see an invoice at all (Owner/Admin/Accountant/Staff — see
+     * config/permissions.php) can view/print it; there is no separate "view"
+     * permission in the catalog.
+     */
+    public function pdf(string $invoice, InvoicePdf $pdfService): HttpResponse
+    {
+        $model = Invoice::query()->findOrFail($invoice);
+
+        return $pdfService->render($model)->stream(($model->number ?? 'DRAFT').'.pdf');
     }
 
     public function update(UpdateInvoiceRequest $request, string $invoice, AuditLogger $audit): RedirectResponse
