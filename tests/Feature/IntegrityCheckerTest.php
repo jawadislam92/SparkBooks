@@ -6,12 +6,18 @@ use App\Domain\Ledger\EntryDraft;
 use App\Domain\Ledger\LineDraft;
 use App\Enums\AccountSubtype;
 use App\Enums\AccountType;
+use App\Enums\ContactType;
+use App\Enums\InvoiceStatus;
 use App\Enums\Role;
 use App\Models\Account;
 use App\Models\ActivityLog;
 use App\Models\BankAccount;
 use App\Models\Company;
+use App\Models\Contact;
 use App\Models\IntegrityRun;
+use App\Models\Invoice;
+use App\Models\InvoiceLine;
+use App\Models\InvoicePayment;
 use App\Models\JournalEntry;
 use App\Models\JournalLine;
 use App\Models\ManualJournal;
@@ -27,6 +33,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use Illuminate\Testing\TestResponse;
 use Inertia\Testing\AssertableInertia;
 use Tests\TestCase;
 
@@ -174,6 +181,149 @@ class IntegrityCheckerTest extends TestCase
             'credit' => $credit,
             'memo' => null,
             'contact_id' => $contactId,
+        ]);
+    }
+
+    // ---------------------------------------------------------------
+    // Helpers — Task 12 (invoice/payment source coverage + check (c) split).
+    // Mirror InvoiceFxSendTest/InvoiceFxPaymentTest/InvoiceVoidTest's own
+    // helper shapes so the real send()/recordPayment()/void() HTTP flows
+    // post genuine P1/P1fx/P2/P2fx/P9 ledger entries — the whole point of
+    // these tests is that IntegrityChecker sees exactly what those services
+    // actually post, not a hand-rolled approximation of it.
+    // ---------------------------------------------------------------
+
+    /** @param array<string, mixed> $overrides */
+    private function customer(Company $company, array $overrides = []): Contact
+    {
+        return Contact::factory()->create(array_merge([
+            'company_id' => $company->id,
+            'type' => ContactType::Customer->value,
+        ], $overrides));
+    }
+
+    private function taxPayableAccount(Company $company): Account
+    {
+        return Account::factory()->create([
+            'company_id' => $company->id,
+            'code' => '2100',
+            'name' => 'Tax Payable',
+            'type' => AccountType::Liability->value,
+            'subtype' => AccountSubtype::Tax->value,
+            'is_system' => true,
+        ]);
+    }
+
+    private function fxGainAccount(Company $company): Account
+    {
+        return Account::factory()->create([
+            'company_id' => $company->id,
+            'code' => '4950',
+            'name' => 'FX Gain',
+            'type' => AccountType::Income->value,
+            'subtype' => AccountSubtype::OtherIncome->value,
+            'is_system' => true,
+        ]);
+    }
+
+    private function fxLossAccount(Company $company): Account
+    {
+        return Account::factory()->create([
+            'company_id' => $company->id,
+            'code' => '5950',
+            'name' => 'FX Loss',
+            'type' => AccountType::Expense->value,
+            'subtype' => AccountSubtype::OperatingExpense->value,
+            'is_system' => true,
+        ]);
+    }
+
+    /**
+     * Standard chart these invoice tests depend on: 1100 AR, 2100 Tax
+     * Payable, 4950/5950 FX gain/loss. receivableAccount() (above) already
+     * creates 1100 with the right subtype, so it's reused here rather than
+     * duplicated.
+     *
+     * @return array{ar: Account, taxPayable: Account, fxGain: Account, fxLoss: Account}
+     */
+    private function invoiceChart(Company $company): array
+    {
+        return [
+            'ar' => $this->receivableAccount($company),
+            'taxPayable' => $this->taxPayableAccount($company),
+            'fxGain' => $this->fxGainAccount($company),
+            'fxLoss' => $this->fxLossAccount($company),
+        ];
+    }
+
+    /** @param array<string, mixed> $overrides */
+    private function domesticDraftInvoice(Company $company, Contact $contact, array $overrides = []): Invoice
+    {
+        return Invoice::factory()->create(array_merge([
+            'company_id' => $company->id,
+            'contact_id' => $contact->id,
+            'status' => InvoiceStatus::Draft->value,
+            'currency_code' => 'PKR',
+        ], $overrides));
+    }
+
+    /** @param array<string, mixed> $overrides */
+    private function usdDraftInvoice(Company $company, Contact $contact, array $overrides = []): Invoice
+    {
+        return Invoice::factory()->create(array_merge([
+            'company_id' => $company->id,
+            'contact_id' => $contact->id,
+            'status' => InvoiceStatus::Draft->value,
+            'currency_code' => 'USD',
+        ], $overrides));
+    }
+
+    /**
+     * Wrapped in CompanyContext::runFor — InvoiceLine::booted()'s freeze
+     * guard needs a live CompanyContext on every create (mirrors
+     * InvoiceFxSendTest's identical helper).
+     *
+     * @param  array<string, mixed>  $overrides
+     */
+    private function invoiceLine(Invoice $invoice, Account $incomeAccount, array $overrides = []): InvoiceLine
+    {
+        $company = Company::query()->findOrFail($invoice->company_id);
+
+        return app(CompanyContext::class)->runFor($company, fn () => InvoiceLine::factory()->create(array_merge([
+            'invoice_id' => $invoice->id,
+            'company_id' => $invoice->company_id,
+            'income_account_id' => $incomeAccount->id,
+        ], $overrides)));
+    }
+
+    /** @param array<string, mixed> $body */
+    private function sendInvoice(Invoice $invoice, array $body = [], ?string $key = null): TestResponse
+    {
+        return $this->postJson("/invoices/{$invoice->id}/send", $body, [
+            'X-Idempotency-Key' => $key ?? (string) Str::uuid(),
+        ]);
+    }
+
+    /** @param array<string, mixed> $data */
+    private function pay(Invoice $invoice, array $data, ?string $key = null): TestResponse
+    {
+        return $this->postJson("/invoices/{$invoice->id}/payments", $data, [
+            'X-Idempotency-Key' => $key ?? (string) Str::uuid(),
+        ]);
+    }
+
+    /** @param array<string, mixed> $data */
+    private function voidInvoice(Invoice $invoice, array $data = [], ?string $key = null): TestResponse
+    {
+        return $this->postJson("/invoices/{$invoice->id}/void", $data, [
+            'X-Idempotency-Key' => $key ?? (string) Str::uuid(),
+        ]);
+    }
+
+    private function voidPayment(Invoice $invoice, InvoicePayment $payment, ?string $key = null): TestResponse
+    {
+        return $this->postJson("/invoices/{$invoice->id}/payments/{$payment->id}/void", [], [
+            'X-Idempotency-Key' => $key ?? (string) Str::uuid(),
         ]);
     }
 
@@ -328,10 +478,14 @@ class IntegrityCheckerTest extends TestCase
 
     /**
      * The point of the whole extension: a source_type this checker has never
-     * heard of (a stand-in for some future Phase 3+ document type someone
-     * forgets to register in IntegrityChecker::SOURCE_TABLES) must fail
-     * loud — a distinct 'unrecognized_source' finding — rather than being
-     * silently skipped by the per-source-type loop.
+     * heard of (a stand-in for some future Phase 4+ document type someone
+     * forgets to register in IntegrityChecker::SOURCE_TABLES — 'bill' is a
+     * genuine example: Phase 4 expenses/bills haven't landed yet as of this
+     * task) must fail loud — a distinct 'unrecognized_source' finding —
+     * rather than being silently skipped by the per-source-type loop.
+     * ('invoice' itself is no longer a valid stand-in here — Task 12
+     * registers it in SOURCE_TABLES, see the invoice/invoice_payment orphan
+     * tests below.)
      */
     public function test_unknown_source_type_produces_unrecognized_source_finding(): void
     {
@@ -341,7 +495,7 @@ class IntegrityCheckerTest extends TestCase
             'company_id' => $company->id,
             'entry_date' => '2026-07-01',
             'memo' => 'Future source type (raw insert)',
-            'source_type' => 'invoice',
+            'source_type' => 'bill',
             'source_id' => 1,
             'entry_role' => 'primary',
             'created_by' => null,
@@ -353,7 +507,7 @@ class IntegrityCheckerTest extends TestCase
         $this->assertContains('unrecognized_source', $checks);
         $this->assertNotContains('orphan_entries', $checks);
         $finding = collect($findings)->firstWhere('check', 'unrecognized_source');
-        $this->assertStringContainsString('invoice', $finding['detail']);
+        $this->assertStringContainsString('bill', $finding['detail']);
     }
 
     /**
@@ -481,6 +635,430 @@ class IntegrityCheckerTest extends TestCase
 
         $this->assertContains('orphan_entries', collect($findingsA)->pluck('check')->all());
         $this->assertSame([], $findingsB);
+    }
+
+    // ---------------------------------------------------------------
+    // Task 12: source coverage for 'invoice' / 'invoice_payment'.
+    // ---------------------------------------------------------------
+
+    public function test_orphaned_invoice_source_entry_produces_finding(): void
+    {
+        $this->assertOrphanDetectedForSourceType('invoice');
+    }
+
+    public function test_orphaned_invoice_payment_source_entry_produces_finding(): void
+    {
+        $this->assertOrphanDetectedForSourceType('invoice_payment');
+    }
+
+    /**
+     * A voided (reversed) invoice keeps the SAME source_type/source_id on
+     * its reversal entry (spec §4 iron rule) — must never be mistaken for an
+     * orphan or an unrecognized source, exactly like the Phase 2 source
+     * types already prove for transfer/other_receipt/opening_balance_run.
+     */
+    public function test_reversal_of_an_invoice_entry_is_not_flagged_as_orphan_or_unrecognized(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $contact = $this->customer($company);
+        $this->invoiceChart($company);
+        $income = $this->incomeAccount($company);
+
+        $invoice = $this->domesticDraftInvoice($company, $contact);
+        $this->invoiceLine($invoice, $income, ['quantity' => '1', 'unit_price' => 10000, 'tax_rate_id' => null]);
+        $this->sendInvoice($invoice)->assertRedirect();
+        $this->voidInvoice($invoice->fresh(), ['memo' => 'Cancelled'])->assertRedirect();
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+        $checks = collect($findings)->pluck('check')->all();
+
+        $this->assertNotContains('orphan_entries', $checks);
+        $this->assertNotContains('unrecognized_source', $checks);
+        // A voided invoice is fully excluded from check (c) too (see
+        // POSTED_INVOICE_STATUSES) — nothing left to flag at all.
+        $this->assertSame([], $findings);
+    }
+
+    /**
+     * Same property, payment side: voidPayment()'s reversal keeps the
+     * ORIGINAL payment's source_id — must not be mistaken for an orphan.
+     * The invoice itself stays Sent (not void) afterward, so this also
+     * proves the ledger-side base-AR sum correctly nets a voided payment's
+     * primary+reversal pair back to zero (the invoice's own base_total is
+     * the only thing left contributing).
+     */
+    public function test_reversal_of_an_invoice_payment_entry_is_not_flagged_as_orphan_or_unrecognized(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $contact = $this->customer($company);
+        $this->invoiceChart($company);
+        $income = $this->incomeAccount($company);
+        $bank = $this->bankAccountModel($company);
+
+        $invoice = $this->domesticDraftInvoice($company, $contact);
+        $this->invoiceLine($invoice, $income, ['quantity' => '1', 'unit_price' => 10000, 'tax_rate_id' => null]);
+        $this->sendInvoice($invoice)->assertRedirect();
+        $invoice = $invoice->fresh();
+
+        $this->pay($invoice, ['amount' => 4000, 'bank_account_id' => $bank->id, 'payment_date' => '2026-07-05'])->assertRedirect();
+        $payment = InvoicePayment::query()->sole();
+        $this->voidPayment($invoice->fresh(), $payment)->assertRedirect();
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+        $checks = collect($findings)->pluck('check')->all();
+
+        $this->assertNotContains('orphan_entries', $checks);
+        $this->assertNotContains('unrecognized_source', $checks);
+        // The invoice is back to Sent/fully-unpaid — balance and base AR
+        // both reconcile exactly as if the payment never happened.
+        $this->assertSame([], $findings);
+    }
+
+    // ---------------------------------------------------------------
+    // Task 12: check (c) split — document_balance + base_ar_reconciliation.
+    // ---------------------------------------------------------------
+
+    /**
+     * The comprehensive no-false-positive test: a company with domestic AND
+     * FX invoices spanning every lifecycle stage (draft, sent-unpaid,
+     * partially-paid, paid, void, and a voided-then-refinal-paid payment)
+     * must come back COMPLETELY clean. This is the property that matters
+     * most for check (c) — a checker that cries wolf on correctly-posted FX
+     * invoices is worse than no checker (spec §9: "expected result forever:
+     * zero findings").
+     */
+    public function test_clean_company_with_domestic_and_fx_invoices_across_full_lifecycle_yields_no_findings(): void
+    {
+        $company = Company::factory()->create(); // base_currency PKR
+        $this->actingAsRole($company, Role::Owner);
+        $contact = $this->customer($company);
+        $this->invoiceChart($company);
+        $income = $this->incomeAccount($company);
+        $bank = $this->bankAccountModel($company);
+
+        // Draft — never sent, no ledger entries at all.
+        $draft = $this->domesticDraftInvoice($company, $contact);
+        $this->invoiceLine($draft, $income, ['quantity' => '1', 'unit_price' => 5000, 'tax_rate_id' => null]);
+
+        // Domestic: sent, unpaid.
+        $sentUnpaid = $this->domesticDraftInvoice($company, $contact);
+        $this->invoiceLine($sentUnpaid, $income, ['quantity' => '1', 'unit_price' => 10000, 'tax_rate_id' => null]);
+        $this->sendInvoice($sentUnpaid)->assertRedirect();
+
+        // Domestic: partially paid.
+        $partial = $this->domesticDraftInvoice($company, $contact);
+        $this->invoiceLine($partial, $income, ['quantity' => '1', 'unit_price' => 20000, 'tax_rate_id' => null]);
+        $this->sendInvoice($partial)->assertRedirect();
+        $this->pay($partial->fresh(), ['amount' => 8000, 'bank_account_id' => $bank->id, 'payment_date' => '2026-07-05'])->assertRedirect();
+
+        // Domestic: paid in full.
+        $paidDomestic = $this->domesticDraftInvoice($company, $contact);
+        $this->invoiceLine($paidDomestic, $income, ['quantity' => '1', 'unit_price' => 15000, 'tax_rate_id' => null]);
+        $this->sendInvoice($paidDomestic)->assertRedirect();
+        $this->pay($paidDomestic->fresh(), ['amount' => 15000, 'bank_account_id' => $bank->id, 'payment_date' => '2026-07-06'])->assertRedirect();
+
+        // Domestic: voided (no payments — the direct void path).
+        $voided = $this->domesticDraftInvoice($company, $contact);
+        $this->invoiceLine($voided, $income, ['quantity' => '1', 'unit_price' => 3000, 'tax_rate_id' => null]);
+        $this->sendInvoice($voided)->assertRedirect();
+        $this->voidInvoice($voided->fresh(), ['memo' => 'Cancelled'])->assertRedirect();
+
+        // FX: sent, unpaid.
+        $fxSent = $this->usdDraftInvoice($company, $contact);
+        $this->invoiceLine($fxSent, $income, ['quantity' => '1', 'unit_price' => 50000, 'tax_rate_id' => null]);
+        $this->sendInvoice($fxSent, ['fx_rate' => '280'])->assertRedirect();
+
+        // FX: partially paid, with a genuine FX gain plug on the partial.
+        $fxPartial = $this->usdDraftInvoice($company, $contact);
+        $this->invoiceLine($fxPartial, $income, ['quantity' => '1', 'unit_price' => 100000, 'tax_rate_id' => null]);
+        $this->sendInvoice($fxPartial, ['fx_rate' => '280'])->assertRedirect();
+        $this->pay($fxPartial->fresh(), [
+            'amount' => 40000, 'base_amount' => 11300000, // relief 11,200,000 + 100,000 gain
+            'bank_account_id' => $bank->id, 'payment_date' => '2026-07-07',
+        ])->assertRedirect();
+
+        // FX: paid in full — the spec §17.1 worked example (gain).
+        $fxPaid = $this->usdDraftInvoice($company, $contact);
+        $this->invoiceLine($fxPaid, $income, ['quantity' => '1', 'unit_price' => 100000, 'tax_rate_id' => null]);
+        $this->sendInvoice($fxPaid, ['fx_rate' => '280'])->assertRedirect();
+        $this->pay($fxPaid->fresh(), [
+            'amount' => 100000, 'base_amount' => 28500000, // relief 28,000,000 + 500,000 gain
+            'bank_account_id' => $bank->id, 'payment_date' => '2026-07-08',
+        ])->assertRedirect();
+
+        // FX: a voided partial excluded from a later FINAL payment's
+        // settlement-rounding sum, then paid in full with a gain — the most
+        // adversarial base-AR shape this check has to tolerate.
+        $refinal = $this->usdDraftInvoice($company, $contact);
+        $this->invoiceLine($refinal, $income, ['quantity' => '1', 'unit_price' => 100000, 'tax_rate_id' => null]);
+        $this->sendInvoice($refinal, ['fx_rate' => '280'])->assertRedirect();
+        $refinal = $refinal->fresh();
+        $this->pay($refinal, [
+            'amount' => 40000, 'base_amount' => 11300000,
+            'bank_account_id' => $bank->id, 'payment_date' => '2026-07-10',
+        ])->assertRedirect();
+        $voidedPartial = InvoicePayment::query()->where('invoice_id', $refinal->id)->sole();
+        $this->voidPayment($refinal->fresh(), $voidedPartial)->assertRedirect();
+        $this->pay($refinal->fresh(), [
+            'amount' => 100000, 'base_amount' => 28600000,
+            'bank_account_id' => $bank->id, 'payment_date' => '2026-07-11',
+        ])->assertRedirect();
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+
+        $this->assertSame([], $findings);
+    }
+
+    /**
+     * Standalone worked example (spec §17.1, exactly): USD 1,000 @ 280,
+     * base_total 28,000,000, paid in full with the bank crediting 28,500,000
+     * -> a 500,000 FX gain plug. The base-AR tie-out must be tolerant of
+     * that plug by construction (it lives on 4950, never touched by the AR
+     * query) — isolated here from the bigger lifecycle test above so the
+     * property is independently verifiable.
+     */
+    public function test_fully_paid_fx_invoice_with_correct_fx_gain_plug_is_clean(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $contact = $this->customer($company);
+        $this->invoiceChart($company);
+        $income = $this->incomeAccount($company);
+        $bank = $this->bankAccountModel($company);
+
+        $invoice = $this->usdDraftInvoice($company, $contact);
+        $this->invoiceLine($invoice, $income, ['quantity' => '1', 'unit_price' => 100000, 'tax_rate_id' => null]);
+        $this->sendInvoice($invoice, ['fx_rate' => '280'])->assertRedirect();
+        $invoice = $invoice->fresh();
+        $this->assertSame(28000000, $invoice->base_total);
+
+        $this->pay($invoice, [
+            'amount' => 100000, 'base_amount' => 28500000,
+            'bank_account_id' => $bank->id, 'payment_date' => '2026-07-15',
+        ])->assertRedirect();
+
+        $invoice = $invoice->fresh();
+        $this->assertSame(InvoiceStatus::Paid, $invoice->status);
+        $this->assertSame(0, $invoice->balance);
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+
+        $this->assertSame([], $findings);
+    }
+
+    /**
+     * The settlement-rounding property under check (c): three payments at
+     * fx_rate 1.005 where independent per-payment rounding leaves a residue,
+     * and the FINAL payment relieves the ACTUAL remaining base AR rather
+     * than round(rate x amount) — mirrors
+     * InvoiceFxPaymentTest::test_settlement_rounding_the_final_payment_zeroes_base_ar_exactly_despite_partial_rounding_residue.
+     * If check (c) naively re-derived expected base AR per-payment instead
+     * of trusting each payment's own stored base_ar_relief, THIS is the
+     * scenario that would produce a false positive.
+     */
+    public function test_fully_paid_fx_invoice_with_settlement_rounding_residue_is_clean(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $contact = $this->customer($company);
+        $this->invoiceChart($company);
+        $income = $this->incomeAccount($company);
+        $bank = $this->bankAccountModel($company);
+
+        $invoice = $this->usdDraftInvoice($company, $contact);
+        $this->invoiceLine($invoice, $income, ['quantity' => '1', 'unit_price' => 300, 'tax_rate_id' => null]);
+        $this->sendInvoice($invoice, ['fx_rate' => '1.005'])->assertRedirect();
+        $invoice = $invoice->fresh();
+        $this->assertSame(302, $invoice->base_total);
+
+        $this->pay($invoice, ['amount' => 100, 'base_amount' => 101, 'bank_account_id' => $bank->id, 'payment_date' => '2026-07-10'])->assertRedirect();
+        $this->pay($invoice->fresh(), ['amount' => 100, 'base_amount' => 101, 'bank_account_id' => $bank->id, 'payment_date' => '2026-07-12'])->assertRedirect();
+        $this->pay($invoice->fresh(), ['amount' => 100, 'base_amount' => 100, 'bank_account_id' => $bank->id, 'payment_date' => '2026-07-14'])->assertRedirect();
+
+        $invoice = $invoice->fresh();
+        $this->assertSame(InvoiceStatus::Paid, $invoice->status);
+        $this->assertSame(300, $invoice->amount_paid);
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+
+        $this->assertSame([], $findings);
+    }
+
+    /**
+     * document_balance: raw-tamper an invoice's stored `balance` (bypassing
+     * InvoicePaymentService entirely) so it disagrees with total minus
+     * non-void payments.
+     */
+    public function test_document_balance_finding_when_invoice_balance_disagrees_with_payments(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $contact = $this->customer($company);
+        $this->invoiceChart($company);
+        $income = $this->incomeAccount($company);
+        $bank = $this->bankAccountModel($company);
+
+        $invoice = $this->domesticDraftInvoice($company, $contact);
+        $this->invoiceLine($invoice, $income, ['quantity' => '1', 'unit_price' => 10000, 'tax_rate_id' => null]);
+        $this->sendInvoice($invoice)->assertRedirect();
+        $this->pay($invoice->fresh(), ['amount' => 4000, 'bank_account_id' => $bank->id, 'payment_date' => '2026-07-05'])->assertRedirect();
+
+        // Correct balance would be 10000 - 4000 = 6000.
+        DB::table('invoices')->where('id', $invoice->id)->update(['balance' => 9999]);
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+        $checks = collect($findings)->pluck('check')->all();
+
+        $this->assertContains('document_balance', $checks);
+        $finding = collect($findings)->firstWhere('check', 'document_balance');
+        $this->assertStringContainsString((string) $invoice->id, $finding['detail']);
+        $this->assertStringContainsString('9999', $finding['detail']);
+        $this->assertStringContainsString('6000', $finding['detail']);
+    }
+
+    /**
+     * base_ar_reconciliation, branch 1 (the fully-paid invariant): tamper
+     * base_total directly on a PAID invoice, leaving the ledger and the
+     * payments table untouched. expected base AR (base_total minus
+     * non-void payments' base_ar_relief) becomes non-zero even though the
+     * ledger and the payments table are still mutually self-consistent —
+     * exactly the corruption shape the explicit "Paid => 0" assertion
+     * exists to catch (a plain expected-vs-ledger comparison alone
+     * wouldn't: see the class docblock).
+     */
+    public function test_base_ar_reconciliation_finding_when_a_paid_invoices_base_total_is_tampered(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $contact = $this->customer($company);
+        $this->invoiceChart($company);
+        $income = $this->incomeAccount($company);
+        $bank = $this->bankAccountModel($company);
+
+        $invoice = $this->usdDraftInvoice($company, $contact);
+        $this->invoiceLine($invoice, $income, ['quantity' => '1', 'unit_price' => 100000, 'tax_rate_id' => null]);
+        $this->sendInvoice($invoice, ['fx_rate' => '280'])->assertRedirect();
+        $invoice = $invoice->fresh();
+        $this->pay($invoice, [
+            'amount' => 100000, 'base_amount' => 28500000,
+            'bank_account_id' => $bank->id, 'payment_date' => '2026-07-15',
+        ])->assertRedirect();
+
+        DB::table('invoices')->where('id', $invoice->id)->update(['base_total' => 28000100]);
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+        $checks = collect($findings)->pluck('check')->all();
+
+        $this->assertContains('base_ar_reconciliation', $checks);
+        $finding = collect($findings)->firstWhere('check', 'base_ar_reconciliation');
+        $this->assertStringContainsString('fully paid', $finding['detail']);
+    }
+
+    /**
+     * base_ar_reconciliation, branch 2 (ledger-vs-expected mismatch):
+     * raw-delete a live payment's own AR ledger line, leaving the
+     * invoice_payments row (and its base_ar_relief) untouched. The
+     * business-level "expected" side never moves, but the ledger's actual
+     * base AR contribution for this invoice now disagrees with it.
+     */
+    public function test_base_ar_reconciliation_finding_when_a_payments_ar_ledger_line_is_raw_deleted(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $contact = $this->customer($company);
+        $chart = $this->invoiceChart($company);
+        $income = $this->incomeAccount($company);
+        $bank = $this->bankAccountModel($company);
+
+        $invoice = $this->usdDraftInvoice($company, $contact);
+        $this->invoiceLine($invoice, $income, ['quantity' => '1', 'unit_price' => 100000, 'tax_rate_id' => null]);
+        $this->sendInvoice($invoice, ['fx_rate' => '280'])->assertRedirect();
+        $invoice = $invoice->fresh();
+        $this->pay($invoice, [
+            'amount' => 100000, 'base_amount' => 28500000,
+            'bank_account_id' => $bank->id, 'payment_date' => '2026-07-15',
+        ])->assertRedirect();
+
+        $payment = InvoicePayment::query()->sole();
+        $paymentEntry = JournalEntry::query()
+            ->where('source_type', 'invoice_payment')->where('source_id', $payment->id)->sole();
+        $arLine = $paymentEntry->lines->firstWhere('account_id', $chart['ar']->id);
+        $this->assertNotNull($arLine);
+
+        DB::table('journal_lines')->where('id', $arLine->id)->delete();
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+        $checks = collect($findings)->pluck('check')->all();
+
+        $this->assertContains('base_ar_reconciliation', $checks);
+        $finding = collect($findings)->firstWhere('check', 'base_ar_reconciliation');
+        $this->assertStringContainsString('ledger shows', $finding['detail']);
+    }
+
+    /**
+     * Multi-company isolation for check (c) specifically: tampering company
+     * A's invoice balance must not leak findings into company B.
+     */
+    public function test_document_balance_and_base_ar_reconciliation_findings_are_isolated_to_the_tampered_company(): void
+    {
+        $companyA = Company::factory()->create();
+        $this->actingAsRole($companyA, Role::Owner);
+        $contactA = $this->customer($companyA);
+        $this->invoiceChart($companyA);
+        $incomeA = $this->incomeAccount($companyA);
+        $bankA = $this->bankAccountModel($companyA);
+
+        $invoiceA = $this->domesticDraftInvoice($companyA, $contactA);
+        $this->invoiceLine($invoiceA, $incomeA, ['quantity' => '1', 'unit_price' => 10000, 'tax_rate_id' => null]);
+        $this->sendInvoice($invoiceA)->assertRedirect();
+        DB::table('invoices')->where('id', $invoiceA->id)->update(['balance' => 1]);
+
+        $companyB = Company::factory()->create();
+        $this->actingAsRole($companyB, Role::Owner);
+        $contactB = $this->customer($companyB);
+        $this->invoiceChart($companyB);
+        $incomeB = $this->incomeAccount($companyB);
+
+        $invoiceB = $this->domesticDraftInvoice($companyB, $contactB);
+        $this->invoiceLine($invoiceB, $incomeB, ['quantity' => '1', 'unit_price' => 7500, 'tax_rate_id' => null]);
+        $this->sendInvoice($invoiceB)->assertRedirect();
+
+        $findingsA = app(IntegrityChecker::class)->checkCompany($companyA);
+        $findingsB = app(IntegrityChecker::class)->checkCompany($companyB);
+
+        $this->assertContains('document_balance', collect($findingsA)->pluck('check')->all());
+        $this->assertSame([], $findingsB);
+    }
+
+    /**
+     * A voided invoice's `balance`/`base_total` columns are never touched by
+     * InvoiceService::void() (only status/voided_at flip) — so they stay
+     * "stale" relative to the send-time total/payments, by design (spec §9:
+     * a void invoice's ledger contribution already nets to zero via its own
+     * reversal; check (c) simply doesn't apply once voided). Proven here by
+     * deliberately setting balance to something that would fail the formula
+     * if this invoice were still checked, and confirming it is not.
+     */
+    public function test_document_balance_check_ignores_a_voided_invoices_stale_balance(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $contact = $this->customer($company);
+        $this->invoiceChart($company);
+        $income = $this->incomeAccount($company);
+
+        $invoice = $this->domesticDraftInvoice($company, $contact);
+        $this->invoiceLine($invoice, $income, ['quantity' => '1', 'unit_price' => 10000, 'tax_rate_id' => null]);
+        $this->sendInvoice($invoice)->assertRedirect();
+        $this->voidInvoice($invoice->fresh(), ['memo' => 'Cancelled'])->assertRedirect();
+
+        DB::table('invoices')->where('id', $invoice->id)->update(['balance' => 123456]);
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+
+        $this->assertSame([], $findings);
     }
 
     public function test_checker_reports_every_finding_simultaneously_not_just_the_first(): void
