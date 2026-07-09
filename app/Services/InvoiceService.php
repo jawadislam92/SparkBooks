@@ -7,6 +7,7 @@ use App\Domain\Ledger\LineDraft;
 use App\Enums\EntryRole;
 use App\Enums\InvoiceStatus;
 use App\Exceptions\Invoicing\InvoiceContactNotEligible;
+use App\Exceptions\Invoicing\InvoiceFxRateRequired;
 use App\Exceptions\Invoicing\InvoiceHasLivePayments;
 use App\Exceptions\Invoicing\InvoiceHasNoLines;
 use App\Exceptions\Invoicing\InvoiceHasNoValue;
@@ -18,17 +19,27 @@ use App\Models\InvoiceLine;
 use App\Models\JournalEntry;
 use App\Models\TaxRate;
 use App\Support\AuditLogger;
+use App\Support\CompanyContext;
+use App\Support\FxConverter;
 use App\Support\IdempotencyService;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
 
 /**
  * Sends a draft invoice: assigns its document number, freezes each line's
- * tax rate, posts posting rule P1 (Dr 1100 AR / Cr income per line / Cr 2100
- * Tax Payable) via LedgerService, and flips the invoice to Sent — the first
- * ledger-posting invoice action (Phase 3 Task 3). Domestic-only: fx_rate is
- * always 1.0 here (real FX conversion lands in Task 7), so the base_* mirrors
- * always equal the (recomputed) document totals.
+ * tax rate, converts document-currency totals to base-currency mirrors, posts
+ * posting rule P1/P1fx (Dr 1100 AR / Cr income per line / Cr 2100 Tax
+ * Payable, all in BASE minor units) via LedgerService, and flips the invoice
+ * to Sent — the first ledger-posting invoice action (Phase 3 Task 3, extended
+ * for FX in Task 7). Every conversion goes through FxConverter component-wise
+ * (spec §17.1's rounding rule): for a domestic invoice (currency_code equals
+ * the company's base currency) fx_rate is fixed at exactly 1.0, and
+ * FxConverter::toBase(amount, '1') always returns `amount` unchanged (no
+ * rounding is possible when multiplying by 1) — so base_* mirrors the
+ * document totals exactly, with no special-cased domestic branch needed in
+ * the conversion step itself. This mirrors spec §3's own instruction: "no
+ * code may assume fx = 1" — the domestic case is just FX with rate 1, not a
+ * structurally different code path.
  *
  * Shape mirrors ManualJournalService/TransferService/OpeningBalanceService:
  * IdempotencyService::execute -> DB::transaction -> document mutation ->
@@ -41,12 +52,20 @@ class InvoiceService
         private DocumentNumberService $numbers,
         private IdempotencyService $idempotency,
         private AuditLogger $audit,
+        private CompanyContext $context,
     ) {}
 
-    public function send(string $idempotencyKey, Invoice $draft): Invoice
+    /**
+     * $fxRate is the SEND-time rate for a foreign-currency invoice (manually
+     * entered/editable per spec §17.1 — captured at send, not before), as a
+     * decimal string straight from the request body; null/absent for a
+     * domestic invoice, where it's ignored (fx_rate is always fixed at 1.0
+     * regardless of what's passed here — see resolveFxRate()).
+     */
+    public function send(string $idempotencyKey, Invoice $draft, ?string $fxRate = null): Invoice
     {
-        $result = $this->idempotency->execute($idempotencyKey, 'invoice.sent', function () use ($draft) {
-            return DB::transaction(function () use ($draft) {
+        $result = $this->idempotency->execute($idempotencyKey, 'invoice.sent', function () use ($draft, $fxRate) {
+            return DB::transaction(function () use ($draft, $fxRate) {
                 // Re-read fresh inside the transaction: $draft may have been
                 // resolved by the controller moments before this closure runs
                 // (and on an idempotency replay this closure doesn't execute
@@ -57,6 +76,12 @@ class InvoiceService
                     ->findOrFail($draft->id);
 
                 $this->guard($invoice);
+
+                // Resolved BEFORE freezeLines() mutates any line rows: a
+                // request missing a required fx_rate should fail cleanly with
+                // the draft left completely untouched, not after lines have
+                // already been rewritten.
+                $resolvedFxRate = $this->resolveFxRate($invoice, $fxRate);
 
                 // Freeze each line's tax rate + recompute totals from the
                 // frozen rate WHILE the invoice is still draft —
@@ -73,9 +98,22 @@ class InvoiceService
                 // computed total; freezeLines() has no other side effect that
                 // a rejection here would leave stranded (the invoice stays
                 // draft, so its just-refrozen lines remain freely editable).
+                // A zero DOCUMENT total also means a zero BASE total (any
+                // component converts to 0 regardless of rate), so checking
+                // the document total alone is sufficient here.
                 if ($computed['total'] <= 0) {
                     throw new InvoiceHasNoValue('An invoice must have a total greater than zero to be sent.');
                 }
+
+                // Component-wise base conversion (spec §17.1 P1fx): each
+                // line's subtotal and tax convert independently and the
+                // results are summed — never a single round(docTotal x rate)
+                // shot (see FxConverter's own docblock for why those two
+                // paths can disagree). base_total = base_subtotal +
+                // base_tax_total, so the P1fx AR debit built from it always
+                // equals Σ(base income credits) + base tax credit by
+                // construction.
+                $base = $this->convertToBase($computed, $resolvedFxRate);
 
                 $number = $this->numbers->next('INV', 'INV');
                 $issueDate = $invoice->issue_date?->toDateString() ?? CarbonImmutable::today()->toDateString();
@@ -88,15 +126,15 @@ class InvoiceService
                     'status' => InvoiceStatus::Sent->value,
                     'sent_at' => now(),
                     'issue_date' => $issueDate,
-                    'fx_rate' => 1,
+                    'fx_rate' => $resolvedFxRate,
                     'subtotal' => $computed['subtotal'],
                     'tax_total' => $computed['tax_total'],
                     'total' => $computed['total'],
                     'amount_paid' => 0,
                     'balance' => $computed['total'],
-                    'base_subtotal' => $computed['subtotal'],
-                    'base_tax_total' => $computed['tax_total'],
-                    'base_total' => $computed['total'],
+                    'base_subtotal' => $base['subtotal'],
+                    'base_tax_total' => $base['tax_total'],
+                    'base_total' => $base['total'],
                 ])->save();
 
                 $entry = $this->ledger->post(new EntryDraft(
@@ -104,7 +142,7 @@ class InvoiceService
                     memo: "Invoice {$number}",
                     sourceType: 'invoice',
                     sourceId: $invoice->id,
-                    lines: $this->p1Lines($invoice, $computed),
+                    lines: $this->p1Lines($invoice, $base),
                 ));
 
                 $this->audit->log('invoice.sent', $invoice, after: [
@@ -117,6 +155,76 @@ class InvoiceService
         });
 
         return Invoice::query()->findOrFail($result['id']);
+    }
+
+    /**
+     * Domestic (currency_code === company base_currency): fx_rate is always
+     * fixed at exactly '1', regardless of anything supplied in $fxRate — a
+     * domestic invoice never needs one and never depends on request input for
+     * it (spec §17.1: "a domestic invoice still fx_rate 1.0").
+     *
+     * Foreign: $fxRate must be present and shaped as a plain positive decimal
+     * (optionally with a fractional part, no more than 8dp — the same shape
+     * FxConverter itself enforces) — validated here with the app's own domain
+     * exception (InvoiceFxRateRequired, caught by the controller as a clean
+     * 422) rather than letting a malformed string fall through to
+     * FxConverter's InvalidArgumentException, which would otherwise surface
+     * as an uncaught 500.
+     */
+    private function resolveFxRate(Invoice $invoice, ?string $fxRate): string
+    {
+        $baseCurrency = $this->context->get()->base_currency;
+
+        if ($invoice->currency_code === $baseCurrency) {
+            return '1';
+        }
+
+        $trimmed = trim((string) $fxRate);
+
+        if ($trimmed === '' || preg_match('/^\d+(\.\d+)?$/', $trimmed) !== 1 || bccomp($trimmed, '0', 8) <= 0) {
+            throw new InvoiceFxRateRequired(
+                "A positive FX rate is required to send a {$invoice->currency_code} invoice (base currency is {$baseCurrency})."
+            );
+        }
+
+        return $trimmed;
+    }
+
+    /**
+     * Converts each already-frozen line component to base minor units via
+     * FxConverter::toBase, then sums — the component-wise discipline spec
+     * §17.1 requires (see FxConverter's docblock). Shape mirrors $computed
+     * from freezeLines(): same line ordering/index, plus document-level
+     * subtotal/tax_total/total in BASE minor units.
+     *
+     * @param  array{lines: array<int, array{line_subtotal:int, line_tax:int}>, subtotal:int, tax_total:int, total:int}  $computed
+     * @return array{lines: array<int, array{base_line_subtotal:int, base_line_tax:int}>, subtotal:int, tax_total:int, total:int}
+     */
+    private function convertToBase(array $computed, string $fxRate): array
+    {
+        $baseLines = [];
+        $subtotal = 0;
+        $taxTotal = 0;
+
+        foreach ($computed['lines'] as $line) {
+            $baseLineSubtotal = FxConverter::toBase($line['line_subtotal'], $fxRate);
+            $baseLineTax = FxConverter::toBase($line['line_tax'], $fxRate);
+
+            $baseLines[] = [
+                'base_line_subtotal' => $baseLineSubtotal,
+                'base_line_tax' => $baseLineTax,
+            ];
+
+            $subtotal += $baseLineSubtotal;
+            $taxTotal += $baseLineTax;
+        }
+
+        return [
+            'lines' => $baseLines,
+            'subtotal' => $subtotal,
+            'tax_total' => $taxTotal,
+            'total' => $subtotal + $taxTotal,
+        ];
     }
 
     private function guard(Invoice $invoice): void
@@ -253,48 +361,54 @@ class InvoiceService
     }
 
     /**
-     * Posting rule P1 (spec §6): Dr 1100 AR for the invoice total (WITH
-     * contact_id — LedgerService requires it on every control-account line);
-     * Cr each line's income account for its (just-frozen) subtotal; Cr 2100
-     * Tax Payable for the total tax as ONE combined line (not per-line),
-     * omitted entirely when there's no tax at all. AR always equals
-     * Σincome + tax, so the entry balances by construction.
+     * Posting rule P1/P1fx (spec §6/§17.1): Dr 1100 AR for the invoice's BASE
+     * total (WITH contact_id — LedgerService requires it on every
+     * control-account line); Cr each line's income account for its
+     * (just-converted) BASE subtotal; Cr 2100 Tax Payable for the BASE total
+     * tax as ONE combined line (not per-line), omitted entirely when there's
+     * no tax at all. AR always equals Σincome + tax, so the entry balances by
+     * construction — for a domestic invoice $base already equals $computed
+     * (FxConverter at rate 1 is an identity conversion), and for a foreign
+     * one $base holds the component-wise-converted PKR amounts, which is now
+     * a fixed base-currency liability never re-measured at payment time
+     * (spec §17.1: tax is a base-currency liability from send).
      *
-     * A $0-value line (line_subtotal === 0 — a legitimate free/promo line,
-     * allowed by StoreInvoiceRequest's unit_price min:0) contributes nothing
-     * to the ledger, so it produces NO Cr income LineDraft: a zero-value line
-     * would trip LedgerService's "exactly one side positive" rule. The line
-     * still exists on the invoice document (for display) — it just isn't
-     * posted. The AR debit and tax are unaffected (a $0 line already adds 0
-     * to both). The all-lines-$0 case can't reach here — send() rejects a
-     * zero total with InvoiceHasNoValue before this method is called.
+     * A $0-value line (base_line_subtotal === 0 — either a genuine $0
+     * doc-currency line, or any doc amount that converts to 0 base minor
+     * units, which can't happen for a positive amount at a positive rate)
+     * contributes nothing to the ledger, so it produces NO Cr income
+     * LineDraft: a zero-value line would trip LedgerService's "exactly one
+     * side positive" rule. The line still exists on the invoice document (for
+     * display) — it just isn't posted. The all-lines-$0 case can't reach
+     * here — send() rejects a zero document total with InvoiceHasNoValue
+     * before this method is called.
      *
-     * @param  array{lines: array<int, array{line_subtotal:int, line_tax:int}>, subtotal:int, tax_total:int, total:int}  $computed
+     * @param  array{lines: array<int, array{base_line_subtotal:int, base_line_tax:int}>, subtotal:int, tax_total:int, total:int}  $base
      * @return list<LineDraft>
      */
-    private function p1Lines(Invoice $invoice, array $computed): array
+    private function p1Lines(Invoice $invoice, array $base): array
     {
         $arAccount = Account::query()->where('code', '1100')->firstOrFail();
 
         $lines = [
-            new LineDraft(accountId: $arAccount->id, debit: $computed['total'], credit: 0, contactId: $invoice->contact_id),
+            new LineDraft(accountId: $arAccount->id, debit: $base['total'], credit: 0, contactId: $invoice->contact_id),
         ];
 
         foreach ($invoice->lines->values() as $index => $line) {
-            $lineSubtotal = $computed['lines'][$index]['line_subtotal'];
-            if ($lineSubtotal === 0) {
+            $baseLineSubtotal = $base['lines'][$index]['base_line_subtotal'];
+            if ($baseLineSubtotal === 0) {
                 continue;
             }
             $lines[] = new LineDraft(
                 accountId: $line->income_account_id,
                 debit: 0,
-                credit: $lineSubtotal,
+                credit: $baseLineSubtotal,
             );
         }
 
-        if ($computed['tax_total'] > 0) {
+        if ($base['tax_total'] > 0) {
             $taxPayable = Account::query()->where('code', '2100')->firstOrFail();
-            $lines[] = new LineDraft(accountId: $taxPayable->id, debit: 0, credit: $computed['tax_total']);
+            $lines[] = new LineDraft(accountId: $taxPayable->id, debit: 0, credit: $base['tax_total']);
         }
 
         return $lines;

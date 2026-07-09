@@ -155,6 +155,18 @@ class Money
             throw new InvalidArgumentException("{$label} must not be negative.");
         }
 
+        // Hardened (Phase 3 Task 7 carry-in): a non-numeric string (e.g.
+        // 'abc') would otherwise sail past every check below — it isn't
+        // empty, doesn't start with '-', and has no '.' so the fraction-part
+        // check never fires — and then blow up inside scaleRateToInteger's
+        // bcmul() with a raw ValueError instead of the documented
+        // InvalidArgumentException. A plain non-negative-decimal shape check
+        // here closes that gap for every caller (taxMinorUnits,
+        // multiplyByQuantity) before any bcmath call ever sees the string.
+        if (preg_match('/^\d+(\.\d+)?$/', $trimmed) !== 1) {
+            throw new InvalidArgumentException("{$label} must be a valid non-negative decimal number.");
+        }
+
         $fractionPart = explode('.', $trimmed, 2)[1] ?? '';
 
         if (strlen($fractionPart) > $maxDecimals) {

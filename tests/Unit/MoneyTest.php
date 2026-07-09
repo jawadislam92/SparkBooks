@@ -121,6 +121,20 @@ class MoneyTest extends TestCase
         $this->assertSame(600, Money::taxMinorUnits(3333, '18.0000'));
     }
 
+    /**
+     * Carry-in fix (Phase 3 Task 7): before this guard, a non-numeric rate
+     * string sailed past every existing check (not empty, no leading '-', no
+     * '.' so the fraction-length check never fired) and then blew up inside
+     * bcmul() with a raw ValueError instead of the documented
+     * InvalidArgumentException — see the FxConverter/InvoiceFxSend work this
+     * was carried alongside for the same hardening applied to fx_rate.
+     */
+    public function test_non_numeric_rate_throws_invalid_argument_exception_not_a_bcmath_value_error(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        Money::taxMinorUnits(3333, 'abc');
+    }
+
     // -----------------------------------------------------------------
     // multiplyByQuantity — minor x decimal quantity (<=4dp), half-up,
     // integer/bcmath only (no float).
@@ -181,6 +195,13 @@ class MoneyTest extends TestCase
     {
         $this->expectException(InvalidArgumentException::class);
         Money::multiplyByQuantity(-1, '1');
+    }
+
+    /** Same carry-in fix as test_non_numeric_rate_throws... above, for the quantity guard. */
+    public function test_non_numeric_quantity_throws_invalid_argument_exception_not_a_bcmath_value_error(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        Money::multiplyByQuantity(10000, 'abc');
     }
 
     // -----------------------------------------------------------------

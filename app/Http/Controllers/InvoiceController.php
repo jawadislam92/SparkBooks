@@ -200,18 +200,24 @@ class InvoiceController extends Controller
     }
 
     /**
-     * Assigns the invoice's document number, posts posting rule P1 (Dr AR /
-     * Cr income per line / Cr Tax Payable) via InvoiceService, and flips the
-     * draft to Sent. $invoice is a plain route parameter (not implicit
-     * binding) for the same reason as edit()/update()/destroy() above.
+     * Assigns the invoice's document number, posts posting rule P1/P1fx (Dr
+     * AR / Cr income per line / Cr Tax Payable, in base currency) via
+     * InvoiceService, and flips the draft to Sent. $invoice is a plain route
+     * parameter (not implicit binding) for the same reason as
+     * edit()/update()/destroy() above.
      *
      * The idempotency key travels in a header (like every other posting
-     * action in this app) rather than the body — there's no other form data
-     * to send here. Both InvoiceSendException (this controller's own domain
-     * guards: not-a-draft, no lines, ineligible contact) and LedgerException
-     * (e.g. a locked period) are surfaced the same way: a 422 with the
-     * message on a generic `status` field, since there's no single natural
-     * form field for a whole-invoice action like this one.
+     * action in this app) rather than the body. `fx_rate` (Phase 3 Task 7,
+     * spec §17.1) is the one piece of real form data this action DOES take:
+     * for a foreign-currency invoice it's manually entered/editable at send
+     * time, so it travels in the body; it's simply ignored for a domestic
+     * invoice (InvoiceService::send fixes fx_rate at 1.0 regardless). Both
+     * InvoiceSendException (this controller's own domain guards: not-a-draft,
+     * no lines, ineligible contact, missing/invalid fx_rate for a foreign
+     * invoice) and LedgerException (e.g. a locked period) are surfaced the
+     * same way: a 422 with the message on a generic `status` field, since
+     * there's no single natural form field for a whole-invoice action like
+     * this one.
      */
     public function send(Request $request, string $invoice, InvoiceService $service): RedirectResponse
     {
@@ -224,8 +230,12 @@ class InvoiceController extends Controller
             ]);
         }
 
+        $validated = $request->validate([
+            'fx_rate' => ['nullable', 'string', 'max:32'],
+        ]);
+
         try {
-            $service->send($idempotencyKey, $model);
+            $service->send($idempotencyKey, $model, $validated['fx_rate'] ?? null);
         } catch (InvoiceSendException|LedgerException $e) {
             throw ValidationException::withMessages(['status' => $e->getMessage()]);
         }
