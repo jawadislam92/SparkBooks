@@ -8,12 +8,14 @@ use App\Enums\AccountSubtype;
 use App\Enums\AccountType;
 use App\Enums\ContactType;
 use App\Enums\EntryRole;
+use App\Enums\InvoiceStatus;
 use App\Enums\Role;
 use App\Models\Account;
 use App\Models\ActivityLog;
 use App\Models\BankAccount;
 use App\Models\Company;
 use App\Models\Contact;
+use App\Models\Invoice;
 use App\Models\JournalEntry;
 use App\Models\OpeningBalanceRun;
 use App\Models\OpeningDocument;
@@ -328,6 +330,16 @@ class OpeningBalancesTest extends TestCase
         $this->assertSame(150000, $customerDoc->amount);
         $this->assertSame('open', $customerDoc->status);
 
+        // Task 6: the receivable document is linked to a payable is_opening
+        // invoice; the payable document is not (vendors are out of scope
+        // for this task — see OpeningInvoiceTest for the full coverage).
+        $this->assertNotNull($customerDoc->invoice_id);
+        $openingInvoice = Invoice::query()->findOrFail($customerDoc->invoice_id);
+        $this->assertTrue($openingInvoice->is_opening);
+        $this->assertSame(InvoiceStatus::Sent, $openingInvoice->status);
+        $this->assertSame($customerA->id, $openingInvoice->contact_id);
+        $this->assertSame(150000, $openingInvoice->balance);
+
         $vendorDoc = OpeningDocument::query()->where('kind', 'payable')->sole();
         $this->assertSame($run->id, $vendorDoc->opening_balance_run_id);
         $this->assertSame($vendorA->id, $vendorDoc->contact_id);
@@ -336,6 +348,7 @@ class OpeningBalancesTest extends TestCase
         $this->assertSame('2026-06-10', $vendorDoc->due_date->toDateString());
         $this->assertSame(60000, $vendorDoc->amount);
         $this->assertSame('open', $vendorDoc->status);
+        $this->assertNull($vendorDoc->invoice_id);
     }
 
     // ---------------------------------------------------------------
@@ -647,6 +660,18 @@ class OpeningBalancesTest extends TestCase
         $vendorDoc2 = OpeningDocument::query()->where('opening_balance_run_id', $run2->id)->sole();
         $this->assertSame('open', $vendorDoc2->status);
         $this->assertSame($vendorB->id, $vendorDoc2->contact_id);
+
+        // Phase 3 Task 6: the prior run's is_opening invoice (representing
+        // customerDoc1's receivable) is voided along with everything else —
+        // it's no longer payable once its AR has been reversed off the
+        // books. The re-run had no customer lines, so no fresh is_opening
+        // invoice is created this time (vendorDoc2 is a payable — Task 6 is
+        // receivables/invoices only).
+        $this->assertNotNull($customerDoc1->invoice_id, 'Task 6: a receivable opening_document must be linked to an is_opening invoice.');
+        $openingInvoice1 = Invoice::query()->findOrFail($customerDoc1->invoice_id);
+        $this->assertSame(InvoiceStatus::Void, $openingInvoice1->status);
+        $this->assertNotNull($openingInvoice1->voided_at);
+        $this->assertNull($vendorDoc2->invoice_id, 'A payable opening_document never gets an invoice (Task 6 is receivables-only).');
 
         // Exactly 3 journal entries total for this source type: run1 primary,
         // run1 reversal, run2 primary. No duplicate on the same source (the

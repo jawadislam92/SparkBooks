@@ -6,6 +6,7 @@ use App\Http\Controllers\CompanySwitchController;
 use App\Http\Controllers\ContactController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\HealthController;
+use App\Http\Controllers\InvoiceController;
 use App\Http\Controllers\ItemController;
 use App\Http\Controllers\ManualJournalController;
 use App\Http\Controllers\OnboardingController;
@@ -90,6 +91,48 @@ Route::middleware(['auth', 'verified', 'company', 'can:contacts.manage'])->group
     Route::post('/contacts/{contact}/archive', [ContactController::class, 'archive'])->name('contacts.archive');
     Route::post('/contacts/{contact}/unarchive', [ContactController::class, 'unarchive'])->name('contacts.unarchive');
     Route::get('/contacts/{contact}', [ContactController::class, 'show'])->name('contacts.show');
+});
+
+Route::middleware(['auth', 'verified', 'company', 'can:invoices.draft'])->group(function () {
+    Route::get('/invoices', [InvoiceController::class, 'index'])->name('invoices.index');
+    Route::get('/invoices/new', [InvoiceController::class, 'create'])->name('invoices.new');
+    Route::post('/invoices', [InvoiceController::class, 'store'])->name('invoices.store');
+    // Registered BEFORE the /edit route below on purpose: both are GETs under
+    // /invoices/{invoice}/..., and Laravel matches route definitions in
+    // registration order — {invoice} alone would otherwise never lose to a
+    // more specific suffix if it were registered first (it isn't a real
+    // conflict here since /edit has an extra path segment, but this keeps the
+    // "wildcard's own root path last" convention obvious at a glance).
+    Route::get('/invoices/{invoice}', [InvoiceController::class, 'show'])->name('invoices.show');
+    Route::get('/invoices/{invoice}/edit', [InvoiceController::class, 'edit'])->name('invoices.edit');
+    Route::patch('/invoices/{invoice}', [InvoiceController::class, 'update'])->name('invoices.update');
+    Route::delete('/invoices/{invoice}', [InvoiceController::class, 'destroy'])->name('invoices.destroy');
+    Route::get('/invoices/{invoice}/pdf', [InvoiceController::class, 'pdf'])->name('invoices.pdf');
+});
+
+// invoices.send is a narrower gate than invoices.draft (Staff can draft but
+// not send, see config/permissions.php §7.14), so it needs its own group.
+// Emailing (spec §17.6) shares this gate: the person who sends invoices
+// emails them too — there is no separate email permission in the catalog.
+Route::middleware(['auth', 'verified', 'company', 'can:invoices.send'])->group(function () {
+    Route::post('/invoices/{invoice}/send', [InvoiceController::class, 'send'])->name('invoices.send');
+    Route::post('/invoices/{invoice}/email', [InvoiceController::class, 'email'])->name('invoices.email');
+    Route::post('/invoices/{invoice}/email/resend', [InvoiceController::class, 'resendEmail'])->name('invoices.email.resend');
+});
+
+// payments.record is its own permission (Owner/Admin/Accountant, not Staff —
+// config/permissions.php §7.14), independent of invoices.send.
+Route::middleware(['auth', 'verified', 'company', 'can:payments.record'])->group(function () {
+    Route::post('/invoices/{invoice}/payments', [InvoiceController::class, 'recordPayment'])->name('invoices.payments.record');
+});
+
+// invoices.void gates BOTH void actions (Owner/Admin/Accountant, not Staff —
+// config/permissions.php §7.14): voiding a payment (P2/P3 reversal) and
+// voiding the invoice itself (P9, spec §6) are two steps of the same
+// accounting-correct "void an invoice" workflow (payments first).
+Route::middleware(['auth', 'verified', 'company', 'can:invoices.void'])->group(function () {
+    Route::post('/invoices/{invoice}/void', [InvoiceController::class, 'void'])->name('invoices.void');
+    Route::post('/invoices/{invoice}/payments/{payment}/void', [InvoiceController::class, 'voidPayment'])->name('invoices.payments.void');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:items.manage'])->group(function () {

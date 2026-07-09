@@ -18,15 +18,25 @@ class HandleInertiaRequests extends Middleware
 
     /**
      * The subset of config('permissions.catalog') the sidebar nav (see
-     * resources/js/Layouts/AppShell.tsx) needs to decide what to render for
-     * the current role. This is NOT a general-purpose authorization export —
+     * resources/js/Layouts/AppShell.tsx) — and, as of Phase 3 Task 11,
+     * Invoices/Show's action bar — needs to decide what to render for the
+     * current role. This is NOT a general-purpose authorization export —
      * every route those links point at is still independently gated by its
      * own `can:` middleware/Gate::allows check; this list only has to stay in
-     * sync with whatever abilities the nav conditionally renders on.
+     * sync with whatever abilities the nav (or a page's own action gating)
+     * conditionally renders on.
      *
      * @var list<string>
      */
     private const NAV_ABILITIES = [
+        'invoices.draft',
+        // Task 11: Invoices/Show gates its Send/Record payment/Void buttons
+        // on these three — narrower than invoices.draft (see routes/web.php's
+        // own comments: invoices.send/payments.record/invoices.void are each
+        // their own gate, Staff holds none of them).
+        'invoices.send',
+        'payments.record',
+        'invoices.void',
         'contacts.manage',
         'items.manage',
         'accounts.manage',

@@ -2,6 +2,8 @@
 
 namespace App\Support;
 
+use InvalidArgumentException;
+
 /**
  * Money is one of the "iron rules" surfaces (PROJECT_MAP §7/§9): every money
  * value is an integer number of minor units end-to-end, and nothing on a
@@ -20,6 +22,12 @@ class Money
 
     /** 10 ** RATE_DECIMALS, kept as a bcmath-ready string. */
     private const RATE_SCALE_FACTOR = '10000';
+
+    /** invoice_lines.quantity is DECIMAL(12,4) — up to 4 fractional digits. */
+    private const QUANTITY_DECIMALS = 4;
+
+    /** 10 ** QUANTITY_DECIMALS, kept as a bcmath-ready string. */
+    private const QUANTITY_SCALE_FACTOR = '10000';
 
     /**
      * Tax on a net line amount (in minor units) at a percent rate string
@@ -40,14 +48,57 @@ class Money
      *      (2*divisor)). That identity holds because every operand here is
      *      non-negative (rates are validated 0-100; minor-unit amounts are
      *      never negative).
+     *
+     * Hardened (Phase 3 — carried forward from Phase 2, PROJECT_MAP §10):
+     * invoicing is the first real caller of this method against
+     * user-influenced input (a tax_rate_id resolves to a DB-stored rate, but
+     * lineNetMinor is itself derived from client-typed quantity/unit_price),
+     * so this now throws loudly instead of silently truncating a negative
+     * amount/rate or a rate with more than 4 decimal places — the identity
+     * in step 4 above is only valid for non-negative operands, and a >4dp
+     * rate would silently lose precision in step 1's exact scaling.
      */
     public static function taxMinorUnits(int $lineNetMinor, string $ratePercent): int
     {
-        $rateScaledInt = self::scaleRateToInteger($ratePercent);
+        if ($lineNetMinor < 0) {
+            throw new InvalidArgumentException('lineNetMinor must not be negative.');
+        }
+
+        $trimmedRate = self::assertNonNegativeDecimal($ratePercent, self::RATE_DECIMALS, 'ratePercent');
+
+        $rateScaledInt = self::scaleRateToInteger($trimmedRate);
         $numerator = bcmul((string) $lineNetMinor, $rateScaledInt);
         $divisor = bcmul('100', self::RATE_SCALE_FACTOR);
 
         return self::bcHalfUpDivide($numerator, $divisor);
+    }
+
+    /**
+     * Multiplies a minor-unit amount by a decimal quantity (up to 4 decimal
+     * places, e.g. invoice_lines.quantity's DECIMAL(12,4)), rounded HALF-UP
+     * to the nearest minor unit — integer/bcmath only, exactly like
+     * taxMinorUnits above:
+     *   1. The quantity is scaled to an integer by multiplying by 10^4
+     *      (exact, because it has at most 4 decimal places) — e.g.
+     *      "2.5" -> "25000".
+     *   2. numerator = minor * quantityScaledInt, via bcmul.
+     *   3. divisor = 10^4 — undoes the quantity scale.
+     *   4. round_half_up(numerator / divisor), via the same
+     *      floor((2*numerator + divisor) / (2*divisor)) identity, valid
+     *      because both operands are guaranteed non-negative below.
+     */
+    public static function multiplyByQuantity(int $minor, string $quantity): int
+    {
+        if ($minor < 0) {
+            throw new InvalidArgumentException('minor must not be negative.');
+        }
+
+        $trimmedQuantity = self::assertNonNegativeDecimal($quantity, self::QUANTITY_DECIMALS, 'quantity');
+
+        $quantityScaledInt = bcmul($trimmedQuantity, self::QUANTITY_SCALE_FACTOR, 0);
+        $numerator = bcmul((string) $minor, $quantityScaledInt);
+
+        return self::bcHalfUpDivide($numerator, self::QUANTITY_SCALE_FACTOR);
     }
 
     /**
@@ -82,6 +133,47 @@ class Money
         $fractionUnits = (int) str_pad($fractionPart, 2, '0');
 
         return $wholeUnits * 100 + $fractionUnits;
+    }
+
+    /**
+     * Shared guard for taxMinorUnits' rate and multiplyByQuantity's quantity:
+     * both are decimal *strings* that must be non-negative and have at most
+     * `$maxDecimals` fractional digits, so their later bcmul-based scaling
+     * step is exact rather than silently truncating precision. Deliberately
+     * does NOT require the whole string to be a well-formed number beyond
+     * that — both callers only ever receive strings already shaped by
+     * upstream validation (a DB decimal cast, or StoreInvoiceRequest's own
+     * quantity regex) — this guard exists so a caller that skips that
+     * upstream validation fails loudly here instead of silently mis-rounding.
+     * Returns the trimmed string for the caller to scale.
+     */
+    private static function assertNonNegativeDecimal(string $value, int $maxDecimals, string $label): string
+    {
+        $trimmed = trim($value);
+
+        if ($trimmed === '' || str_starts_with($trimmed, '-')) {
+            throw new InvalidArgumentException("{$label} must not be negative.");
+        }
+
+        // Hardened (Phase 3 Task 7 carry-in): a non-numeric string (e.g.
+        // 'abc') would otherwise sail past every check below — it isn't
+        // empty, doesn't start with '-', and has no '.' so the fraction-part
+        // check never fires — and then blow up inside scaleRateToInteger's
+        // bcmul() with a raw ValueError instead of the documented
+        // InvalidArgumentException. A plain non-negative-decimal shape check
+        // here closes that gap for every caller (taxMinorUnits,
+        // multiplyByQuantity) before any bcmath call ever sees the string.
+        if (preg_match('/^\d+(\.\d+)?$/', $trimmed) !== 1) {
+            throw new InvalidArgumentException("{$label} must be a valid non-negative decimal number.");
+        }
+
+        $fractionPart = explode('.', $trimmed, 2)[1] ?? '';
+
+        if (strlen($fractionPart) > $maxDecimals) {
+            throw new InvalidArgumentException("{$label} must not have more than {$maxDecimals} decimal places.");
+        }
+
+        return $trimmed;
     }
 
     /**

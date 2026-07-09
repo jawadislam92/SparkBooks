@@ -5,10 +5,12 @@ namespace App\Services;
 use App\Domain\Ledger\EntryDraft;
 use App\Domain\Ledger\LineDraft;
 use App\Enums\EntryRole;
+use App\Enums\InvoiceStatus;
 use App\Exceptions\OpeningBalancesLocked;
 use App\Models\Account;
 use App\Models\BankAccount;
 use App\Models\Company;
+use App\Models\Invoice;
 use App\Models\JournalEntry;
 use App\Models\OpeningBalanceRun;
 use App\Models\OpeningDocument;
@@ -25,6 +27,7 @@ class OpeningBalanceService
         private IdempotencyService $idempotency,
         private AuditLogger $audit,
         private CompanyContext $context,
+        private DocumentNumberService $numbers,
     ) {}
 
     /**
@@ -37,6 +40,18 @@ class OpeningBalanceService
      *   plug — exactly one 3100 Opening Balance Equity line balancing the rest.
      * Every AR/AP line carries contact_id (spec §6 note) so aging (Phase 5)
      * ties out to the control accounts.
+     *
+     * Phase 3 Task 6 (spec §6 P8b intends opening docs to BE invoices): each
+     * customer_lines row also gets an is_opening Invoice (status Sent,
+     * balance/total = amount, number from the 'OB' document-number series),
+     * created straight to Sent with NO ledger posting of its own — the AR
+     * line built here (P8b) already covers it; posting a second one would
+     * double the receivable. The invoice is what makes the opening
+     * receivable PAYABLE: InvoicePaymentService::recordPayment (Task 4)
+     * settles it through the ordinary P2/P3 path, unmodified. Vendor
+     * (payable) lines are unaffected — they stay opening_documents-only
+     * until Phase 4 bills exist. See buildLinesAndDocuments() below and
+     * .superpowers/sdd/task-6-report.md for the full design writeup.
      *
      * Re-running (an 'active' run already exists) VOIDS the prior run FIRST:
      * reverses its ledger entry, marks the run 'voided' and its opening
@@ -132,6 +147,17 @@ class OpeningBalanceService
      * call, but if a pre-existing duplicate active run is found (a
      * leftover race artifact, see class docblock), this is called once per
      * run so every one of them gets voided, not just the first.
+     *
+     * Task 6 addendum: also voids every is_opening invoice this run created
+     * (found via opening_documents.invoice_id, since Invoice carries no
+     * run reference of its own). The reversal above already wiped that AR
+     * off the books, so these invoices must stop being payable — but since
+     * an is_opening invoice never posted its own P1 (see
+     * buildLinesAndDocuments()), there's no P9 to reverse for it; marking it
+     * void directly is the correct mirror. This can never orphan a PAID
+     * invoice: hasRealTransaction above already refuses the whole re-run
+     * the moment any payment (source_type=invoice_payment) has posted
+     * against one of this run's invoices, before any of this runs.
      */
     private function voidPriorRun(OpeningBalanceRun $priorRun): void
     {
@@ -157,6 +183,17 @@ class OpeningBalanceService
             CarbonImmutable::parse($priorEntry->entry_date->toDateString()),
             'Opening balances re-run: voiding prior setup',
         );
+
+        $invoiceIds = OpeningDocument::query()
+            ->where('opening_balance_run_id', $priorRun->id)
+            ->whereNotNull('invoice_id')
+            ->pluck('invoice_id');
+        if ($invoiceIds->isNotEmpty()) {
+            Invoice::query()->whereIn('id', $invoiceIds)->update([
+                'status' => InvoiceStatus::Void->value,
+                'voided_at' => now(),
+            ]);
+        }
 
         $priorRun->update(['status' => 'voided']);
         OpeningDocument::query()->where('opening_balance_run_id', $priorRun->id)->update(['status' => 'void']);
@@ -198,9 +235,12 @@ class OpeningBalanceService
             }
             $arAccount ??= Account::query()->where('code', '1100')->firstOrFail();
 
+            $openingInvoice = $this->createOpeningInvoice($customerLine);
+
             OpeningDocument::query()->create([
                 'opening_balance_run_id' => $run->id,
                 'contact_id' => $customerLine['contact_id'],
+                'invoice_id' => $openingInvoice->id,
                 'kind' => 'receivable',
                 'reference' => $customerLine['reference'] ?? null,
                 'original_date' => $customerLine['original_date'],
@@ -259,5 +299,43 @@ class OpeningBalanceService
         }
 
         return [$lines, $documentCount];
+    }
+
+    /**
+     * Creates the is_opening Invoice that represents one customer opening
+     * receivable (Task 6). Deliberately created straight to Sent (never
+     * through InvoiceService::send()) with NO ledger posting — the P8b line
+     * built by the caller already covers this same amount, so this method
+     * touches only the invoices/opening_documents tables. No invoice_lines
+     * either: an opening balance is a lump-sum carry-in from the old books,
+     * not an itemized sale, and there's no income account it would be
+     * correct to attribute it to — see task-6-report.md.
+     *
+     * @param  array{contact_id:int, reference?:?string, original_date:string, due_date:string, amount:int}  $customerLine
+     */
+    private function createOpeningInvoice(array $customerLine): Invoice
+    {
+        $amount = $customerLine['amount'];
+
+        return Invoice::query()->create([
+            'contact_id' => $customerLine['contact_id'],
+            'number' => $this->numbers->next('OB', 'OB'),
+            'status' => InvoiceStatus::Sent->value,
+            'issue_date' => $customerLine['original_date'],
+            'due_date' => $customerLine['due_date'],
+            'currency_code' => $this->context->get()->base_currency,
+            'fx_rate' => 1,
+            'subtotal' => $amount,
+            'tax_total' => 0,
+            'total' => $amount,
+            'amount_paid' => 0,
+            'balance' => $amount,
+            'base_subtotal' => $amount,
+            'base_tax_total' => 0,
+            'base_total' => $amount,
+            'is_opening' => true,
+            'created_by' => auth()->id(),
+            'sent_at' => now(),
+        ]);
     }
 }

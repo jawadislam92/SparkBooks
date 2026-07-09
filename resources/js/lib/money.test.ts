@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { formatMoney, parseMoneyInput } from './money';
+import {
+    computeLineTax,
+    formatMoney,
+    multiplyMinorByQuantity,
+    parseMoneyInput,
+} from './money';
 
 // Exact expected strings for the output of `formatMoney`, which pins the
 // Intl.NumberFormat to exactly 2 fraction digits (minimum + maximum). Because
@@ -79,4 +84,37 @@ describe('parseMoneyInput', () => {
             expect(parseMoneyInput(digitsOnly)).toBe(n);
         },
     );
+});
+
+// Mirrors app/Support/Money's own worked examples (see MoneyTest.php) — the
+// invoice line editor's client-side preview must match the server's
+// bcmath-computed result exactly.
+describe('multiplyMinorByQuantity', () => {
+    it.each([
+        [10000, '2.5', 25000],
+        [3333, '3', 9999],
+        [3333, '1.5', 5000], // 4999.5 -> half-up 5000, a genuine tie.
+        [12345, '0.0001', 1], // 1.2345 -> half-up 1.
+        [10000, '0', 0],
+    ])('multiplyMinorByQuantity(%i, %j) === %i', (minor, quantity, expected) => {
+        expect(multiplyMinorByQuantity(minor, quantity)).toBe(expected);
+    });
+
+    it.each(['-2.5', '2.50001', 'abc', ''])(
+        'returns null for an invalid quantity %j',
+        (quantity) => {
+            expect(multiplyMinorByQuantity(10000, quantity)).toBeNull();
+        },
+    );
+});
+
+describe('computeLineTax', () => {
+    it.each([
+        [10000, '18', 1800],
+        [3333, '18', 600], // 599.94 -> half-up 600, the brief's own worked example.
+        [100, '0.5', 1], // exact 0.5 minor-unit tie -> half-up 1.
+        [999999, '0', 0],
+    ])('computeLineTax(%i, %j) === %i', (subtotal, rate, expected) => {
+        expect(computeLineTax(subtotal, rate)).toBe(expected);
+    });
 });
