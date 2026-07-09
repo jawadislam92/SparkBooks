@@ -271,7 +271,7 @@ class InvoiceFxPaymentTest extends TestCase
             'payment_date' => '2026-07-15',
         ]);
 
-        $response->assertRedirect(route('invoices.edit', $invoice->id));
+        $response->assertRedirect(route('invoices.show', $invoice->id));
 
         $invoice->refresh();
         $this->assertSame(InvoiceStatus::Paid, $invoice->status);

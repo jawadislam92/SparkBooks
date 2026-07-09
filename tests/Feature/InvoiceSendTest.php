@@ -156,7 +156,7 @@ class InvoiceSendTest extends TestCase
 
         $response = $this->sendInvoice($invoice);
 
-        $response->assertRedirect(route('invoices.edit', $invoice->id));
+        $response->assertRedirect(route('invoices.show', $invoice->id));
 
         $invoice->refresh();
         $this->assertSame('INV-0001', $invoice->number);

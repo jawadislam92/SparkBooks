@@ -16,9 +16,11 @@ use App\Http\Requests\StoreInvoiceRequest;
 use App\Http\Requests\StorePaymentRequest;
 use App\Http\Requests\UpdateInvoiceRequest;
 use App\Models\Account;
+use App\Models\BankAccount;
 use App\Models\Contact;
 use App\Models\Invoice;
 use App\Models\InvoiceLine;
+use App\Models\InvoicePayment;
 use App\Models\Item;
 use App\Models\TaxRate;
 use App\Services\InvoiceCalculator;
@@ -133,6 +135,43 @@ class InvoiceController extends Controller
             ['invoice' => $this->invoiceEditPayload($model)],
             $this->formOptions(),
         ));
+    }
+
+    /**
+     * The invoice detail screen (Phase 3 Task 11) — the canonical landing
+     * page for a POSTED invoice (every action's redirect below points back
+     * here) and also viewable for a draft (Edit remains the draft EDITOR;
+     * Show is the read-only detail + action-bar view for every status,
+     * including draft). Same `can:invoices.draft` gate as index/create/edit —
+     * see formOptions()'s reasoning: every role that can see an invoice at
+     * all can view this page; the individual action buttons it renders are
+     * gated client-side by the narrower invoices.send/payments.record/
+     * invoices.void abilities (shared via HandleInertiaRequests::NAV_ABILITIES),
+     * with every one of those routes independently gated server-side too.
+     *
+     * $invoice is a plain route parameter (not implicit binding) for the
+     * same reason as every other action here — SubstituteBindings runs
+     * before SetCompanyContext.
+     */
+    public function show(string $invoice): Response
+    {
+        $model = Invoice::query()
+            ->with([
+                'contact:id,name',
+                'lines' => fn ($query) => $query->orderBy('id'),
+                'payments' => fn ($query) => $query->orderBy('payment_date')->orderBy('id'),
+                'payments.bankAccount:id,name',
+            ])
+            ->findOrFail($invoice);
+
+        return Inertia::render('Invoices/Show', [
+            'invoice' => $this->invoiceShowPayload($model),
+            'bankAccounts' => BankAccount::query()
+                ->where('is_archived', false)
+                ->orderBy('name')
+                ->get(['id', 'name', 'currency_code'])
+                ->values(),
+        ]);
     }
 
     /**
@@ -271,7 +310,7 @@ class InvoiceController extends Controller
             throw ValidationException::withMessages(['status' => $e->getMessage()]);
         }
 
-        return redirect()->route('invoices.edit', $model->id);
+        return redirect()->route('invoices.show', $model->id);
     }
 
     /**
@@ -298,7 +337,7 @@ class InvoiceController extends Controller
             throw ValidationException::withMessages(['status' => $e->getMessage()]);
         }
 
-        return redirect()->route('invoices.edit', $model->id);
+        return redirect()->route('invoices.show', $model->id);
     }
 
     /**
@@ -319,7 +358,7 @@ class InvoiceController extends Controller
             throw ValidationException::withMessages(['status' => $e->getMessage()]);
         }
 
-        return redirect()->route('invoices.edit', $model->id);
+        return redirect()->route('invoices.show', $model->id);
     }
 
     /**
@@ -363,7 +402,7 @@ class InvoiceController extends Controller
             throw ValidationException::withMessages(['status' => $e->getMessage()]);
         }
 
-        return redirect()->route('invoices.edit', $model->id);
+        return redirect()->route('invoices.show', $model->id);
     }
 
     /**
@@ -421,7 +460,7 @@ class InvoiceController extends Controller
             throw ValidationException::withMessages(['status' => 'This invoice has already been voided.']);
         }
 
-        return redirect()->route('invoices.edit', $model->id);
+        return redirect()->route('invoices.show', $model->id);
     }
 
     /**
@@ -460,7 +499,7 @@ class InvoiceController extends Controller
             throw ValidationException::withMessages(['status' => 'This payment has already been reversed.']);
         }
 
-        return redirect()->route('invoices.edit', $model->id);
+        return redirect()->route('invoices.show', $model->id);
     }
 
     /**
@@ -631,5 +670,59 @@ class InvoiceController extends Controller
             'line_subtotal' => $line->line_subtotal,
             'line_tax' => $line->line_tax,
         ])->values()->all();
+    }
+
+    /**
+     * The full detail payload for Invoices/Show — every field the header,
+     * line table, payments list, and action-bar gating (is_opening,
+     * email_status) need. Unlike invoiceEditPayload (draft-editor only),
+     * this covers every status, plus the BASE-currency mirrors and payments
+     * a posted invoice carries.
+     *
+     * @return array<string, mixed>
+     */
+    private function invoiceShowPayload(Invoice $invoice): array
+    {
+        return [
+            'id' => $invoice->id,
+            'number' => $invoice->number,
+            'status' => $invoice->status->value,
+            'is_opening' => $invoice->is_opening,
+            'contact' => [
+                'id' => $invoice->contact->id,
+                'name' => $invoice->contact->name,
+            ],
+            'currency_code' => $invoice->currency_code,
+            'fx_rate' => (string) $invoice->fx_rate,
+            'issue_date' => $invoice->issue_date?->toDateString(),
+            'due_date' => $invoice->due_date?->toDateString(),
+            'notes' => $invoice->notes,
+            'subtotal' => $invoice->subtotal,
+            'tax_total' => $invoice->tax_total,
+            'total' => $invoice->total,
+            'amount_paid' => $invoice->amount_paid,
+            'balance' => $invoice->balance,
+            'base_subtotal' => $invoice->base_subtotal,
+            'base_tax_total' => $invoice->base_tax_total,
+            'base_total' => $invoice->base_total,
+            'email_status' => $invoice->email_status,
+            'sent_at' => $invoice->sent_at?->toIso8601String(),
+            'voided_at' => $invoice->voided_at?->toIso8601String(),
+            'lines' => $this->linesPayload($invoice->lines),
+            'payments' => $invoice->payments->map(fn (InvoicePayment $payment) => [
+                'id' => $payment->id,
+                'payment_date' => $payment->payment_date->toDateString(),
+                'amount' => $payment->amount,
+                'base_amount' => $payment->base_amount,
+                'base_ar_relief' => $payment->base_ar_relief,
+                'fx_rate' => $payment->fx_rate !== null ? (string) $payment->fx_rate : null,
+                'status' => $payment->status,
+                'memo' => $payment->memo,
+                'bank_account' => $payment->bankAccount !== null ? [
+                    'id' => $payment->bankAccount->id,
+                    'name' => $payment->bankAccount->name,
+                ] : null,
+            ])->values()->all(),
+        ];
     }
 }

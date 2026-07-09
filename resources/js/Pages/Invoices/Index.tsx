@@ -1,6 +1,7 @@
 import Button from '@/Components/ui/Button';
 import MoneyText from '@/Components/ui/MoneyText';
 import Sheet from '@/Components/ui/Sheet';
+import StatusChip from '@/Components/invoices/StatusChip';
 import AppShell from '@/Layouts/AppShell';
 import { PageProps } from '@/types';
 import { Head, router, usePage } from '@inertiajs/react';
@@ -35,38 +36,6 @@ const STATUS_FILTER_OPTIONS: { value: StatusFilter; label: string }[] = [
     { value: 'void', label: 'Void' },
 ];
 
-const STATUS_LABELS: Record<string, string> = {
-    draft: 'Draft',
-    sent: 'Sent',
-    partially_paid: 'Partially paid',
-    paid: 'Paid',
-    void: 'Void',
-};
-
-// Reuses the same token combinations already established for chips
-// elsewhere (Contacts' TYPE_CHIP_CLASSES) — this app's palette only defines
-// a 50-shade (or DEFAULT-with-opacity) for each accent color, not a full
-// scale, so every chip in the app is built from one of these exact pairs.
-const STATUS_CHIP_CLASSES: Record<string, string> = {
-    draft: 'bg-paper text-ink-700',
-    sent: 'bg-lagoon/10 text-lagoon',
-    partially_paid: 'bg-amber-50 text-ink',
-    paid: 'bg-spark-50 text-ink',
-    void: 'bg-clay-50 text-clay',
-};
-
-function StatusChip({ status }: { status: string }) {
-    return (
-        <span
-            className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${
-                STATUS_CHIP_CLASSES[status] ?? 'bg-paper text-ink-700'
-            }`}
-        >
-            {STATUS_LABELS[status] ?? status}
-        </span>
-    );
-}
-
 function formatDate(value: string | null): string {
     if (!value) {
         return '';
@@ -78,10 +47,36 @@ function formatDate(value: string | null): string {
     });
 }
 
+function todayIsoDate(): string {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
+/** Only a still-payable invoice (sent/partially_paid) past its due date reads as overdue — never draft, paid, or void. */
+function isOverdue(invoice: InvoiceRow, today: string): boolean {
+    return (
+        (invoice.status === 'sent' || invoice.status === 'partially_paid') &&
+        invoice.due_date !== null &&
+        invoice.due_date < today
+    );
+}
+
+function OverdueTag() {
+    return (
+        <span className="ml-2 inline-block rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-ink">
+            Overdue
+        </span>
+    );
+}
+
 export default function Index({ invoices }: IndexPageProps) {
     const { currentCompany } = usePage<PageProps>().props;
     const currency = currentCompany?.base_currency ?? 'USD';
     const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+    const today = useMemo(() => todayIsoDate(), []);
 
     const visibleInvoices = useMemo(
         () =>
@@ -144,47 +139,68 @@ export default function Index({ invoices }: IndexPageProps) {
                                     Issue date
                                 </th>
                                 <th scope="col" className="py-2 pr-3 font-medium">
+                                    Due date
+                                </th>
+                                <th scope="col" className="py-2 pr-3 font-medium">
                                     Status
                                 </th>
                                 <th scope="col" className="py-2 pl-3 text-right font-medium">
                                     Total
                                 </th>
+                                <th scope="col" className="py-2 pl-3 text-right font-medium">
+                                    Balance
+                                </th>
                             </tr>
                         </thead>
                         <tbody>
-                            {visibleInvoices.map((invoice) => (
-                                <tr
-                                    key={invoice.id}
-                                    tabIndex={0}
-                                    role="button"
-                                    onClick={() => router.visit(route('invoices.edit', invoice.id))}
-                                    onKeyDown={(event) => {
-                                        if (event.key === 'Enter' || event.key === ' ') {
-                                            event.preventDefault();
-                                            router.visit(route('invoices.edit', invoice.id));
-                                        }
-                                    }}
-                                    className="cursor-pointer border-b border-rule text-ink transition duration-[120ms] ease-out motion-reduce:transition-none hover:bg-paper focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-spark last:border-b-0"
-                                >
-                                    <td className="py-3 pr-3 align-top font-mono text-xs">
-                                        {invoice.number ?? 'Draft'}
-                                    </td>
-                                    <td className="py-3 pr-3 align-top">{invoice.contact_name}</td>
-                                    <td className="py-3 pr-3 align-top text-ink-700">
-                                        {formatDate(invoice.issue_date)}
-                                    </td>
-                                    <td className="py-3 pr-3 align-top">
-                                        <StatusChip status={invoice.status} />
-                                    </td>
-                                    <td className="py-3 pl-3 align-top">
-                                        <MoneyText
-                                            minor={invoice.total}
-                                            currency={invoice.currency_code || currency}
-                                            size="sm"
-                                        />
-                                    </td>
-                                </tr>
-                            ))}
+                            {visibleInvoices.map((invoice) => {
+                                const overdue = isOverdue(invoice, today);
+
+                                return (
+                                    <tr
+                                        key={invoice.id}
+                                        tabIndex={0}
+                                        role="button"
+                                        onClick={() => router.visit(route('invoices.show', invoice.id))}
+                                        onKeyDown={(event) => {
+                                            if (event.key === 'Enter' || event.key === ' ') {
+                                                event.preventDefault();
+                                                router.visit(route('invoices.show', invoice.id));
+                                            }
+                                        }}
+                                        className="cursor-pointer border-b border-rule text-ink transition duration-[120ms] ease-out motion-reduce:transition-none hover:bg-paper focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-spark last:border-b-0"
+                                    >
+                                        <td className="py-3 pr-3 align-top font-mono text-xs">
+                                            {invoice.number ?? 'Draft'}
+                                        </td>
+                                        <td className="py-3 pr-3 align-top">{invoice.contact_name}</td>
+                                        <td className="py-3 pr-3 align-top text-ink-700">
+                                            {formatDate(invoice.issue_date)}
+                                        </td>
+                                        <td className="py-3 pr-3 align-top text-ink-700">
+                                            {formatDate(invoice.due_date)}
+                                            {overdue && <OverdueTag />}
+                                        </td>
+                                        <td className="py-3 pr-3 align-top">
+                                            <StatusChip status={invoice.status} />
+                                        </td>
+                                        <td className="py-3 pl-3 align-top">
+                                            <MoneyText
+                                                minor={invoice.total}
+                                                currency={invoice.currency_code || currency}
+                                                size="sm"
+                                            />
+                                        </td>
+                                        <td className="py-3 pl-3 align-top">
+                                            <MoneyText
+                                                minor={invoice.balance}
+                                                currency={invoice.currency_code || currency}
+                                                size="sm"
+                                            />
+                                        </td>
+                                    </tr>
+                                );
+                            })}
                         </tbody>
                     </table>
                 )}

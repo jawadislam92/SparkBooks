@@ -97,6 +97,13 @@ Route::middleware(['auth', 'verified', 'company', 'can:invoices.draft'])->group(
     Route::get('/invoices', [InvoiceController::class, 'index'])->name('invoices.index');
     Route::get('/invoices/new', [InvoiceController::class, 'create'])->name('invoices.new');
     Route::post('/invoices', [InvoiceController::class, 'store'])->name('invoices.store');
+    // Registered BEFORE the /edit route below on purpose: both are GETs under
+    // /invoices/{invoice}/..., and Laravel matches route definitions in
+    // registration order — {invoice} alone would otherwise never lose to a
+    // more specific suffix if it were registered first (it isn't a real
+    // conflict here since /edit has an extra path segment, but this keeps the
+    // "wildcard's own root path last" convention obvious at a glance).
+    Route::get('/invoices/{invoice}', [InvoiceController::class, 'show'])->name('invoices.show');
     Route::get('/invoices/{invoice}/edit', [InvoiceController::class, 'edit'])->name('invoices.edit');
     Route::patch('/invoices/{invoice}', [InvoiceController::class, 'update'])->name('invoices.update');
     Route::delete('/invoices/{invoice}', [InvoiceController::class, 'destroy'])->name('invoices.destroy');

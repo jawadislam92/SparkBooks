@@ -208,7 +208,7 @@ class InvoiceVoidTest extends TestCase
 
         $response = $this->voidInvoiceHttp($invoice, ['date' => '2026-07-15', 'memo' => 'Customer cancelled order']);
 
-        $response->assertRedirect(route('invoices.edit', $invoice->id));
+        $response->assertRedirect(route('invoices.show', $invoice->id));
 
         $invoice->refresh();
         $this->assertSame(InvoiceStatus::Void, $invoice->status);
@@ -335,7 +335,7 @@ class InvoiceVoidTest extends TestCase
 
         $response = $this->voidPaymentHttp($invoice, $payment);
 
-        $response->assertRedirect(route('invoices.edit', $invoice->id));
+        $response->assertRedirect(route('invoices.show', $invoice->id));
 
         $payment->refresh();
         $this->assertSame('void', $payment->status);

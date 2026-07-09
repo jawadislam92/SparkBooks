@@ -14,7 +14,7 @@ import InvoiceLineEditor, {
 import AppShell from '@/Layouts/AppShell';
 import { minorToDecimalString } from '@/lib/money';
 import { PageProps } from '@/types';
-import { Head, router, useForm, usePage } from '@inertiajs/react';
+import { Head, Link, router, useForm, usePage } from '@inertiajs/react';
 import {
     Dialog,
     DialogBackdrop,
@@ -183,9 +183,17 @@ export default function Edit({ invoice, contacts, items, incomeAccounts, taxRate
             <Head title={pageTitle} />
 
             {!isDraft && invoice && (
-                <div className="mb-4 rounded-md border border-rule bg-paper-raised px-4 py-3 text-sm text-ink-700">
-                    This invoice is {STATUS_LABELS[invoice.status] ?? invoice.status} and can no
-                    longer be edited here.
+                <div className="mb-4 flex items-center justify-between gap-4 rounded-md border border-rule bg-paper-raised px-4 py-3 text-sm text-ink-700">
+                    <span>
+                        This invoice is {STATUS_LABELS[invoice.status] ?? invoice.status} and can no
+                        longer be edited here.
+                    </span>
+                    <Link
+                        href={route('invoices.show', invoice.id)}
+                        className="shrink-0 font-medium text-lagoon hover:underline"
+                    >
+                        View invoice &rarr;
+                    </Link>
                 </div>
             )}
 
