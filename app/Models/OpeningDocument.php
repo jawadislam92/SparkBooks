@@ -14,6 +14,7 @@ class OpeningDocument extends Model
     protected $fillable = [
         'opening_balance_run_id',
         'contact_id',
+        'invoice_id',
         'kind',
         'reference',
         'original_date',
@@ -39,5 +40,16 @@ class OpeningDocument extends Model
     public function contact(): BelongsTo
     {
         return $this->belongsTo(Contact::class);
+    }
+
+    /**
+     * Null for a vendor (payable) document, and for a receivable document
+     * created before Task 6 that hasn't been reconciled yet (see
+     * ReconcileOpeningInvoices) — set for every receivable document
+     * OpeningBalanceService::apply() creates going forward.
+     */
+    public function invoice(): BelongsTo
+    {
+        return $this->belongsTo(Invoice::class);
     }
 }

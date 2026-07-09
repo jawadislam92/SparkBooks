@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class Invoice extends Model
 {
@@ -82,5 +83,14 @@ class Invoice extends Model
     public function payments(): HasMany
     {
         return $this->hasMany(InvoicePayment::class);
+    }
+
+    /**
+     * The Phase 2 opening_documents row this is_opening invoice represents
+     * (Phase 3 Task 6) — null for every ordinary (non-opening) invoice.
+     */
+    public function openingDocument(): HasOne
+    {
+        return $this->hasOne(OpeningDocument::class);
     }
 }
