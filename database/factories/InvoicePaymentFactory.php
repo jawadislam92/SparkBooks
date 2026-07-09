@@ -15,6 +15,7 @@ class InvoicePaymentFactory extends Factory
             'payment_date' => now()->toDateString(),
             'amount' => fake()->numberBetween(1000, 100000),
             'base_amount' => fake()->numberBetween(1000, 100000),
+            'base_ar_relief' => fake()->numberBetween(1000, 100000),
             'bank_account_id' => BankAccount::factory(),
             'fx_rate' => null,
             'status' => 'posted',

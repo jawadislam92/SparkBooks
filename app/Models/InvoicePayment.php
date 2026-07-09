@@ -21,6 +21,7 @@ class InvoicePayment extends Model
         'payment_date',
         'amount',
         'base_amount',
+        'base_ar_relief',
         'bank_account_id',
         'fx_rate',
         'status',
@@ -34,6 +35,10 @@ class InvoicePayment extends Model
             'payment_date' => 'date',
             'amount' => 'integer',
             'base_amount' => 'integer',
+            // Nullable (Task 8, spec §17.1 P2fx) — see the migration's own
+            // docblock for why: null only for pre-Task-8 rows, always
+            // populated for every payment recorded from here on.
+            'base_ar_relief' => 'integer',
             'fx_rate' => 'decimal:8',
         ];
     }

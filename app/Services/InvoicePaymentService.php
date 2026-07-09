@@ -17,6 +17,7 @@ use App\Models\Invoice;
 use App\Models\InvoicePayment;
 use App\Models\JournalEntry;
 use App\Support\AuditLogger;
+use App\Support\FxConverter;
 use App\Support\IdempotencyService;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
@@ -25,9 +26,47 @@ use Illuminate\Support\Facades\DB;
  * Records a payment against a sent/partially-paid invoice: posting rules P2
  * (full payment) / P3 (partial payment) — spec §6 — Dr the receiving
  * bank/cash account's linked ledger account; Cr 1100 AR (with the invoice's
- * contact_id, since AR is a control account). P2 and P3 share one posting
- * shape — only the amount (the whole balance vs. part of it) differs, which
- * is why one method (paymentLines()) covers both.
+ * contact_id, since AR is a control account); extended for a foreign-currency
+ * invoice by posting rule P2fx (spec §17.1, Phase 3 Task 8), which adds a
+ * realized FX gain/loss plug line. All three share one posting shape (Dr
+ * bank / Cr AR [/ Cr or Dr FX gain/loss]) — only the amounts differ, which is
+ * why one method (paymentLines()) covers all of them; a domestic payment is
+ * just an FX payment at fx_rate 1.0 where the plug always comes out to 0 (see
+ * below), not a structurally different code path (mirrors InvoiceService's
+ * own P1/P1fx unification).
+ *
+ * **P2fx (spec §17.1):** the request carries `amount` (document currency —
+ * what portion of the invoice this pays, same as always) and `base_amount`
+ * (the ACTUAL base/PKR amount the bank credited, user-entered off the bank
+ * statement — never rate-derived, so it can differ from amount x rate by
+ * spread/fees and still let §7.9 reconciliation hit a difference of exactly
+ * 0). The AR credit is a SEPARATE number, `base_ar_relief` — relief at the
+ * INVOICE's own fx_rate, not at whatever rate this particular bank credit
+ * implies:
+ *   - Partial payment (doesn't bring the doc balance to 0): base_ar_relief =
+ *     FxConverter::toBase(amount, invoice.fx_rate) — round-half-up at the
+ *     invoice rate.
+ *   - FINAL payment (brings the doc balance to exactly 0): base_ar_relief =
+ *     the entire REMAINING base AR for this invoice (base_total minus every
+ *     prior non-void payment's base_ar_relief), NOT round(rate x amount) —
+ *     this is the "settlement rounding" rule: successive partials each round
+ *     independently and can leave a residue of a paisa or two, and the final
+ *     payment absorbs exactly that residue so base AR always zeroes out
+ *     exactly. See InvoiceFxPaymentTest's settlement-rounding-property test
+ *     for a worked case where naive per-payment rounding would leave a
+ *     phantom balance and this rule doesn't.
+ *   - The FX plug: diff = base_amount (actual bank debit) - base_ar_relief
+ *     (AR credit at invoice rate). diff > 0 -> Cr 4950 FX Gain; diff < 0 ->
+ *     Dr 5950 FX Loss; diff === 0 -> no third line at all.
+ * For a domestic invoice (fx_rate exactly 1.0), FxConverter::toBase(amount,
+ * '1') is the identity, so base_ar_relief always equals amount regardless of
+ * branch — but base_amount is a genuinely separate INPUT (not derived), and
+ * there is no such thing as an FX gain/loss on a same-currency invoice, so
+ * resolveBaseAmount() below still forces base_amount = amount for a domestic
+ * invoice rather than trusting a stray value from the caller (mirrors
+ * InvoiceService::resolveFxRate ignoring a stray fx_rate on a domestic send)
+ * — this keeps diff exactly 0 and Task 4's two-line entry shape unchanged by
+ * construction, not by coincidence.
  *
  * Money-critical + concurrency-critical (spec §9): two concurrent payment
  * requests against the same invoice must never both succeed if together
@@ -36,10 +75,11 @@ use Illuminate\Support\Facades\DB;
  * second concurrent caller blocks on that row lock until the first commits,
  * then re-reads the now-reduced balance/updated status and is correctly
  * rejected (see InvoicePaymentTest's concurrency section for how this is
- * verified under RefreshDatabase).
- *
- * Domestic-only (Task 8 adds FX payments): base_amount always equals amount,
- * fx_rate is always null.
+ * verified under RefreshDatabase). The same lock is what makes the
+ * "remaining base AR" sum used by a FINAL payment race-safe: a concurrent
+ * payment against the same invoice blocks on this row until the first
+ * commits, so the SUM(base_ar_relief) a final payment reads can never miss a
+ * payment that's still in flight.
  *
  * Shape mirrors InvoiceService::send()/TransferService::transfer():
  * IdempotencyService::execute -> DB::transaction -> locked read -> guards ->
@@ -54,7 +94,7 @@ class InvoicePaymentService
         private AuditLogger $audit,
     ) {}
 
-    /** @param array{amount:int, bank_account_id:int, payment_date:string, memo?:?string} $data */
+    /** @param array{amount:int, base_amount?:int|string|null, bank_account_id:int, payment_date:string, memo?:?string} $data */
     public function recordPayment(string $idempotencyKey, Invoice $invoice, array $data): InvoicePayment
     {
         $result = $this->idempotency->execute($idempotencyKey, 'invoice.payment_recorded', function () use ($invoice, $data) {
@@ -70,19 +110,33 @@ class InvoicePaymentService
                 $locked = Invoice::query()->where('id', $invoice->id)->lockForUpdate()->firstOrFail();
 
                 $amount = (int) $data['amount'];
-                $this->guard($locked, $amount);
+                $baseAmount = $this->resolveBaseAmount($locked, $amount, $data);
+                $this->guard($locked, $amount, $baseAmount);
 
                 $bankAccount = $this->resolveBankAccount((int) $data['bank_account_id']);
+
+                // "Final" = this payment brings the DOCUMENT-currency balance
+                // to exactly 0 — checked against the LOCKED row's balance
+                // (pre-mutation), which the guard above already established
+                // $amount cannot exceed. This is what selects the settlement-
+                // rounding branch below (spec §17.1).
+                $isFinalPayment = $amount === $locked->balance;
+                $baseArRelief = $this->resolveBaseArRelief($locked, $amount, $isFinalPayment);
 
                 $payment = InvoicePayment::query()->create([
                     'invoice_id' => $locked->id,
                     'payment_date' => $data['payment_date'],
                     'amount' => $amount,
-                    // Domestic only (Task 8 adds FX payments) — base always
-                    // mirrors the document-currency amount, fx_rate stays null.
-                    'base_amount' => $amount,
+                    'base_amount' => $baseAmount,
+                    'base_ar_relief' => $baseArRelief,
                     'bank_account_id' => $bankAccount->id,
-                    'fx_rate' => null,
+                    // Payment-date implied rate, for display only (spec
+                    // §17.1: "the implied rate is shown [to the user],
+                    // not typed") — never fed back into any posting
+                    // calculation, which always uses the INVOICE's own
+                    // fx_rate (via base_ar_relief), not this payment's rate.
+                    // null for a domestic invoice, mirroring Task 4.
+                    'fx_rate' => $this->impliedRate($locked, $amount, $baseAmount),
                     'status' => 'posted',
                     'memo' => $data['memo'] ?? null,
                     'created_by' => auth()->id(),
@@ -93,7 +147,7 @@ class InvoicePaymentService
                     memo: "Payment for {$locked->number}",
                     sourceType: 'invoice_payment',
                     sourceId: $payment->id,
-                    lines: $this->paymentLines($locked, $bankAccount, $amount),
+                    lines: $this->paymentLines($locked, $bankAccount, $baseAmount, $baseArRelief),
                 ));
 
                 $newAmountPaid = $locked->amount_paid + $amount;
@@ -196,14 +250,18 @@ class InvoicePaymentService
 
     /**
      * Guards enforced on the LOCKED row (spec §9): status eligible, amount
-     * positive, amount doesn't exceed the outstanding balance. This is the
-     * ONLY place overpayment is checked — two concurrent payments against the
-     * same invoice race on the lockForUpdate() read above, so whichever
-     * commits second re-reads the now-reduced balance here and is correctly
-     * rejected, even if it had already passed HTTP-layer validation against a
-     * stale balance.
+     * positive, amount doesn't exceed the outstanding balance, base_amount
+     * positive (Task 8). This is the ONLY place overpayment is checked — two
+     * concurrent payments against the same invoice race on the
+     * lockForUpdate() read above, so whichever commits second re-reads the
+     * now-reduced balance here and is correctly rejected, even if it had
+     * already passed HTTP-layer validation against a stale balance.
+     * Overpayment is checked in DOCUMENT currency only (spec §17.1: "still
+     * checked in document currency") — base_amount never participates in
+     * this comparison, since it's independently what the bank happened to
+     * credit, not a second measure of how much of the invoice this pays.
      */
-    private function guard(Invoice $invoice, int $amount): void
+    private function guard(Invoice $invoice, int $amount, int $baseAmount): void
     {
         if (! $invoice->status->canReceivePayment()) {
             throw new InvoiceNotPayable('Only a sent or partially paid invoice can receive a payment.');
@@ -220,6 +278,98 @@ class InvoicePaymentService
                 "Payment exceeds the outstanding balance of {$this->formatMinor($invoice->balance)}."
             );
         }
+
+        // Defense-in-depth: StorePaymentRequest already enforces base_amount
+        // >= 1 (required outright for a foreign-currency invoice) at the HTTP
+        // layer; this re-check protects any other caller. For a domestic
+        // invoice this can never fire — resolveBaseAmount() already forces
+        // base_amount = amount, which the check above already proved >= 1.
+        if ($baseAmount < 1) {
+            throw new InvalidPaymentAmount('Base amount must be at least 1.');
+        }
+    }
+
+    /**
+     * The bank DEBIT (base/PKR minor units) — for a domestic invoice this is
+     * ALWAYS forced to equal amount (Task 4 behavior, unchanged): a same-
+     * currency payment has no independent "actual base received" to enter,
+     * so any base_amount supplied by a caller for a domestic invoice is
+     * simply ignored, exactly as InvoiceService::resolveFxRate ignores a
+     * stray fx_rate on a domestic send. For a foreign-currency invoice,
+     * base_amount is a genuine, independent user-entered input (spec §17.1:
+     * "the actual base amount the bank credited") — taken from $data as-is.
+     *
+     * @param  array{amount:int, base_amount?:int|string|null, bank_account_id:int, payment_date:string, memo?:?string}  $data
+     */
+    private function resolveBaseAmount(Invoice $invoice, int $amount, array $data): int
+    {
+        if ($this->isDomestic($invoice)) {
+            return $amount;
+        }
+
+        return (int) ($data['base_amount'] ?? 0);
+    }
+
+    /**
+     * The AR credit (base/PKR minor units) — posting rule P2fx's settlement
+     * rounding rule (spec §17.1). A partial payment relieves AR at the
+     * INVOICE's own fx_rate; the payment that brings the document balance to
+     * exactly 0 instead relieves whatever base AR is actually still
+     * outstanding for this invoice, so a run of independently-rounded
+     * partials can never leave a phantom paisa of AR behind. For a domestic
+     * invoice (fx_rate exactly 1.0) FxConverter::toBase is the identity, so
+     * this always resolves to the same value Task 4 posted (== amount) on
+     * BOTH branches — no special case needed, same reasoning as
+     * InvoiceService::p1Lines.
+     */
+    private function resolveBaseArRelief(Invoice $invoice, int $amount, bool $isFinalPayment): int
+    {
+        if (! $isFinalPayment) {
+            return FxConverter::toBase($amount, (string) $invoice->fx_rate);
+        }
+
+        // Sum of every prior LIVE (non-void) payment's own base_ar_relief —
+        // not a re-derivation from their amounts/rates — so this always
+        // matches what was actually posted to the ledger, rounding residue
+        // and all. The invoice row lock held by the caller's transaction
+        // serializes this against any concurrent payment on the same
+        // invoice, so this SUM can never miss one still in flight.
+        $priorBaseArRelief = (int) InvoicePayment::query()
+            ->where('invoice_id', $invoice->id)
+            ->where('status', '!=', 'void')
+            ->sum('base_ar_relief');
+
+        return $invoice->base_total - $priorBaseArRelief;
+    }
+
+    /**
+     * The payment-date implied rate (base_amount / amount), shown to the
+     * user per spec §17.1 ("the implied rate is displayed, not typed") —
+     * display-only, never consulted by any posting calculation above (those
+     * always use the INVOICE's own fx_rate). Null for a domestic invoice,
+     * mirroring Task 4's InvoicePayment.fx_rate contract (migration: "only
+     * meaningful for a foreign-currency invoice"). Scaled to fx_rate's own
+     * DECIMAL(16,8) precision via bcdiv, never float division.
+     */
+    private function impliedRate(Invoice $invoice, int $amount, int $baseAmount): ?string
+    {
+        if ($this->isDomestic($invoice)) {
+            return null;
+        }
+
+        return bcdiv((string) $baseAmount, (string) $amount, 8);
+    }
+
+    /**
+     * A domestic invoice's fx_rate is fixed at exactly 1.0 by
+     * InvoiceService::resolveFxRate at send time and never changes — an
+     * invoice can only receive payments once sent, so this is always a
+     * reliable domestic/foreign test without needing the company's
+     * base_currency in scope here.
+     */
+    private function isDomestic(Invoice $invoice): bool
+    {
+        return bccomp((string) $invoice->fx_rate, '1', 8) === 0;
     }
 
     /**
@@ -242,22 +392,42 @@ class InvoicePaymentService
     }
 
     /**
-     * Posting rules P2 (full)/P3 (partial) — spec §6: Dr the bank account's
-     * linked ledger account for the payment amount; Cr 1100 AR for the same
-     * amount, WITH contact_id (LedgerService requires it on every
-     * control-account line). Identical shape for a full or partial payment —
-     * only the amount differs.
+     * Posting rules P2 (full)/P3 (partial)/P2fx (spec §6/§17.1): Dr the bank
+     * account's linked ledger account for the actual base amount received;
+     * Cr 1100 AR for the base AR relief, WITH contact_id (LedgerService
+     * requires it on every control-account line); plus a third line for
+     * whatever's left over — Cr 4950 FX Gain if the bank received MORE base
+     * currency than the AR relief, Dr 5950 FX Loss if it received LESS. No
+     * third line at all when the two exactly match (always true for a
+     * domestic payment, by construction — see resolveBaseAmount()/
+     * resolveBaseArRelief() above), which is exactly Task 4's original
+     * two-line shape. The entry balances by construction on every branch:
+     * diff > 0 => debit(bank) = baseAmount = baseArRelief + diff =
+     * credit(AR) + credit(gain); diff < 0 => debit(bank) + debit(loss) =
+     * baseAmount + (baseArRelief - baseAmount) = baseArRelief = credit(AR).
      *
      * @return list<LineDraft>
      */
-    private function paymentLines(Invoice $invoice, BankAccount $bankAccount, int $amount): array
+    private function paymentLines(Invoice $invoice, BankAccount $bankAccount, int $baseAmount, int $baseArRelief): array
     {
         $arAccount = Account::query()->where('code', '1100')->firstOrFail();
 
-        return [
-            new LineDraft(accountId: $bankAccount->ledger_account_id, debit: $amount, credit: 0),
-            new LineDraft(accountId: $arAccount->id, debit: 0, credit: $amount, contactId: $invoice->contact_id),
+        $lines = [
+            new LineDraft(accountId: $bankAccount->ledger_account_id, debit: $baseAmount, credit: 0),
+            new LineDraft(accountId: $arAccount->id, debit: 0, credit: $baseArRelief, contactId: $invoice->contact_id),
         ];
+
+        $diff = $baseAmount - $baseArRelief;
+
+        if ($diff > 0) {
+            $fxGain = Account::query()->where('code', '4950')->firstOrFail();
+            $lines[] = new LineDraft(accountId: $fxGain->id, debit: 0, credit: $diff);
+        } elseif ($diff < 0) {
+            $fxLoss = Account::query()->where('code', '5950')->firstOrFail();
+            $lines[] = new LineDraft(accountId: $fxLoss->id, debit: -$diff, credit: 0);
+        }
+
+        return $lines;
     }
 
     /**
