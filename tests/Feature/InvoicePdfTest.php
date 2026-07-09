@@ -242,6 +242,51 @@ class InvoicePdfTest extends TestCase
         $this->assertStringContainsString('PKR', $html); // base currency code on the ≈ line
     }
 
+    /**
+     * A foreign-currency DRAFT has NO real fx_rate yet — a draft's fx_rate is
+     * frozen at 1.0 and its base_* columns merely mirror the document totals
+     * (real conversion happens only at send time). So its PDF must NOT show
+     * the dual-currency block: no "≈" secondary amounts and no "1 USD = ..."
+     * rate sentence (both would present a fabricated 1.00 rate as real). It
+     * shows only the document-currency (USD) amounts.
+     */
+    public function test_foreign_draft_view_shows_no_fabricated_rate_or_approx_line(): void
+    {
+        $company = Company::factory()->create(); // base_currency PKR
+        app(CompanyContext::class)->set($company);
+        $contact = $this->customer($company);
+        $income = $this->incomeAccount($company);
+
+        // A genuine draft: number null, fx_rate 1.0, base_* mirror the doc
+        // totals exactly (the pre-send state InvoiceController::store writes).
+        $invoice = Invoice::factory()->create([
+            'company_id' => $company->id,
+            'contact_id' => $contact->id,
+            'status' => InvoiceStatus::Draft->value,
+            'number' => null,
+            'currency_code' => 'USD',
+            'fx_rate' => '1.00000000',
+            'subtotal' => 100000,
+            'tax_total' => 0,
+            'total' => 100000,
+            'base_subtotal' => 100000,
+            'base_tax_total' => 0,
+            'base_total' => 100000,
+        ]);
+        $this->line($invoice, $income, [
+            'unit_price' => 100000,
+            'line_subtotal' => 100000,
+            'line_tax' => 0,
+        ]);
+
+        $html = $this->renderView($invoice);
+
+        $this->assertStringContainsString('USD', $html); // document currency still shown
+        $this->assertStringContainsString('1,000.00', $html); // document-currency total
+        $this->assertStringNotContainsString('≈', $html); // NO fabricated base-currency amount
+        $this->assertStringNotContainsString('1 USD =', $html); // NO fabricated rate sentence
+    }
+
     public function test_domestic_invoice_view_shows_only_one_currency_and_no_approx_line(): void
     {
         $company = Company::factory()->create(); // base_currency PKR

@@ -44,20 +44,32 @@ class InvoicePdf
 
         $company = $invoice->company;
 
+        // No number yet (still draft) — the header/meta show "DRAFT" instead
+        // of a burned document number (InvoiceService only assigns one at
+        // send time).
+        $isDraft = $invoice->number === null;
+
         return [
             'invoice' => $invoice,
             'company' => $company,
             'contact' => $invoice->contact,
             'lines' => $invoice->lines,
-            // No number yet (still draft) — the header/meta show "DRAFT"
-            // instead of a burned document number (InvoiceService only
-            // assigns one at send time).
-            'isDraft' => $invoice->number === null,
+            'isDraft' => $isDraft,
             // FX invoice: document currency differs from the company's base
-            // currency, so the dual-currency block renders. A domestic
-            // invoice (currency_code === base_currency) shows one currency
-            // only, matching the P1/P1fx distinction in InvoiceService.
-            'isForeign' => $invoice->currency_code !== $company->base_currency,
+            // currency AND the invoice has been sent — so a real fx_rate has
+            // been resolved and base_* hold genuine converted amounts. A
+            // DRAFT foreign invoice is deliberately EXCLUDED even though its
+            // currency differs from base: a draft's fx_rate is frozen at 1.0
+            // and its base_* columns merely MIRROR the document totals (real
+            // FX conversion only happens at send time — see
+            // InvoiceService::resolveFxRate/convertToBase), so rendering the
+            // dual-currency block for a draft would present a fabricated
+            // "1 USD = 1.00 PKR" rate and a made-up "≈ base" amount as if
+            // real. A foreign draft therefore shows ONLY its document-currency
+            // amounts (no ≈ lines, no rate sentence); the block appears once
+            // it's actually sent. A domestic invoice (currency === base) never
+            // shows the block, draft or sent.
+            'isForeign' => ! $isDraft && $invoice->currency_code !== $company->base_currency,
         ];
     }
 
