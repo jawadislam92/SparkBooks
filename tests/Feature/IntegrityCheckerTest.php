@@ -1155,6 +1155,176 @@ class IntegrityCheckerTest extends TestCase
         $this->assertSame([], $findings);
     }
 
+    // ---------------------------------------------------------------
+    // Whole-branch review fix: a contact with MULTIPLE opening invoices in
+    // ONE opening-balance run. OpeningBalanceService/StoreOpeningBalanceRequest
+    // do not dedup customer_lines by contact, and the UI freely allows
+    // multiple rows per customer (a realistic cutover: a customer with two
+    // old unpaid invoices) — so this is reachable today. Before the fix,
+    // actualLedgerBaseArByInvoice()'s `keyBy('contact_id')` silently dropped
+    // all but the last opening invoice for a contact, then attributed the
+    // WHOLE combined opening-run AR total to just that surviving invoice —
+    // every OTHER opening invoice for that contact then compared its
+    // (non-zero) expected base AR against a ledger contribution of 0,
+    // producing a permanent false-positive base_ar_reconciliation finding
+    // on correctly-posted data. The fix reconciles opening invoices at the
+    // CONTACT level (both sides summed over the same set) instead.
+    // ---------------------------------------------------------------
+
+    /**
+     * Posts two customer_lines for the SAME contact in one apply() call —
+     * exactly the shape the opening-balances UI allows and neither
+     * OpeningBalanceService nor StoreOpeningBalanceRequest dedups against.
+     *
+     * @return array{0: Contact, 1: Account, 2: BankAccount, 3: list<Invoice>}
+     */
+    private function setUpContactWithTwoOpeningInvoices(Company $company): array
+    {
+        $contact = $this->customer($company);
+        $chart = $this->invoiceChart($company);
+        $this->equityAccount($company, ['code' => '3100', 'name' => 'Opening Balance Equity']);
+        $bank = $this->bankAccountModel($company);
+
+        app(CompanyContext::class)->set($company);
+        app(OpeningBalanceService::class)->apply((string) Str::uuid(), [
+            'books_start_date' => '2026-06-01',
+            'bank_lines' => [],
+            'customer_lines' => [
+                ['contact_id' => $contact->id, 'reference' => 'Old INV 1', 'original_date' => '2026-04-01', 'due_date' => '2026-05-01', 'amount' => 300000],
+                ['contact_id' => $contact->id, 'reference' => 'Old INV 2', 'original_date' => '2026-04-15', 'due_date' => '2026-05-15', 'amount' => 200000],
+            ],
+            'vendor_lines' => [],
+        ]);
+
+        $invoices = Invoice::query()->where('is_opening', true)->orderBy('id')->get()->all();
+        $this->assertCount(2, $invoices);
+
+        return [$contact, $chart['ar'], $bank, $invoices];
+    }
+
+    /**
+     * Test 1 (the false-positive reproduction): two correctly-posted, both
+     * still-unpaid opening invoices for one contact must come back CLEAN.
+     * This is the case that FAILS before the fix (keyBy drops one invoice,
+     * whose full expected base AR then compares against a ledger 0).
+     */
+    public function test_clean_when_a_contact_has_two_unpaid_opening_invoices_in_one_run(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $this->setUpContactWithTwoOpeningInvoices($company);
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+
+        $this->assertSame([], $findings);
+    }
+
+    /**
+     * Test 2: both of the contact's opening invoices paid to Paid via
+     * P2/P3 — the contact's aggregate opening AR nets to exactly zero.
+     */
+    public function test_clean_when_both_of_a_contacts_two_opening_invoices_are_paid_in_full(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        [, , $bank, $invoices] = $this->setUpContactWithTwoOpeningInvoices($company);
+
+        foreach ($invoices as $invoice) {
+            $this->pay($invoice, ['amount' => $invoice->total, 'bank_account_id' => $bank->id, 'payment_date' => '2026-07-10'])->assertRedirect();
+        }
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+
+        $this->assertSame([], $findings);
+    }
+
+    /**
+     * Test 3: one of the two opening invoices partially paid, the other
+     * left fully unpaid — the aggregate still reconciles.
+     */
+    public function test_clean_when_one_of_two_opening_invoices_is_partially_paid_and_the_other_unpaid(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        [, , $bank, $invoices] = $this->setUpContactWithTwoOpeningInvoices($company);
+
+        $this->pay($invoices[0], ['amount' => 100000, 'bank_account_id' => $bank->id, 'payment_date' => '2026-07-10'])->assertRedirect();
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+
+        $this->assertSame([], $findings);
+    }
+
+    /**
+     * Test 4a: a genuine tamper (raw-update an is_opening invoice's
+     * base_total, leaving the ledger untouched) on a multi-opening-invoice
+     * contact must still fire — no false-negative introduced by summing.
+     */
+    public function test_base_ar_reconciliation_fires_when_one_of_two_opening_invoices_base_total_is_tampered(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        [, , , $invoices] = $this->setUpContactWithTwoOpeningInvoices($company);
+
+        DB::table('invoices')->where('id', $invoices[0]->id)->update(['base_total' => $invoices[0]->base_total + 500]);
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+        $checks = collect($findings)->pluck('check')->all();
+
+        $this->assertContains('base_ar_reconciliation', $checks);
+    }
+
+    /**
+     * Test 4b: a genuine tamper on the LEDGER side instead — raw-delete one
+     * of the contact's two opening_balance_run AR debit lines, leaving both
+     * invoices' own rows untouched. The aggregate ledger sum for the
+     * contact now falls short of the aggregate expected sum.
+     */
+    public function test_base_ar_reconciliation_fires_when_one_contacts_opening_ar_ledger_line_is_raw_deleted(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        [, $arAccount] = $this->setUpContactWithTwoOpeningInvoices($company);
+
+        $runEntry = JournalEntry::query()->where('source_type', 'opening_balance_run')->sole();
+        $arLines = $runEntry->lines()->where('account_id', $arAccount->id)->get();
+        $this->assertCount(2, $arLines);
+
+        DB::table('journal_lines')->where('id', $arLines->first()->id)->delete();
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+        $checks = collect($findings)->pluck('check')->all();
+
+        $this->assertContains('base_ar_reconciliation', $checks);
+    }
+
+    /**
+     * Test 5: a contact with BOTH a normal invoice (sent, paid) AND
+     * multiple opening invoices (paid) — CLEAN, proving the two
+     * reconciliation paths (per-invoice for normal, contact-aggregate for
+     * opening) stay disjoint and neither masks the other.
+     */
+    public function test_clean_when_a_contact_has_a_paid_normal_invoice_and_paid_opening_invoices(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $income = $this->incomeAccount($company);
+        [$contact, , $bank, $invoices] = $this->setUpContactWithTwoOpeningInvoices($company);
+
+        foreach ($invoices as $invoice) {
+            $this->pay($invoice, ['amount' => $invoice->total, 'bank_account_id' => $bank->id, 'payment_date' => '2026-07-05'])->assertRedirect();
+        }
+
+        $normalInvoice = $this->domesticDraftInvoice($company, $contact);
+        $this->invoiceLine($normalInvoice, $income, ['quantity' => '1', 'unit_price' => 10000, 'tax_rate_id' => null]);
+        $this->sendInvoice($normalInvoice)->assertRedirect();
+        $this->pay($normalInvoice->fresh(), ['amount' => 10000, 'bank_account_id' => $bank->id, 'payment_date' => '2026-07-06'])->assertRedirect();
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+
+        $this->assertSame([], $findings);
+    }
+
     public function test_checker_reports_every_finding_simultaneously_not_just_the_first(): void
     {
         $company = Company::factory()->create();

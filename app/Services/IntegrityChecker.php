@@ -201,7 +201,7 @@ class IntegrityChecker
             ->get()
             ->keyBy('invoice_id');
 
-        $actualBaseAr = $this->actualLedgerBaseArByInvoice($invoices);
+        $actualBaseAr = $this->actualLedgerBaseArByInvoice();
 
         foreach ($invoices as $invoice) {
             $totals = $paymentTotals->get($invoice->id);
@@ -217,71 +217,88 @@ class IntegrityChecker
             }
 
             $expectedBaseAr = $invoice->base_total - $paidBaseAr;
-            $ledgerBaseAr = $actualBaseAr[$invoice->id] ?? 0;
 
             if ($invoice->status === InvoiceStatus::Paid && $expectedBaseAr !== 0) {
                 // The settlement-rounding invariant itself (spec §17.1),
                 // independent of whether the ledger happens to agree — this
                 // is what catches a corruption that tampers the payments
-                // table and the ledger in lockstep.
+                // table and the ledger in lockstep. Purely business-level
+                // (invoice.base_total vs. its own payments' base_ar_relief),
+                // so it applies identically whether or not the invoice
+                // is_opening — no ledger attribution needed here at all.
                 $findings[] = [
                     'check' => 'base_ar_reconciliation',
                     'detail' => "Invoice {$this->invoiceLabel($invoice)} is fully paid but its base-currency AR does not settle to exactly zero (base_total {$invoice->base_total} minus non-void payments' base_ar_relief {$paidBaseAr} = {$expectedBaseAr})",
                 ];
-            } elseif ($expectedBaseAr !== $ledgerBaseAr) {
-                $findings[] = [
-                    'check' => 'base_ar_reconciliation',
-                    'detail' => "Invoice {$this->invoiceLabel($invoice)} base-currency AR expected {$expectedBaseAr} (base_total minus non-void payments' base_ar_relief) but the ledger shows {$ledgerBaseAr}",
-                ];
+            } elseif (! $invoice->is_opening) {
+                // Per-invoice ledger tie-out — valid ONLY for a normal
+                // invoice, which is individually source-attributable
+                // (source_type='invoice'/'invoice_payment', source_id=this
+                // invoice's own id). An is_opening invoice has no entry of
+                // its own to look up this way — see
+                // actualLedgerBaseArByInvoice()'s docblock — those are
+                // reconciled in aggregate by checkOpeningArReconciliation()
+                // below instead, never here.
+                $ledgerBaseAr = $actualBaseAr[$invoice->id] ?? 0;
+                if ($expectedBaseAr !== $ledgerBaseAr) {
+                    $findings[] = [
+                        'check' => 'base_ar_reconciliation',
+                        'detail' => "Invoice {$this->invoiceLabel($invoice)} base-currency AR expected {$expectedBaseAr} (base_total minus non-void payments' base_ar_relief) but the ledger shows {$ledgerBaseAr}",
+                    ];
+                }
             }
         }
+
+        $findings = array_merge($findings, $this->checkOpeningArReconciliation(
+            $invoices->where('is_opening', true), $paymentTotals, $actualBaseAr
+        ));
 
         return $findings;
     }
 
     /**
-     * The LEDGER-side of the base-AR tie-out: for every receivable-subtype
-     * account, net (debit - credit) every journal_line whose entry's source
-     * is either this invoice itself (source_type 'invoice') or one of its
-     * payments (source_type 'invoice_payment'), summed by owning invoice_id.
-     * Reversal entries are NOT filtered out — they carry the SAME
-     * source_type/source_id as what they reverse (spec §4 iron rule), so a
-     * voided payment's primary Cr AR and its reversal Dr AR both land in the
-     * same sum and net to zero automatically, exactly matching the
-     * "non-void payments" filter used on the business-level (payments-table)
-     * side above. FX gain/loss lines never appear here at all — they post to
-     * 4950/5950, not to any receivable account — which is the entire
-     * mechanism by which this tie-out tolerates FX plugs without any
-     * FX-specific branching.
+     * The LEDGER-side of the base-AR tie-out for NORMAL (non-opening)
+     * invoices, PLUS the payment-attributable contribution for opening
+     * invoices: for every receivable-subtype account, net (debit - credit)
+     * every journal_line whose entry's source is either the invoice itself
+     * (source_type 'invoice') or one of its payments (source_type
+     * 'invoice_payment'), summed by owning invoice_id. Reversal entries are
+     * NOT filtered out — they carry the SAME source_type/source_id as what
+     * they reverse (spec §4 iron rule), so a voided payment's primary Cr AR
+     * and its reversal Dr AR both land in the same sum and net to zero
+     * automatically, exactly matching the "non-void payments" filter used on
+     * the business-level (payments-table) side above. FX gain/loss lines
+     * never appear here at all — they post to 4950/5950, not to any
+     * receivable account — which is the entire mechanism by which this
+     * tie-out tolerates FX plugs without any FX-specific branching.
      *
      * Two grouped queries (never one per invoice) so this stays cheap
      * regardless of how many invoices/payments a company has accumulated.
      *
-     * Opening invoices (is_opening=true) are the one exception to "own entry
-     * keyed by source_id=invoice_id": OpeningBalanceService::
-     * createOpeningInvoice() deliberately never calls LedgerService (Task 6 —
-     * the AR was already posted exactly once, by the ORIGINAL
-     * opening_balance_run's P8b line, which is keyed by contact_id, not by
-     * any invoice id, and may cover several customers in one combined
-     * entry). A THIRD lookup below re-attributes that debit back to its
-     * invoice by contact_id instead. This is safe — a contact can have at
-     * most ONE live (non-void) is_opening invoice at any moment:
-     * OpeningBalanceService::voidPriorRun() (which is what would otherwise
-     * let a second one exist) is only ever reachable before any real
-     * (non-opening) transaction has posted company-wide — the
-     * hasRealTransaction guard refuses the whole re-run outright the moment
-     * a single payment has posted against ANY of this run's invoices — so a
-     * second is_opening invoice for the same contact can never coexist with
-     * a live or paid one.
+     * Opening invoices (is_opening=true) NEVER get an "own entry"
+     * contribution here — OpeningBalanceService::createOpeningInvoice()
+     * deliberately never calls LedgerService for one (Task 6): the AR was
+     * already posted once, by the ORIGINAL opening_balance_run's P8b
+     * line(s), keyed by contact_id — NOT by any invoice id, and potentially
+     * split across SEVERAL journal_lines for the same contact when that
+     * contact has more than one opening invoice in a single run (a customer
+     * with two old unpaid invoices at cutover is a realistic, UI-permitted
+     * case — neither OpeningBalanceService nor StoreOpeningBalanceRequest
+     * dedups customer_lines by contact). Because a specific opening-AR
+     * ledger line can't be matched 1:1 back to a specific is_opening invoice
+     * in that case, this method does NOT attempt to guess a split — the
+     * caller (checkInvoiceBalances) instead reconciles opening invoices at
+     * the CONTACT level via checkOpeningArReconciliation() below, which
+     * sums both the expected and ledger sides over the same contact scope.
+     * The $byPaymentEntry half of this method IS still valid, and used, for
+     * opening invoices — a payment always links to exactly one invoice_id
+     * via invoice_payments, regardless of is_opening.
      *
-     * @param  Collection<int, Invoice>  $invoices
-     * @return array<int, int> invoice_id => net base AR contributed
+     * @return array<int, int> invoice_id => net base AR contributed by that invoice's own entry (normal invoices) + its payments (all invoices)
      */
-    private function actualLedgerBaseArByInvoice($invoices): array
+    private function actualLedgerBaseArByInvoice(): array
     {
-        $receivableAccountIds = Account::query()
-            ->where('subtype', AccountSubtype::Receivable->value)
-            ->pluck('id');
+        $receivableAccountIds = $this->receivableAccountIds();
 
         if ($receivableAccountIds->isEmpty()) {
             // No AR account exists at all on this company — every posted
@@ -292,6 +309,7 @@ class IntegrityChecker
         }
 
         // Own P1/P1fx entry, keyed directly by source_id (= invoice_id).
+        // Opening invoices never appear here — see docblock above.
         $byOwnEntry = JournalLine::query()
             ->join('journal_entries', 'journal_entries.id', '=', 'journal_lines.journal_entry_id')
             ->whereIn('journal_lines.account_id', $receivableAccountIds)
@@ -302,7 +320,8 @@ class IntegrityChecker
 
         // Payments' P2/P2fx entries, keyed by payment_id first (that's what
         // source_id is on an invoice_payment entry), then re-aggregated up
-        // to invoice_id via the invoice_payments table itself.
+        // to invoice_id via the invoice_payments table itself. Genuinely
+        // invoice-attributable regardless of is_opening.
         $byPaymentEntry = JournalLine::query()
             ->join('journal_entries', 'journal_entries.id', '=', 'journal_lines.journal_entry_id')
             ->whereIn('journal_lines.account_id', $receivableAccountIds)
@@ -329,28 +348,97 @@ class IntegrityChecker
             $totals[(int) $invoiceId] = ($totals[(int) $invoiceId] ?? 0) + (int) $net;
         }
 
-        // Opening invoices: attribute the opening_balance_run's per-contact
-        // AR debit back to its is_opening invoice (see docblock above).
-        $openingInvoicesByContact = $invoices->where('is_opening', true)->keyBy('contact_id');
-        if ($openingInvoicesByContact->isNotEmpty()) {
-            $byContactOpeningEntry = JournalLine::query()
-                ->join('journal_entries', 'journal_entries.id', '=', 'journal_lines.journal_entry_id')
-                ->whereIn('journal_lines.account_id', $receivableAccountIds)
-                ->where('journal_entries.source_type', 'opening_balance_run')
-                ->whereIn('journal_lines.contact_id', $openingInvoicesByContact->keys())
-                ->selectRaw('journal_lines.contact_id AS contact_id, SUM(journal_lines.debit) - SUM(journal_lines.credit) AS net')
-                ->groupBy('journal_lines.contact_id')
-                ->pluck('net', 'contact_id');
+        return $totals;
+    }
 
-            foreach ($byContactOpeningEntry as $contactId => $net) {
-                $invoice = $openingInvoicesByContact->get((int) $contactId);
-                if ($invoice !== null) {
-                    $totals[$invoice->id] = ($totals[$invoice->id] ?? 0) + (int) $net;
-                }
+    /**
+     * base_ar_reconciliation for OPENING invoices, reconciled at the
+     * CONTACT level rather than per-invoice — see actualLedgerBaseArByInvoice()'s
+     * docblock for why per-invoice attribution isn't possible: the ledger's
+     * opening AR debit line(s) carry only contact_id, never invoice_id or
+     * opening_document_id, so when one contact has SEVERAL opening invoices
+     * in a single run there is no way to split that shared ledger
+     * contribution back across them individually. Instead, both the
+     * expected side and the ledger side are summed over the SAME set (all
+     * of a contact's currently-posted opening invoices), which correctly
+     * handles N opening invoices per contact:
+     *
+     * - Expected side: Σ over the contact's opening invoices of
+     *   (base_total − Σ that invoice's own non-void payments'
+     *   base_ar_relief) — the same per-invoice expected-outstanding formula
+     *   the normal-invoice path uses, just summed across the group.
+     * - Ledger side: (Σ this contact's opening_balance_run AR debit lines,
+     *   from the run entry(ies) — reversal lines from a voided re-run carry
+     *   the SAME contact_id, per LedgerService::reverse(), so they net to
+     *   zero automatically within this same sum) PLUS (Σ
+     *   $actualBaseAr[invoice_id] for each of the contact's opening
+     *   invoices — which, for an opening invoice, holds ONLY its
+     *   payment-attributable net, since actualLedgerBaseArByInvoice() never
+     *   gives one an "own entry" contribution).
+     *
+     * A mismatch produces ONE finding per contact (not per invoice), naming
+     * every opening invoice in the group.
+     *
+     * Disjoint from the normal-invoice per-invoice path by construction:
+     * this only ever sums source_type='opening_balance_run' lines (scoped
+     * by contact_id) and source_type='invoice_payment' lines belonging to
+     * invoices in THIS group (scoped by invoice_id via invoice_payments) —
+     * a contact's normal invoices are reconciled entirely through
+     * source_type='invoice'/'invoice_payment' lines keyed by THEIR OWN
+     * invoice_id in the checkInvoiceBalances() loop above, which this
+     * method never reads from or writes findings about.
+     *
+     * @param  Collection<int, Invoice>  $openingInvoices  already filtered to is_opening=true, POSTED_INVOICE_STATUSES
+     * @param  Collection<int, object>  $paymentTotals  invoice_id => {paid, base_relief}, non-void payments only
+     * @param  array<int, int>  $actualBaseAr  invoice_id => net ledger AR (payment-attributable only, for opening invoices)
+     * @return list<array{check:string, detail:string}>
+     */
+    private function checkOpeningArReconciliation(Collection $openingInvoices, Collection $paymentTotals, array $actualBaseAr): array
+    {
+        if ($openingInvoices->isEmpty()) {
+            return [];
+        }
+
+        $findings = [];
+        $byContact = $openingInvoices->groupBy('contact_id');
+
+        $receivableAccountIds = $this->receivableAccountIds();
+        $runArByContact = $receivableAccountIds->isEmpty() ? collect() : JournalLine::query()
+            ->join('journal_entries', 'journal_entries.id', '=', 'journal_lines.journal_entry_id')
+            ->whereIn('journal_lines.account_id', $receivableAccountIds)
+            ->where('journal_entries.source_type', 'opening_balance_run')
+            ->whereIn('journal_lines.contact_id', $byContact->keys())
+            ->selectRaw('journal_lines.contact_id AS contact_id, SUM(journal_lines.debit) - SUM(journal_lines.credit) AS net')
+            ->groupBy('journal_lines.contact_id')
+            ->pluck('net', 'contact_id');
+
+        foreach ($byContact as $contactId => $contactInvoices) {
+            $expected = 0;
+            $ledger = (int) ($runArByContact->get($contactId) ?? 0);
+
+            foreach ($contactInvoices as $invoice) {
+                $totals = $paymentTotals->get($invoice->id);
+                $paidBaseAr = (int) ($totals->base_relief ?? 0);
+                $expected += $invoice->base_total - $paidBaseAr;
+                $ledger += $actualBaseAr[$invoice->id] ?? 0;
+            }
+
+            if ($expected !== $ledger) {
+                $labels = $contactInvoices->map(fn (Invoice $invoice) => $this->invoiceLabel($invoice))->implode(', ');
+                $findings[] = [
+                    'check' => 'base_ar_reconciliation',
+                    'detail' => "Contact {$contactId}'s opening invoices ({$labels}) base-currency AR expected {$expected} (\u{03a3} base_total minus non-void payments' base_ar_relief) but the ledger shows {$ledger}",
+                ];
             }
         }
 
-        return $totals;
+        return $findings;
+    }
+
+    /** Every receivable-subtype account id for this company — shared scope for the ledger-side AR queries above. */
+    private function receivableAccountIds(): Collection
+    {
+        return Account::query()->where('subtype', AccountSubtype::Receivable->value)->pluck('id');
     }
 
     private function invoiceLabel(Invoice $invoice): string
