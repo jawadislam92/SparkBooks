@@ -4,14 +4,18 @@ namespace App\Services;
 
 use App\Domain\Ledger\EntryDraft;
 use App\Domain\Ledger\LineDraft;
+use App\Enums\EntryRole;
 use App\Enums\InvoiceStatus;
 use App\Exceptions\Invoicing\InvoiceContactNotEligible;
+use App\Exceptions\Invoicing\InvoiceHasLivePayments;
 use App\Exceptions\Invoicing\InvoiceHasNoLines;
 use App\Exceptions\Invoicing\InvoiceHasNoValue;
 use App\Exceptions\Invoicing\InvoiceNotDraft;
+use App\Exceptions\Invoicing\InvoiceNotVoidable;
 use App\Models\Account;
 use App\Models\Invoice;
 use App\Models\InvoiceLine;
+use App\Models\JournalEntry;
 use App\Models\TaxRate;
 use App\Support\AuditLogger;
 use App\Support\IdempotencyService;
@@ -125,6 +129,87 @@ class InvoiceService
         }
         if (! $invoice->contact->type->isCustomer()) {
             throw new InvoiceContactNotEligible('The invoice contact must be a customer (or both) to send an invoice.');
+        }
+    }
+
+    /**
+     * Voids a sent/partially-paid/paid invoice: posting rule P9 (spec §6) —
+     * a mirror reversal of the invoice's own P1 entry (Cr AR / Dr income per
+     * line / Dr tax), via LedgerService::reverse. Accounting-correct ordering
+     * (spec §6 note): payments must already be voided one by one via
+     * InvoicePaymentService::voidPayment BEFORE the invoice itself can be
+     * voided — this method deliberately does NOT auto-reverse them; it
+     * REFUSES outright while any live (non-void) payment remains, so the
+     * user consciously reverses each one first.
+     *
+     * $date defaults to today at the controller layer (locked-period safe
+     * even when the ORIGINAL entry's period has since been locked — spec §4
+     * rule 4: a reversal must always be postable in an open period).
+     *
+     * Shape mirrors send(): IdempotencyService::execute -> DB::transaction ->
+     * locked read -> guards -> LedgerService::reverse -> document mutation ->
+     * AuditLogger.
+     */
+    public function void(string $idempotencyKey, Invoice $invoice, string $date, string $memo): Invoice
+    {
+        $result = $this->idempotency->execute($idempotencyKey, 'invoice.voided', function () use ($invoice, $date, $memo) {
+            return DB::transaction(function () use ($invoice, $date, $memo) {
+                // Row-lock + re-read FRESH state, same reasoning as send()'s
+                // locked read: this MUST see the CURRENT status/payments, not
+                // whatever the controller resolved moments before this
+                // closure runs (and on an idempotency replay it doesn't run
+                // at all). Locking here is also what serializes a concurrent
+                // voidPayment() against the same invoice (that method locks
+                // the invoice row too) and a concurrent second void() call.
+                $locked = Invoice::query()->where('id', $invoice->id)->lockForUpdate()->firstOrFail();
+
+                $this->guardVoid($locked);
+
+                $entry = JournalEntry::query()
+                    ->where('source_type', 'invoice')
+                    ->where('source_id', $locked->id)
+                    ->where('entry_role', EntryRole::Primary->value)
+                    ->firstOrFail();
+
+                $reversal = $this->ledger->reverse($entry, CarbonImmutable::parse($date), $memo);
+
+                $locked->forceFill([
+                    'status' => InvoiceStatus::Void->value,
+                    'voided_at' => now(),
+                ])->save();
+
+                $this->audit->log('invoice.voided', $locked, after: ['reversal_entry_id' => $reversal->id]);
+
+                return ['id' => $locked->id];
+            });
+        });
+
+        return Invoice::query()->findOrFail($result['id']);
+    }
+
+    /**
+     * Status guard mirrors InvoiceStatus::canVoid() (sent/partially_paid/paid
+     * only), with a friendlier "already voided" message for that specific
+     * case. The live-payments guard queries the LOCKED invoice's payments
+     * fresh (not a possibly-stale relation) so it can never miss a payment
+     * recorded moments earlier in a concurrent transaction that already
+     * committed and released the lock this method is holding.
+     */
+    private function guardVoid(Invoice $invoice): void
+    {
+        if ($invoice->status === InvoiceStatus::Void) {
+            throw new InvoiceNotVoidable('This invoice has already been voided.');
+        }
+        if (! $invoice->status->canVoid()) {
+            throw new InvoiceNotVoidable('Only a sent, partially paid, or paid invoice can be voided.');
+        }
+
+        $livePayments = $invoice->payments()->where('status', '!=', 'void')->pluck('id');
+        if ($livePayments->isNotEmpty()) {
+            $ids = $livePayments->implode(', ');
+            throw new InvoiceHasLivePayments(
+                "Reverse the invoice's payment(s) first (payment ID(s): {$ids})."
+            );
         }
     }
 

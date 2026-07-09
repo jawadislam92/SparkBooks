@@ -4,15 +4,18 @@ namespace App\Services;
 
 use App\Domain\Ledger\EntryDraft;
 use App\Domain\Ledger\LineDraft;
+use App\Enums\EntryRole;
 use App\Enums\InvoiceStatus;
 use App\Exceptions\Invoicing\InvalidPaymentAmount;
 use App\Exceptions\Invoicing\InvoiceNotPayable;
+use App\Exceptions\Invoicing\PaymentAlreadyVoided;
 use App\Exceptions\Invoicing\PaymentBankAccountIneligible;
 use App\Exceptions\Invoicing\PaymentExceedsBalance;
 use App\Models\Account;
 use App\Models\BankAccount;
 use App\Models\Invoice;
 use App\Models\InvoicePayment;
+use App\Models\JournalEntry;
 use App\Support\AuditLogger;
 use App\Support\IdempotencyService;
 use Carbon\CarbonImmutable;
@@ -112,6 +115,79 @@ class InvoicePaymentService
                 ]);
 
                 return ['id' => $payment->id];
+            });
+        });
+
+        return InvoicePayment::query()->findOrFail($result['id']);
+    }
+
+    /**
+     * Reverses a posted payment: posting rule P9's payment-side counterpart —
+     * reverses the payment's own P2/P3 entry (Cr bank / Dr AR, the mirror of
+     * Dr bank / Cr AR), marks the payment 'void', and recomputes the invoice
+     * back toward sent/partially_paid (spec §6: voiding a payment is a
+     * conscious per-payment action, never an automatic side effect of voiding
+     * the invoice — InvoiceService::void() REFUSES while any payment here is
+     * still 'posted').
+     *
+     * Shape mirrors recordPayment(): IdempotencyService::execute ->
+     * DB::transaction -> locked read -> guard -> LedgerService::reverse ->
+     * document mutation -> AuditLogger. The INVOICE row is locked (not just
+     * the payment) because amount_paid/balance/status on the invoice are
+     * recomputed in the same transaction, and locking the invoice is what
+     * already serializes every payment-mutating action against it
+     * (recordPayment does the same) — a concurrent second voidPayment (or a
+     * concurrent recordPayment) blocks here until this transaction commits.
+     */
+    public function voidPayment(string $idempotencyKey, InvoicePayment $payment): InvoicePayment
+    {
+        $result = $this->idempotency->execute($idempotencyKey, 'invoice.payment_voided', function () use ($payment) {
+            return DB::transaction(function () use ($payment) {
+                $invoice = Invoice::query()->where('id', $payment->invoice_id)->lockForUpdate()->firstOrFail();
+
+                // Re-read the payment fresh under lock — must see the CURRENT
+                // status, not whatever the controller resolved moments ago
+                // (and on an idempotency replay this closure doesn't run at
+                // all, so there's no stale-row risk there either).
+                $locked = InvoicePayment::query()->where('id', $payment->id)->lockForUpdate()->firstOrFail();
+
+                if ($locked->status !== 'posted') {
+                    throw new PaymentAlreadyVoided('This payment has already been reversed.');
+                }
+
+                $entry = JournalEntry::query()
+                    ->where('source_type', 'invoice_payment')
+                    ->where('source_id', $locked->id)
+                    ->where('entry_role', EntryRole::Primary->value)
+                    ->firstOrFail();
+
+                $reversal = $this->ledger->reverse(
+                    $entry,
+                    CarbonImmutable::today(),
+                    "Reversed payment for {$invoice->number}"
+                );
+
+                $locked->forceFill(['status' => 'void'])->save();
+
+                $newAmountPaid = $invoice->amount_paid - $locked->amount;
+                $newBalance = $invoice->total - $newAmountPaid;
+
+                // Back toward sent/partially_paid, never paid — an invoice
+                // with a reversed payment is by definition no longer fully
+                // paid (see class docblock: only LINES are frozen post-send,
+                // this row keeps changing).
+                $invoice->forceFill([
+                    'amount_paid' => $newAmountPaid,
+                    'balance' => $newBalance,
+                    'status' => ($newAmountPaid === 0 ? InvoiceStatus::Sent : InvoiceStatus::PartiallyPaid)->value,
+                ])->save();
+
+                $this->audit->log('invoice.payment_voided', $locked, after: [
+                    'invoice_id' => $invoice->id,
+                    'reversal_entry_id' => $reversal->id,
+                ]);
+
+                return ['id' => $locked->id];
             });
         });
 

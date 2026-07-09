@@ -6,7 +6,9 @@ use App\Enums\AccountType;
 use App\Enums\ContactType;
 use App\Enums\InvoiceStatus;
 use App\Exceptions\Invoicing\InvoiceSendException;
+use App\Exceptions\Invoicing\InvoiceVoidException;
 use App\Exceptions\Invoicing\PaymentException;
+use App\Exceptions\Invoicing\PaymentVoidException;
 use App\Exceptions\Ledger\LedgerException;
 use App\Http\Requests\StoreInvoiceRequest;
 use App\Http\Requests\StorePaymentRequest;
@@ -22,7 +24,9 @@ use App\Services\InvoicePaymentService;
 use App\Services\InvoiceService;
 use App\Support\AuditLogger;
 use App\Support\Currencies;
+use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -252,6 +256,120 @@ class InvoiceController extends Controller
         }
 
         return redirect()->route('invoices.edit', $model->id);
+    }
+
+    /**
+     * Voids a sent/partially-paid/paid invoice — posting rule P9 (spec §6): a
+     * mirror reversal of the invoice's own P1 entry, via InvoiceService::void.
+     * $invoice is a plain route parameter (not implicit binding), same
+     * reasoning as edit()/update()/destroy()/send()/recordPayment() above.
+     *
+     * `date` is optional and defaults to today here (not in the service,
+     * which requires it) — spec §4 rule 4: a reversal must always be postable
+     * in an open period even when the ORIGINAL entry's period has since been
+     * locked, so "today" is the safe default a caller gets for free by
+     * omitting the field. `memo` defaults to a generic note when omitted so a
+     * quick void doesn't require typing one.
+     *
+     * Three failure shapes surface as a 422 on the generic `status` field,
+     * mirroring send()/recordPayment(): InvoiceVoidException (this
+     * controller's own domain guards — not voidable, live payments remain),
+     * LedgerException (e.g. a locked reversal date), and — as defense in
+     * depth for a genuine concurrent double-void race, mirroring
+     * ManualJournalController::reverse's narrow catch — a
+     * UniqueConstraintViolationException on the journal_entries source-unique
+     * index (in practice unreachable in a single-process request because the
+     * service's own lockForUpdate()+status-guard already serializes this, but
+     * kept as a backstop rather than trusting that guard alone).
+     */
+    public function void(Request $request, string $invoice, InvoiceService $service): RedirectResponse
+    {
+        $model = Invoice::query()->findOrFail($invoice);
+
+        $idempotencyKey = $request->header('X-Idempotency-Key');
+        if (! is_string($idempotencyKey) || ! Str::isUuid($idempotencyKey)) {
+            throw ValidationException::withMessages([
+                'idempotency_key' => 'A valid X-Idempotency-Key header (UUID) is required.',
+            ]);
+        }
+
+        $validated = $request->validate([
+            'date' => ['nullable', 'date'],
+            'memo' => ['nullable', 'string', 'max:500'],
+        ]);
+
+        $date = $validated['date'] ?? CarbonImmutable::today()->toDateString();
+        $memo = $validated['memo'] ?? "Void: Invoice {$model->number}";
+
+        try {
+            $service->void($idempotencyKey, $model, $date, $memo);
+        } catch (InvoiceVoidException|LedgerException $e) {
+            throw ValidationException::withMessages(['status' => $e->getMessage()]);
+        } catch (UniqueConstraintViolationException $e) {
+            if (! $this->isDuplicateReversal($e)) {
+                throw $e;
+            }
+
+            throw ValidationException::withMessages(['status' => 'This invoice has already been voided.']);
+        }
+
+        return redirect()->route('invoices.edit', $model->id);
+    }
+
+    /**
+     * Reverses a single posted payment — posting rules P2/P3's mirror, via
+     * InvoicePaymentService::voidPayment. $payment is resolved off the
+     * invoice's own relation (not InvoicePayment::findOrFail directly) so a
+     * payment that belongs to a DIFFERENT invoice in the same company still
+     * 404s here, not just a payment in a different company.
+     *
+     * Same three-way failure classification as void() above: PaymentVoidException
+     * (already reversed), LedgerException (locked period — reversal date is
+     * always today here, so only relevant if today itself is locked), and the
+     * same narrow UniqueConstraintViolationException backstop.
+     */
+    public function voidPayment(Request $request, string $invoice, string $payment, InvoicePaymentService $service): RedirectResponse
+    {
+        $model = Invoice::query()->findOrFail($invoice);
+        $paymentModel = $model->payments()->findOrFail($payment);
+
+        $idempotencyKey = $request->header('X-Idempotency-Key');
+        if (! is_string($idempotencyKey) || ! Str::isUuid($idempotencyKey)) {
+            throw ValidationException::withMessages([
+                'idempotency_key' => 'A valid X-Idempotency-Key header (UUID) is required.',
+            ]);
+        }
+
+        try {
+            $service->voidPayment($idempotencyKey, $paymentModel);
+        } catch (PaymentVoidException|LedgerException $e) {
+            throw ValidationException::withMessages(['status' => $e->getMessage()]);
+        } catch (UniqueConstraintViolationException $e) {
+            if (! $this->isDuplicateReversal($e)) {
+                throw $e;
+            }
+
+            throw ValidationException::withMessages(['status' => 'This payment has already been reversed.']);
+        }
+
+        return redirect()->route('invoices.edit', $model->id);
+    }
+
+    /**
+     * Whether the violated unique index is the journal_entries source-unique
+     * index (one primary + one reversal max per source) — mirrors
+     * ManualJournalController::isDuplicateReversal. Prefers the driver's
+     * populated index name, falling back to a message substring for
+     * drivers/situations where ->index isn't set (MySQL always includes the
+     * violated key name in the duplicate-entry message).
+     */
+    private function isDuplicateReversal(UniqueConstraintViolationException $e): bool
+    {
+        if ($e->index !== null) {
+            return $e->index === 'journal_entries_source_unique';
+        }
+
+        return str_contains($e->getMessage(), 'journal_entries_source_unique');
     }
 
     /**

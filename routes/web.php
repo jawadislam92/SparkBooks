@@ -114,6 +114,15 @@ Route::middleware(['auth', 'verified', 'company', 'can:payments.record'])->group
     Route::post('/invoices/{invoice}/payments', [InvoiceController::class, 'recordPayment'])->name('invoices.payments.record');
 });
 
+// invoices.void gates BOTH void actions (Owner/Admin/Accountant, not Staff —
+// config/permissions.php §7.14): voiding a payment (P2/P3 reversal) and
+// voiding the invoice itself (P9, spec §6) are two steps of the same
+// accounting-correct "void an invoice" workflow (payments first).
+Route::middleware(['auth', 'verified', 'company', 'can:invoices.void'])->group(function () {
+    Route::post('/invoices/{invoice}/void', [InvoiceController::class, 'void'])->name('invoices.void');
+    Route::post('/invoices/{invoice}/payments/{payment}/void', [InvoiceController::class, 'voidPayment'])->name('invoices.payments.void');
+});
+
 Route::middleware(['auth', 'verified', 'company', 'can:items.manage'])->group(function () {
     Route::get('/items', [ItemController::class, 'index'])->name('items.index');
     Route::post('/items', [ItemController::class, 'store'])->name('items.store');
