@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Enums\AccountType;
 use App\Enums\ContactType;
 use App\Enums\InvoiceStatus;
+use App\Exceptions\Invoicing\InvoiceFxRateInvalid;
 use App\Exceptions\Invoicing\InvoiceSendException;
 use App\Exceptions\Invoicing\InvoiceVoidException;
 use App\Exceptions\Invoicing\PaymentException;
@@ -211,13 +212,14 @@ class InvoiceController extends Controller
      * spec §17.1) is the one piece of real form data this action DOES take:
      * for a foreign-currency invoice it's manually entered/editable at send
      * time, so it travels in the body; it's simply ignored for a domestic
-     * invoice (InvoiceService::send fixes fx_rate at 1.0 regardless). Both
-     * InvoiceSendException (this controller's own domain guards: not-a-draft,
-     * no lines, ineligible contact, missing/invalid fx_rate for a foreign
-     * invoice) and LedgerException (e.g. a locked period) are surfaced the
-     * same way: a 422 with the message on a generic `status` field, since
-     * there's no single natural form field for a whole-invoice action like
-     * this one.
+     * invoice (InvoiceService::send fixes fx_rate at 1.0 regardless). An
+     * invalid fx_rate for a foreign invoice (missing/<=0/non-numeric/>8dp)
+     * surfaces as a 422 on the `fx_rate` field (see the specific catch
+     * below); every OTHER InvoiceSendException (this controller's own
+     * whole-invoice guards: not-a-draft, no lines, ineligible contact) and
+     * LedgerException (e.g. a locked period) surface as a 422 on the generic
+     * `status` field, since there's no single natural form field for a
+     * whole-invoice action like this one.
      */
     public function send(Request $request, string $invoice, InvoiceService $service): RedirectResponse
     {
@@ -236,6 +238,13 @@ class InvoiceController extends Controller
 
         try {
             $service->send($idempotencyKey, $model, $validated['fx_rate'] ?? null);
+        } catch (InvoiceFxRateInvalid $e) {
+            // A fx_rate-field-specific validation failure — its message lands
+            // on the `fx_rate` field, not the generic `status` field. Caught
+            // FIRST because it IS an InvoiceSendException (subclass); PHP
+            // evaluates catch blocks top-down, so the broader catch below
+            // would otherwise swallow it onto `status`.
+            throw ValidationException::withMessages(['fx_rate' => $e->getMessage()]);
         } catch (InvoiceSendException|LedgerException $e) {
             throw ValidationException::withMessages(['status' => $e->getMessage()]);
         }

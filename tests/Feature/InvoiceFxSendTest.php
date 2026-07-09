@@ -289,7 +289,7 @@ class InvoiceFxSendTest extends TestCase
 
         $response = $this->sendInvoice($invoice); // no fx_rate in body
 
-        $response->assertSessionHasErrors('status');
+        $response->assertSessionHasErrors('fx_rate');
         $this->assertSame(0, JournalEntry::query()->where('source_type', 'invoice')->count());
 
         $invoice->refresh();
@@ -311,7 +311,7 @@ class InvoiceFxSendTest extends TestCase
 
         $response = $this->sendInvoice($invoice, null, ['fx_rate' => '0']);
 
-        $response->assertSessionHasErrors('status');
+        $response->assertSessionHasErrors('fx_rate');
         $this->assertSame(0, JournalEntry::query()->where('source_type', 'invoice')->count());
         $this->assertNull($invoice->fresh()->number);
     }
@@ -329,7 +329,7 @@ class InvoiceFxSendTest extends TestCase
 
         $response = $this->sendInvoice($invoice, null, ['fx_rate' => '-280']);
 
-        $response->assertSessionHasErrors('status');
+        $response->assertSessionHasErrors('fx_rate');
         $this->assertSame(0, JournalEntry::query()->where('source_type', 'invoice')->count());
     }
 
@@ -346,8 +346,73 @@ class InvoiceFxSendTest extends TestCase
 
         $response = $this->sendInvoice($invoice, null, ['fx_rate' => 'abc']);
 
-        $response->assertSessionHasErrors('status');
+        $response->assertSessionHasErrors('fx_rate');
         $this->assertSame(0, JournalEntry::query()->where('source_type', 'invoice')->count());
+    }
+
+    /**
+     * The regression this fix closes: a plausible-but-malformed rate with 9
+     * decimal places passes a naive shape check but exceeds fx_rate's
+     * DECIMAL(16,8) precision. Before the fix, resolveFxRate let it through
+     * and FxConverter::toBase threw a raw InvalidArgumentException deep inside
+     * convertToBase() — which, not being an InvoiceSendException, escaped the
+     * controller's catch as an uncaught 500. It must now be a clean 422 on
+     * the fx_rate field, with nothing posted and no number burned.
+     */
+    public function test_an_fx_rate_with_more_than_eight_decimals_is_rejected_with_a_clean_422_not_a_500(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $contact = $this->customer($company);
+        $this->chart($company);
+        $income = $this->incomeAccount($company);
+
+        $invoice = $this->usdDraftInvoice($company, $contact);
+        $this->invoiceLine($invoice, $income, ['quantity' => '1', 'unit_price' => 100000]);
+
+        $response = $this->sendInvoice($invoice, null, ['fx_rate' => '280.123456789']); // 9 dp
+
+        $response->assertSessionHasErrors('fx_rate');
+        $this->assertSame(0, JournalEntry::query()->where('source_type', 'invoice')->count());
+
+        $invoice->refresh();
+        $this->assertSame(InvoiceStatus::Draft, $invoice->status);
+        $this->assertNull($invoice->number);
+        $this->assertLedgerBalances();
+
+        // No number was burned by the failed attempt: a fresh, valid invoice
+        // sent afterwards still gets INV-0001.
+        $valid = $this->usdDraftInvoice($company, $contact);
+        $this->invoiceLine($valid, $income, ['quantity' => '1', 'unit_price' => 5000]);
+        $this->sendInvoice($valid, null, ['fx_rate' => '280'])->assertRedirect();
+        $this->assertSame('INV-0001', $valid->fresh()->number);
+    }
+
+    /**
+     * The boundary case: a rate at exactly 8 decimal places is valid (it fits
+     * DECIMAL(16,8)) and must send successfully — the >8dp rejection above
+     * must not be off-by-one and reject a legitimate 8dp rate.
+     */
+    public function test_an_fx_rate_with_exactly_eight_decimals_is_accepted(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $contact = $this->customer($company);
+        $this->chart($company);
+        $income = $this->incomeAccount($company);
+
+        $invoice = $this->usdDraftInvoice($company, $contact);
+        $this->invoiceLine($invoice, $income, ['quantity' => '1', 'unit_price' => 100000]);
+
+        $this->sendInvoice($invoice, null, ['fx_rate' => '280.12345678'])->assertRedirect();
+
+        $invoice->refresh();
+        $this->assertSame(InvoiceStatus::Sent, $invoice->status);
+        $this->assertSame('INV-0001', $invoice->number);
+        $this->assertSame('280.12345678', $invoice->fx_rate);
+        // round_half_up(100000 x 280.12345678) = round_half_up(28012345.678) = 28012346.
+        $this->assertSame(28012346, $invoice->base_subtotal);
+        $this->assertLedgerBalances();
     }
 
     // ---------------------------------------------------------------

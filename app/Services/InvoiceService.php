@@ -7,7 +7,7 @@ use App\Domain\Ledger\LineDraft;
 use App\Enums\EntryRole;
 use App\Enums\InvoiceStatus;
 use App\Exceptions\Invoicing\InvoiceContactNotEligible;
-use App\Exceptions\Invoicing\InvoiceFxRateRequired;
+use App\Exceptions\Invoicing\InvoiceFxRateInvalid;
 use App\Exceptions\Invoicing\InvoiceHasLivePayments;
 use App\Exceptions\Invoicing\InvoiceHasNoLines;
 use App\Exceptions\Invoicing\InvoiceHasNoValue;
@@ -24,6 +24,7 @@ use App\Support\FxConverter;
 use App\Support\IdempotencyService;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
+use InvalidArgumentException;
 
 /**
  * Sends a draft invoice: assigns its document number, freezes each line's
@@ -163,13 +164,18 @@ class InvoiceService
      * domestic invoice never needs one and never depends on request input for
      * it (spec §17.1: "a domestic invoice still fx_rate 1.0").
      *
-     * Foreign: $fxRate must be present and shaped as a plain positive decimal
-     * (optionally with a fractional part, no more than 8dp — the same shape
-     * FxConverter itself enforces) — validated here with the app's own domain
-     * exception (InvoiceFxRateRequired, caught by the controller as a clean
-     * 422) rather than letting a malformed string fall through to
-     * FxConverter's InvalidArgumentException, which would otherwise surface
-     * as an uncaught 500.
+     * Foreign: $fxRate must be a valid conversion rate. "Valid fx_rate shape"
+     * is defined in exactly ONE place — FxConverter's own guard — which we
+     * probe here with a nominal conversion so EVERY shape violation
+     * (missing/empty, non-numeric, <= 0, OR more than 8 decimal places)
+     * surfaces at this point, before freezeLines() mutates any row, and is
+     * re-thrown as InvoiceFxRateInvalid (caught by the controller as a clean
+     * 422 on the fx_rate field). Without this probe a plausible-but-malformed
+     * rate like '280.123456789' (9dp) would pass a hand-rolled shape check
+     * here and then throw FxConverter's raw InvalidArgumentException deep
+     * inside convertToBase() — which, not being an InvoiceSendException, would
+     * escape the controller's catch as an uncaught 500. Delegating to the one
+     * guard keeps this method and FxConverter from drifting apart.
      */
     private function resolveFxRate(Invoice $invoice, ?string $fxRate): string
     {
@@ -181,9 +187,14 @@ class InvoiceService
 
         $trimmed = trim((string) $fxRate);
 
-        if ($trimmed === '' || preg_match('/^\d+(\.\d+)?$/', $trimmed) !== 1 || bccomp($trimmed, '0', 8) <= 0) {
-            throw new InvoiceFxRateRequired(
-                "A positive FX rate is required to send a {$invoice->currency_code} invoice (base currency is {$baseCurrency})."
+        try {
+            // Probe-convert a nominal amount purely to run FxConverter's guard
+            // (the result is discarded) — the single source of truth for what
+            // a valid fx_rate looks like.
+            FxConverter::toBase(1, $trimmed);
+        } catch (InvalidArgumentException) {
+            throw new InvoiceFxRateInvalid(
+                "A valid FX rate (a positive number with up to 8 decimal places) is required to send a {$invoice->currency_code} invoice (base currency is {$baseCurrency})."
             );
         }
 
@@ -373,15 +384,17 @@ class InvoiceService
      * a fixed base-currency liability never re-measured at payment time
      * (spec §17.1: tax is a base-currency liability from send).
      *
-     * A $0-value line (base_line_subtotal === 0 — either a genuine $0
-     * doc-currency line, or any doc amount that converts to 0 base minor
-     * units, which can't happen for a positive amount at a positive rate)
-     * contributes nothing to the ledger, so it produces NO Cr income
-     * LineDraft: a zero-value line would trip LedgerService's "exactly one
-     * side positive" rule. The line still exists on the invoice document (for
-     * display) — it just isn't posted. The all-lines-$0 case can't reach
-     * here — send() rejects a zero document total with InvoiceHasNoValue
-     * before this method is called.
+     * A $0-value line (base_line_subtotal === 0 — a genuine $0 doc-currency
+     * line, or a small positive doc amount that rounds down to 0 base minor
+     * units at a fractional rate < 1) contributes nothing to the ledger, so
+     * it produces NO Cr income LineDraft: a zero-value line would trip
+     * LedgerService's "exactly one side positive" rule. It's filtered
+     * defensively regardless of how the 0 arises — not on an assumption about
+     * the rate's magnitude (PKR-per-USD rates are ≫1, but the base<foreign
+     * direction is a legitimate future case). The line still exists on the
+     * invoice document (for display) — it just isn't posted. The all-lines-$0
+     * case can't reach here — send() rejects a zero document total with
+     * InvoiceHasNoValue before this method is called.
      *
      * @param  array{lines: array<int, array{base_line_subtotal:int, base_line_tax:int}>, subtotal:int, tax_total:int, total:int}  $base
      * @return list<LineDraft>
