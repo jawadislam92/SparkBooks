@@ -182,7 +182,7 @@ class IntegrityChecker
 
         $invoices = Invoice::query()
             ->whereIn('status', self::POSTED_INVOICE_STATUSES)
-            ->get(['id', 'number', 'status', 'total', 'balance', 'base_total']);
+            ->get(['id', 'number', 'status', 'total', 'balance', 'base_total', 'contact_id', 'is_opening']);
 
         if ($invoices->isEmpty()) {
             return $findings;
@@ -257,6 +257,23 @@ class IntegrityChecker
      * Two grouped queries (never one per invoice) so this stays cheap
      * regardless of how many invoices/payments a company has accumulated.
      *
+     * Opening invoices (is_opening=true) are the one exception to "own entry
+     * keyed by source_id=invoice_id": OpeningBalanceService::
+     * createOpeningInvoice() deliberately never calls LedgerService (Task 6 —
+     * the AR was already posted exactly once, by the ORIGINAL
+     * opening_balance_run's P8b line, which is keyed by contact_id, not by
+     * any invoice id, and may cover several customers in one combined
+     * entry). A THIRD lookup below re-attributes that debit back to its
+     * invoice by contact_id instead. This is safe — a contact can have at
+     * most ONE live (non-void) is_opening invoice at any moment:
+     * OpeningBalanceService::voidPriorRun() (which is what would otherwise
+     * let a second one exist) is only ever reachable before any real
+     * (non-opening) transaction has posted company-wide — the
+     * hasRealTransaction guard refuses the whole re-run outright the moment
+     * a single payment has posted against ANY of this run's invoices — so a
+     * second is_opening invoice for the same contact can never coexist with
+     * a live or paid one.
+     *
      * @param  Collection<int, Invoice>  $invoices
      * @return array<int, int> invoice_id => net base AR contributed
      */
@@ -310,6 +327,27 @@ class IntegrityChecker
                 continue;
             }
             $totals[(int) $invoiceId] = ($totals[(int) $invoiceId] ?? 0) + (int) $net;
+        }
+
+        // Opening invoices: attribute the opening_balance_run's per-contact
+        // AR debit back to its is_opening invoice (see docblock above).
+        $openingInvoicesByContact = $invoices->where('is_opening', true)->keyBy('contact_id');
+        if ($openingInvoicesByContact->isNotEmpty()) {
+            $byContactOpeningEntry = JournalLine::query()
+                ->join('journal_entries', 'journal_entries.id', '=', 'journal_lines.journal_entry_id')
+                ->whereIn('journal_lines.account_id', $receivableAccountIds)
+                ->where('journal_entries.source_type', 'opening_balance_run')
+                ->whereIn('journal_lines.contact_id', $openingInvoicesByContact->keys())
+                ->selectRaw('journal_lines.contact_id AS contact_id, SUM(journal_lines.debit) - SUM(journal_lines.credit) AS net')
+                ->groupBy('journal_lines.contact_id')
+                ->pluck('net', 'contact_id');
+
+            foreach ($byContactOpeningEntry as $contactId => $net) {
+                $invoice = $openingInvoicesByContact->get((int) $contactId);
+                if ($invoice !== null) {
+                    $totals[$invoice->id] = ($totals[$invoice->id] ?? 0) + (int) $net;
+                }
+            }
         }
 
         return $totals;

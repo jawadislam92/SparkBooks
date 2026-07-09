@@ -1061,6 +1061,100 @@ class IntegrityCheckerTest extends TestCase
         $this->assertSame([], $findings);
     }
 
+    // ---------------------------------------------------------------
+    // Task 13 (Phase 3 exit): opening invoices' AR is attributed by
+    // contact_id, not by source_id=invoice_id — discovered live in the
+    // exit-verification browser walkthrough (paying a fresh opening
+    // invoice to Paid produced a false base_ar_reconciliation finding).
+    // ---------------------------------------------------------------
+
+    /**
+     * An is_opening invoice never posts its own source_type='invoice'
+     * entry — OpeningBalanceService::createOpeningInvoice() deliberately
+     * never calls LedgerService (Task 6): the AR was already posted once,
+     * by the ORIGINAL opening_balance_run's P8b line, which is keyed by
+     * contact_id, not by any invoice id. Before this fix,
+     * actualLedgerBaseArByInvoice() had no way to find that debit for an
+     * is_opening invoice at all, so paying one down to Paid produced a
+     * FALSE base_ar_reconciliation finding even though the ledger itself
+     * was perfectly correct — proven independently below via the global
+     * ledger net-zero assertion, so this is purely a checker attribution
+     * gap, not a real corruption being masked.
+     */
+    public function test_clean_when_an_opening_invoice_is_fully_paid(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $contact = $this->customer($company);
+        $this->invoiceChart($company);
+        $this->equityAccount($company, ['code' => '3100', 'name' => 'Opening Balance Equity']);
+        $bank = $this->bankAccountModel($company);
+
+        app(CompanyContext::class)->set($company);
+        app(OpeningBalanceService::class)->apply((string) Str::uuid(), [
+            'books_start_date' => '2026-06-01',
+            'bank_lines' => [],
+            'customer_lines' => [
+                ['contact_id' => $contact->id, 'reference' => 'Opening INV', 'original_date' => '2026-05-01', 'due_date' => '2026-06-01', 'amount' => 500000],
+            ],
+            'vendor_lines' => [],
+        ]);
+
+        $invoice = Invoice::query()->where('is_opening', true)->sole();
+        $this->assertSame(InvoiceStatus::Sent, $invoice->status);
+
+        $this->pay($invoice, ['amount' => 500000, 'bank_account_id' => $bank->id, 'payment_date' => '2026-07-10'])->assertRedirect();
+
+        $invoice->refresh();
+        $this->assertSame(InvoiceStatus::Paid, $invoice->status);
+        $this->assertSame(0, $invoice->balance);
+
+        // Independent proof the LEDGER itself is genuinely correct, not
+        // just that the checker was fooled into agreeing with it: the
+        // whole ledger still nets to zero.
+        $net = (int) DB::table('journal_lines')->selectRaw('COALESCE(SUM(debit) - SUM(credit), 0) AS n')->value('n');
+        $this->assertSame(0, $net);
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+        $this->assertSame([], $findings);
+    }
+
+    /**
+     * Same gap, the other checkInvoiceBalances() branch: a still-open
+     * (partially paid, not yet Paid) opening invoice falls into the
+     * expected-vs-ledger `elseif`, which depended on the same broken
+     * attribution.
+     */
+    public function test_clean_when_an_opening_invoice_is_partially_paid(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $contact = $this->customer($company);
+        $this->invoiceChart($company);
+        $this->equityAccount($company, ['code' => '3100', 'name' => 'Opening Balance Equity']);
+        $bank = $this->bankAccountModel($company);
+
+        app(CompanyContext::class)->set($company);
+        app(OpeningBalanceService::class)->apply((string) Str::uuid(), [
+            'books_start_date' => '2026-06-01',
+            'bank_lines' => [],
+            'customer_lines' => [
+                ['contact_id' => $contact->id, 'reference' => 'Opening INV', 'original_date' => '2026-05-01', 'due_date' => '2026-06-01', 'amount' => 500000],
+            ],
+            'vendor_lines' => [],
+        ]);
+
+        $invoice = Invoice::query()->where('is_opening', true)->sole();
+        $this->pay($invoice, ['amount' => 200000, 'bank_account_id' => $bank->id, 'payment_date' => '2026-07-10'])->assertRedirect();
+
+        $invoice->refresh();
+        $this->assertSame(InvoiceStatus::PartiallyPaid, $invoice->status);
+        $this->assertSame(300000, $invoice->balance);
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+        $this->assertSame([], $findings);
+    }
+
     public function test_checker_reports_every_finding_simultaneously_not_just_the_first(): void
     {
         $company = Company::factory()->create();
