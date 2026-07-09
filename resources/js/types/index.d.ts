@@ -27,4 +27,12 @@ export type PageProps<
     };
     companies: CompanyMembership[];
     currentCompany: CurrentCompany | null;
+    /**
+     * A minimal ability map for the current user in currentCompany, keyed by
+     * permission (see config/permissions.php). Only covers the abilities the
+     * sidebar nav (Layouts/AppShell.tsx) needs to decide what to render —
+     * every route those links point at is still independently gated
+     * server-side. Empty for guests.
+     */
+    can: Record<string, boolean>;
 };

@@ -9,6 +9,7 @@ use App\Enums\AccountType;
 use App\Enums\Role;
 use App\Models\Account;
 use App\Models\ActivityLog;
+use App\Models\BankAccount;
 use App\Models\Company;
 use App\Models\IntegrityRun;
 use App\Models\JournalEntry;
@@ -17,11 +18,15 @@ use App\Models\ManualJournal;
 use App\Models\User;
 use App\Services\IntegrityChecker;
 use App\Services\LedgerService;
+use App\Services\OpeningBalanceService;
+use App\Services\OtherReceiptService;
+use App\Services\TransferService;
 use App\Support\CompanyContext;
 use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 use Inertia\Testing\AssertableInertia;
 use Tests\TestCase;
 
@@ -82,6 +87,45 @@ class IntegrityCheckerTest extends TestCase
             'type' => AccountType::Asset->value,
             'subtype' => AccountSubtype::Receivable->value,
         ], $overrides));
+    }
+
+    private function equityAccount(Company $company, array $overrides = []): Account
+    {
+        return Account::factory()->create(array_merge([
+            'company_id' => $company->id,
+            'code' => '3000',
+            'type' => AccountType::Equity->value,
+            'subtype' => AccountSubtype::Equity->value,
+        ], $overrides));
+    }
+
+    /**
+     * A BankAccount MODEL (distinct from the plain ledger Account created by
+     * bankAccount() above) — the linked-Account nested factory needs a live
+     * CompanyContext to fill its own company_id, hence the runFor wrap.
+     * Mirrors TransfersTest/OtherReceiptsTest/OpeningBalancesTest.
+     */
+    private function bankAccountModel(Company $company, array $overrides = []): BankAccount
+    {
+        return app(CompanyContext::class)->runFor($company, fn () => BankAccount::factory()->create(array_merge([
+            'company_id' => $company->id,
+        ], $overrides)));
+    }
+
+    /**
+     * Posts a mirror-image reversal of an existing entry via LedgerService
+     * directly — source-type agnostic, exactly like ManualJournalService and
+     * OpeningBalanceService's own void path do internally. Used here to
+     * reverse transfer/other_receipt-sourced entries too, since those
+     * services don't (yet) expose their own reverse() method but the
+     * underlying ledger mechanism (same source_type/source_id, entry_role=
+     * reversal) is identical regardless of which service originally posted.
+     */
+    private function reverseEntry(JournalEntry $entry): JournalEntry
+    {
+        return DB::transaction(fn () => app(LedgerService::class)->reverse(
+            $entry, CarbonImmutable::parse('2026-07-02'), 'Test reversal'
+        ));
     }
 
     /**
@@ -231,6 +275,212 @@ class IntegrityCheckerTest extends TestCase
         $checks = collect($findings)->pluck('check')->all();
 
         $this->assertContains('orphan_entries', $checks);
+    }
+
+    // ---------------------------------------------------------------
+    // IntegrityChecker: Phase 2 source-type-aware orphan check
+    // ---------------------------------------------------------------
+
+    /**
+     * Raw-inserts a JournalEntry with the given source_type and a source_id
+     * (999999) that has no matching row in that type's table, and asserts an
+     * orphan_entries finding naming the source_type shows up. Shared by the
+     * three Phase 2 source-type tests below — mirrors
+     * test_orphaned_manual_journal_source_entry_produces_finding above, one
+     * per new source type registered in IntegrityChecker::SOURCE_TABLES.
+     */
+    private function assertOrphanDetectedForSourceType(string $sourceType): void
+    {
+        $company = Company::factory()->create();
+
+        DB::table('journal_entries')->insert([
+            'company_id' => $company->id,
+            'entry_date' => '2026-07-01',
+            'memo' => 'Orphaned entry (raw insert)',
+            'source_type' => $sourceType,
+            'source_id' => 999999,
+            'entry_role' => 'primary',
+            'created_by' => null,
+        ]);
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+        $checks = collect($findings)->pluck('check')->all();
+
+        $this->assertContains('orphan_entries', $checks);
+        $finding = collect($findings)->firstWhere('check', 'orphan_entries');
+        $this->assertStringContainsString($sourceType, $finding['detail']);
+    }
+
+    public function test_orphaned_transfer_source_entry_produces_finding(): void
+    {
+        $this->assertOrphanDetectedForSourceType('transfer');
+    }
+
+    public function test_orphaned_other_receipt_source_entry_produces_finding(): void
+    {
+        $this->assertOrphanDetectedForSourceType('other_receipt');
+    }
+
+    public function test_orphaned_opening_balance_run_source_entry_produces_finding(): void
+    {
+        $this->assertOrphanDetectedForSourceType('opening_balance_run');
+    }
+
+    /**
+     * The point of the whole extension: a source_type this checker has never
+     * heard of (a stand-in for some future Phase 3+ document type someone
+     * forgets to register in IntegrityChecker::SOURCE_TABLES) must fail
+     * loud — a distinct 'unrecognized_source' finding — rather than being
+     * silently skipped by the per-source-type loop.
+     */
+    public function test_unknown_source_type_produces_unrecognized_source_finding(): void
+    {
+        $company = Company::factory()->create();
+
+        DB::table('journal_entries')->insert([
+            'company_id' => $company->id,
+            'entry_date' => '2026-07-01',
+            'memo' => 'Future source type (raw insert)',
+            'source_type' => 'invoice',
+            'source_id' => 1,
+            'entry_role' => 'primary',
+            'created_by' => null,
+        ]);
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+        $checks = collect($findings)->pluck('check')->all();
+
+        $this->assertContains('unrecognized_source', $checks);
+        $this->assertNotContains('orphan_entries', $checks);
+        $finding = collect($findings)->firstWhere('check', 'unrecognized_source');
+        $this->assertStringContainsString('invoice', $finding['detail']);
+    }
+
+    /**
+     * Reversal entries keep the ORIGINAL entry's source_type/source_id (spec
+     * §4 iron rule) — they must never be mistaken for orphans (their source
+     * row genuinely exists) or for an unrecognized source_type.
+     */
+    public function test_reversal_of_a_transfer_entry_is_not_flagged_as_orphan_or_unrecognized(): void
+    {
+        $company = Company::factory()->create();
+        app(CompanyContext::class)->set($company);
+        $from = $this->bankAccountModel($company);
+        $to = $this->bankAccountModel($company);
+
+        $transfer = app(TransferService::class)->transfer((string) Str::uuid(), [
+            'from_bank_account_id' => $from->id,
+            'to_bank_account_id' => $to->id,
+            'transfer_date' => '2026-07-01',
+            'amount' => 5000,
+            'memo' => 'Test transfer',
+        ]);
+        $entry = JournalEntry::query()->where('source_type', 'transfer')->where('source_id', $transfer->id)->sole();
+        $this->reverseEntry($entry);
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+        $checks = collect($findings)->pluck('check')->all();
+
+        $this->assertNotContains('orphan_entries', $checks);
+        $this->assertNotContains('unrecognized_source', $checks);
+    }
+
+    /**
+     * A company with a live document + reversal pair for EVERY Phase 2
+     * source type (manual journal, transfer, other receipt, opening balance
+     * run) must come back completely clean — the key assertion being that
+     * none of the four reversals gets mistaken for an orphan just because
+     * it shares its source_id with a document that ISN'T itself.
+     */
+    public function test_clean_multi_source_company_with_reversals_yields_no_findings(): void
+    {
+        $company = Company::factory()->create();
+        app(CompanyContext::class)->set($company);
+
+        $bankA = $this->bankAccountModel($company);
+        $bankB = $this->bankAccountModel($company);
+        $income = $this->incomeAccount($company);
+        $equity = $this->equityAccount($company);
+        $obe = $this->equityAccount($company, ['code' => '3100']);
+
+        // manual_journal + reversal
+        $mjEntry = $this->postBalancedEntry($company, [
+            ['account_id' => $bankA->ledger_account_id, 'debit' => 10000, 'credit' => 0],
+            ['account_id' => $income->id, 'debit' => 0, 'credit' => 10000],
+        ]);
+        $this->reverseEntry($mjEntry);
+
+        // transfer + reversal
+        $transfer = app(TransferService::class)->transfer((string) Str::uuid(), [
+            'from_bank_account_id' => $bankA->id,
+            'to_bank_account_id' => $bankB->id,
+            'transfer_date' => '2026-07-01',
+            'amount' => 5000,
+            'memo' => 'Test transfer',
+        ]);
+        $transferEntry = JournalEntry::query()->where('source_type', 'transfer')->where('source_id', $transfer->id)->sole();
+        $this->reverseEntry($transferEntry);
+
+        // other_receipt + reversal
+        $receipt = app(OtherReceiptService::class)->record((string) Str::uuid(), [
+            'bank_account_id' => $bankA->id,
+            'category_account_id' => $equity->id,
+            'receipt_date' => '2026-07-01',
+            'amount' => 3000,
+            'payer' => 'Test payer',
+            'memo' => 'Test receipt',
+        ]);
+        $receiptEntry = JournalEntry::query()->where('source_type', 'other_receipt')->where('source_id', $receipt->id)->sole();
+        $this->reverseEntry($receiptEntry);
+
+        // opening_balance_run + reversal
+        $run = app(OpeningBalanceService::class)->apply((string) Str::uuid(), [
+            'books_start_date' => '2026-06-01',
+            'bank_lines' => [
+                ['bank_account_id' => $bankA->id, 'amount' => 20000],
+            ],
+        ]);
+        $runEntry = JournalEntry::query()->where('source_type', 'opening_balance_run')->where('source_id', $run->id)->sole();
+        $this->reverseEntry($runEntry);
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+
+        $this->assertSame([], $findings);
+    }
+
+    /**
+     * Multi-company isolation for the NEW source-type-aware check
+     * specifically (the existing isolation test below covers entry_balance).
+     * Tampering company A with an orphaned transfer-sourced entry must not
+     * leak into company B's findings.
+     */
+    public function test_orphan_finding_for_a_phase2_source_type_is_isolated_to_the_tampered_company(): void
+    {
+        $companyA = Company::factory()->create();
+        $companyB = Company::factory()->create();
+
+        DB::table('journal_entries')->insert([
+            'company_id' => $companyA->id,
+            'entry_date' => '2026-07-01',
+            'memo' => 'Orphaned entry (raw insert)',
+            'source_type' => 'transfer',
+            'source_id' => 999999,
+            'entry_role' => 'primary',
+            'created_by' => null,
+        ]);
+
+        $bankB = $this->bankAccount($companyB);
+        $incomeB = $this->incomeAccount($companyB);
+        $this->postBalancedEntry($companyB, [
+            ['account_id' => $bankB->id, 'debit' => 10000, 'credit' => 0],
+            ['account_id' => $incomeB->id, 'debit' => 0, 'credit' => 10000],
+        ]);
+
+        $findingsA = app(IntegrityChecker::class)->checkCompany($companyA);
+        $findingsB = app(IntegrityChecker::class)->checkCompany($companyB);
+
+        $this->assertContains('orphan_entries', collect($findingsA)->pluck('check')->all());
+        $this->assertSame([], $findingsB);
     }
 
     public function test_checker_reports_every_finding_simultaneously_not_just_the_first(): void
