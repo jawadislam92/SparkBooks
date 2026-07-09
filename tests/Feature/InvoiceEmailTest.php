@@ -143,14 +143,20 @@ class InvoiceEmailTest extends TestCase
         ]);
     }
 
-    private function emailInvoiceHttp(Invoice $invoice): TestResponse
+    /** @param array<string, string> $headers */
+    private function emailInvoiceHttp(Invoice $invoice, ?string $key = null, array $headers = []): TestResponse
     {
-        return $this->postJson("/invoices/{$invoice->id}/email");
+        return $this->postJson("/invoices/{$invoice->id}/email", [], array_merge([
+            'X-Idempotency-Key' => $key ?? (string) Str::uuid(),
+        ], $headers));
     }
 
-    private function resendInvoiceHttp(Invoice $invoice): TestResponse
+    /** @param array<string, string> $headers */
+    private function resendInvoiceHttp(Invoice $invoice, ?string $key = null, array $headers = []): TestResponse
     {
-        return $this->postJson("/invoices/{$invoice->id}/email/resend");
+        return $this->postJson("/invoices/{$invoice->id}/email/resend", [], array_merge([
+            'X-Idempotency-Key' => $key ?? (string) Str::uuid(),
+        ], $headers));
     }
 
     /**
@@ -207,6 +213,69 @@ class InvoiceEmailTest extends TestCase
         // Queue::fake() intercepted the dispatch, so the job never actually
         // ran — no EmailAttempt has been logged yet.
         $this->assertSame(0, EmailAttempt::query()->count());
+    }
+
+    // ---------------------------------------------------------------
+    // Idempotency (spec §17.6: "idempotency per §17.2 prevents double-dispatch
+    // of the same attempt"). A double-submit of ONE press (same key) must
+    // dispatch ONE job / send ONE email; a genuine later Resend (fresh key)
+    // dispatches again.
+    // ---------------------------------------------------------------
+
+    public function test_a_double_submit_with_the_same_key_dispatches_the_job_once(): void
+    {
+        ['invoice' => $invoice] = $this->postedInvoice();
+
+        Queue::fake();
+
+        $key = (string) Str::uuid();
+        // Same key twice — a double-click / network retry of ONE Email press.
+        $this->emailInvoiceHttp($invoice, $key)->assertRedirect();
+        $this->emailInvoiceHttp($invoice, $key)->assertRedirect();
+
+        // Exactly ONE job dispatched despite two requests — the customer never
+        // gets two copies of the same email.
+        Queue::assertPushed(SendInvoiceEmail::class, 1);
+        // And exactly one audit row — the second request replayed the first's
+        // stored result without re-running the guard/flip/audit.
+        $this->assertSame(1, ActivityLog::query()->where('action', 'invoice.email_queued')->count());
+        $this->assertSame('queued', $invoice->fresh()->email_status);
+
+        // A genuine later Resend is a SEPARATE press with a FRESH key — it
+        // dispatches again (the key dedupes accidental double-submits, not
+        // intentional resends).
+        $this->resendInvoiceHttp($invoice, (string) Str::uuid())->assertRedirect();
+        Queue::assertPushed(SendInvoiceEmail::class, 2);
+        $this->assertSame(1, ActivityLog::query()->where('action', 'invoice.email_resent')->count());
+    }
+
+    public function test_email_requires_a_valid_idempotency_key(): void
+    {
+        ['invoice' => $invoice] = $this->postedInvoice();
+
+        Queue::fake();
+
+        // Missing header entirely.
+        $this->postJson("/invoices/{$invoice->id}/email")
+            ->assertSessionHasErrors('idempotency_key');
+        // Present but not a UUID.
+        $this->emailInvoiceHttp($invoice, key: null, headers: ['X-Idempotency-Key' => 'not-a-uuid'])
+            ->assertSessionHasErrors('idempotency_key');
+
+        Queue::assertNothingPushed();
+        $this->assertSame('not_sent', $invoice->fresh()->email_status);
+    }
+
+    public function test_resend_requires_a_valid_idempotency_key(): void
+    {
+        ['invoice' => $invoice] = $this->postedInvoice();
+
+        Queue::fake();
+
+        $this->postJson("/invoices/{$invoice->id}/email/resend")
+            ->assertSessionHasErrors('idempotency_key');
+
+        Queue::assertNothingPushed();
     }
 
     public function test_running_the_job_on_success_sets_sent_and_logs_an_attempt(): void
@@ -417,9 +486,10 @@ class InvoiceEmailTest extends TestCase
         // Switch to a Staff user in the SAME company.
         $this->actingAsRole($company, Role::Staff);
 
-        $response = $this->emailInvoiceHttp($invoice);
-
-        $response->assertForbidden();
+        // BOTH the email and resend routes share the can:invoices.send gate —
+        // assert each independently rather than trusting the shared middleware.
+        $this->emailInvoiceHttp($invoice)->assertForbidden();
+        $this->resendInvoiceHttp($invoice)->assertForbidden();
         $this->assertSame(0, EmailAttempt::query()->count());
     }
 
@@ -427,7 +497,7 @@ class InvoiceEmailTest extends TestCase
     // Scoped: a foreign invoice 404s.
     // ---------------------------------------------------------------
 
-    public function test_a_foreign_invoice_404s_on_email(): void
+    public function test_a_foreign_invoice_404s_on_email_and_resend(): void
     {
         $companyA = Company::factory()->create();
         $contactA = $this->customer($companyA);
@@ -441,7 +511,9 @@ class InvoiceEmailTest extends TestCase
         $companyB = Company::factory()->create();
         $this->actingAsRole($companyB, Role::Owner);
 
+        // Both routes are tenant-scoped — assert each independently.
         $this->emailInvoiceHttp($foreignInvoice)->assertNotFound();
+        $this->resendInvoiceHttp($foreignInvoice)->assertNotFound();
     }
 
     // ---------------------------------------------------------------

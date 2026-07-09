@@ -277,19 +277,23 @@ class InvoiceController extends Controller
     /**
      * Queues the invoice email (spec §17.6) via InvoiceService::sendEmail —
      * the FIRST send. $invoice is a plain route parameter (not implicit
-     * binding), same reasoning as edit()/update()/destroy()/send() above. No
-     * idempotency key is required here (unlike send()/void()): queuing an
-     * email is not a ledger-posting action, so a duplicate queue+dispatch on
-     * a double-click merely logs a second EmailAttempt — not a correctness
-     * hazard. Guarded to a posted invoice only (draft/void -> 422 on
+     * binding), same reasoning as edit()/update()/destroy()/send() above.
+     *
+     * Requires an X-Idempotency-Key UUID header exactly like send()/void()
+     * (spec §17.6: "idempotency per §17.2 prevents double-dispatch of the same
+     * attempt"): a double-click / network retry of ONE Email press carries the
+     * SAME key and dispatches the job ONCE — the customer never gets two
+     * copies of the email. A genuine later Resend is a separate press with a
+     * fresh key. Guarded to a posted invoice only (draft/void -> 422 on
      * `status`, mirroring send()/void()'s classification).
      */
-    public function email(string $invoice, InvoiceService $service): RedirectResponse
+    public function email(Request $request, string $invoice, InvoiceService $service): RedirectResponse
     {
         $model = Invoice::query()->findOrFail($invoice);
+        $idempotencyKey = $this->requireIdempotencyKey($request);
 
         try {
-            $service->sendEmail($model);
+            $service->sendEmail($idempotencyKey, $model);
         } catch (InvoiceEmailException $e) {
             throw ValidationException::withMessages(['status' => $e->getMessage()]);
         }
@@ -300,19 +304,41 @@ class InvoiceController extends Controller
     /**
      * Re-queues the invoice email (spec §17.6) via InvoiceService::resendEmail
      * — a Resend, available regardless of the invoice's current email_status.
-     * Same routing/guard shape as email() above.
+     * Same routing/guard/idempotency shape as email() above: the key dedupes
+     * an accidental double-click of THIS resend, while a further intentional
+     * resend carries its own fresh key and dispatches again.
      */
-    public function resendEmail(string $invoice, InvoiceService $service): RedirectResponse
+    public function resendEmail(Request $request, string $invoice, InvoiceService $service): RedirectResponse
     {
         $model = Invoice::query()->findOrFail($invoice);
+        $idempotencyKey = $this->requireIdempotencyKey($request);
 
         try {
-            $service->resendEmail($model);
+            $service->resendEmail($idempotencyKey, $model);
         } catch (InvoiceEmailException $e) {
             throw ValidationException::withMessages(['status' => $e->getMessage()]);
         }
 
         return redirect()->route('invoices.edit', $model->id);
+    }
+
+    /**
+     * Extracts and validates the X-Idempotency-Key header (a UUID) — the same
+     * check send()/void()/voidPayment() each inline. Factored out here since
+     * email()/resendEmail() need the identical guard and there are now enough
+     * call sites to justify one shared helper. Throws a 422 on the
+     * `idempotency_key` field when the header is missing or not a UUID.
+     */
+    private function requireIdempotencyKey(Request $request): string
+    {
+        $idempotencyKey = $request->header('X-Idempotency-Key');
+        if (! is_string($idempotencyKey) || ! Str::isUuid($idempotencyKey)) {
+            throw ValidationException::withMessages([
+                'idempotency_key' => 'A valid X-Idempotency-Key header (UUID) is required.',
+            ]);
+        }
+
+        return $idempotencyKey;
     }
 
     /**

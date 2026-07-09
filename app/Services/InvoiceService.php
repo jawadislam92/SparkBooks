@@ -338,34 +338,59 @@ class InvoiceService
      * Queues the invoice email (spec §17.6) — the FIRST send. Guards that the
      * invoice is posted (Sent/PartiallyPaid/Paid; a draft has never been sent
      * and a void invoice is dead), flips email_status to 'queued', and
-     * dispatches SendInvoiceEmail AFTER this transaction commits. Everything
-     * from here on (PDF render, mail transport, success/failure) happens
-     * entirely inside that job, OUTSIDE this transaction — by construction,
-     * nothing this method does can ever be undone by an email failure: the
-     * transaction below only ever touches email_status, never the ledger or
-     * any other invoice column.
+     * dispatches SendInvoiceEmail AFTER the guard transaction commits.
+     * Everything from here on (PDF render, mail transport, success/failure)
+     * happens entirely inside that job, OUTSIDE any transaction — by
+     * construction, nothing this method does can ever be undone by an email
+     * failure: the transaction below only ever touches email_status, never
+     * the ledger or any other invoice column.
+     *
+     * $idempotencyKey dedupes an accidental double-submit (a double-click or a
+     * network retry of ONE button press): a replayed same-key request returns
+     * the prior result WITHOUT a second dispatch, so the customer never gets
+     * two copies of the same email (spec §17.6: "idempotency per §17.2
+     * prevents double-dispatch of the same attempt"). A genuine later Resend
+     * is a DIFFERENT button press carrying a FRESH key — that dispatches
+     * again, exactly as intended.
      */
-    public function sendEmail(Invoice $invoice): Invoice
+    public function sendEmail(string $idempotencyKey, Invoice $invoice): Invoice
     {
-        return $this->queueEmail($invoice, 'invoice.email_queued');
+        return $this->queueEmail($idempotencyKey, $invoice, 'invoice.email_queued');
     }
 
     /**
      * Re-queues the invoice email (spec §17.6) — a Resend. Identical guard
-     * and mechanics to sendEmail(); the only difference is the audit action
-     * name. Allowed regardless of the invoice's CURRENT email_status (queued/
-     * sent/failed) — a Resend is a legitimate action even after a successful
-     * send (e.g. the customer says they never got it), not just a retry path
-     * for a failed one.
+     * and mechanics to sendEmail(); the only difference is the action name.
+     * Allowed regardless of the invoice's CURRENT email_status (queued/sent/
+     * failed) — a Resend is a legitimate action even after a successful send
+     * (e.g. the customer says they never got it), not just a retry path for a
+     * failed one. The idempotency key still dedupes an accidental double-click
+     * of THIS resend press; a further, intentional resend is another fresh
+     * key and dispatches again.
      */
-    public function resendEmail(Invoice $invoice): Invoice
+    public function resendEmail(string $idempotencyKey, Invoice $invoice): Invoice
     {
-        return $this->queueEmail($invoice, 'invoice.email_resent');
+        return $this->queueEmail($idempotencyKey, $invoice, 'invoice.email_resent');
     }
 
-    private function queueEmail(Invoice $invoice, string $auditAction): Invoice
+    private function queueEmail(string $idempotencyKey, Invoice $invoice, string $auditAction): Invoice
     {
-        $locked = DB::transaction(function () use ($invoice, $auditAction) {
+        // Set inside the operation closure, which IdempotencyService::execute
+        // runs ONLY on a genuine first execution — never on a same-key replay
+        // (a double-click / network retry), where execute() short-circuits to
+        // the stored snapshot without running the closure at all. Also stays
+        // false for the LOSER of a concurrent same-key race: execute() claims
+        // the key row BEFORE it runs the operation, so a race loser's claim
+        // throws and the operation never runs. It therefore gates the dispatch
+        // below to exactly one job per distinct key — no double email.
+        $freshlyQueued = false;
+
+        // execute() OWNS the transaction boundary (it opens its own
+        // DB::transaction and refuses to run inside an already-open one), so
+        // this must NOT be wrapped in a transaction here — the guard +
+        // status-flip + audit run inside execute()'s transaction, mirroring
+        // send()/recordPayment()/void()'s exact shape.
+        $result = $this->idempotency->execute($idempotencyKey, $auditAction, function () use ($invoice, $auditAction, &$freshlyQueued) {
             // Row-lock + re-read FRESH state, same reasoning as send()/void()'s
             // locked reads above: this must see the CURRENT status, not
             // whatever the controller resolved moments before this closure
@@ -378,25 +403,26 @@ class InvoiceService
 
             $this->audit->log($auditAction, $current);
 
-            return $current;
+            $freshlyQueued = true;
+
+            return ['id' => $current->id];
         });
 
-        // Dispatched OUTSIDE the transaction above — by the time this line
-        // runs, that transaction has already committed (the closure returned
-        // normally), so this already achieves "dispatch after commit"
-        // without chaining ->afterCommit(). Deliberately NOT ->afterCommit():
-        // this action has no ambient OUTER transaction of its own to wait on
-        // (unlike send()/void(), this is its own whole transaction), and
-        // ->afterCommit() callbacks only fire once the transaction level
-        // truly reaches 0 — under a test's RefreshDatabase-wrapping
-        // transaction that level never reaches 0 (it rolls back, not
-        // commits), which would silently make the job never dispatch in any
-        // test. Carries invoice_id + company_id rather than a bound Invoice
-        // model, since the job runs on a worker process with no
-        // CompanyContext yet (see the job's own docblock).
-        SendInvoiceEmail::dispatch($this->context->id(), $locked->id);
+        // Dispatched OUTSIDE execute() — by the time this line runs, execute()
+        // has returned and its transaction has committed, so this achieves
+        // "dispatch after commit" without ->afterCommit() (which only fires at
+        // transaction level 0, a level a test's RefreshDatabase-wrapping
+        // transaction never reaches — it rolls back, not commits — so
+        // ->afterCommit() would silently never dispatch in any test). Guarded
+        // by $freshlyQueued so a same-key replay dispatches NOTHING: the whole
+        // point of the idempotency key here (spec §17.6). Carries invoice_id +
+        // company_id rather than a bound Invoice model, since the job runs on
+        // a worker process with no CompanyContext yet (see the job's docblock).
+        if ($freshlyQueued) {
+            SendInvoiceEmail::dispatch($this->context->id(), $result['id']);
+        }
 
-        return $locked;
+        return Invoice::query()->findOrFail($result['id']);
     }
 
     /** Only a posted invoice (sent/partially_paid/paid) can be emailed — not a draft, not void. */
