@@ -17,6 +17,8 @@ use App\Http\Controllers\OpeningCsvController;
 use App\Http\Controllers\OtherReceiptController;
 use App\Http\Controllers\PeriodLockController;
 use App\Http\Controllers\ProfileController;
+use App\Http\Controllers\Reports\ApAgingController;
+use App\Http\Controllers\Reports\ArAgingController;
 use App\Http\Controllers\Reports\BalanceSheetController;
 use App\Http\Controllers\Reports\ProfitAndLossController;
 use App\Http\Controllers\Reports\TrialBalanceController;
@@ -82,6 +84,16 @@ Route::middleware(['auth', 'verified', 'company', 'can:reports.view'])->group(fu
     Route::get('/reports/balance-sheet/export.csv', [BalanceSheetController::class, 'exportCsv'])
         ->middleware('can:exports.run')
         ->name('reports.balance-sheet.export');
+
+    Route::get('/reports/ar-aging', [ArAgingController::class, 'show'])->name('reports.ar-aging');
+    Route::get('/reports/ar-aging/export.csv', [ArAgingController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('reports.ar-aging.export');
+
+    Route::get('/reports/ap-aging', [ApAgingController::class, 'show'])->name('reports.ap-aging');
+    Route::get('/reports/ap-aging/export.csv', [ApAgingController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('reports.ap-aging.export');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:audit.view'])->group(function () {
