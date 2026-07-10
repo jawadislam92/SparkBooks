@@ -74,11 +74,14 @@ export default function VoidDialog({
     const livePayments = payments.filter((payment) => payment.status !== 'void');
     const [voidingPaymentId, setVoidingPaymentId] = useState<number | null>(null);
 
-    // Stable for the dialog's whole lifetime — a validation-error retry of
-    // the final void reuses it; reopening the dialog (a fresh mount) gets a
-    // fresh one. Mirrors invoices/VoidDialog's identical reasoning.
     const form = useForm({});
     const errors = form.errors as Record<string, string | undefined>;
+
+    // Stable for the dialog's whole lifetime — a validation-error retry of the
+    // final void reuses this same key, so a retried/in-flight request dedupes
+    // server-side; reopening the dialog (a fresh mount) gets a fresh one.
+    // Mirrors invoices/VoidDialog's voidKey reasoning.
+    const [voidKey] = useState(() => crypto.randomUUID());
 
     function reversePayment(paymentId: number) {
         if (!voidPaymentUrl) {
@@ -99,7 +102,7 @@ export default function VoidDialog({
 
     function confirmVoid() {
         form.post(voidUrl, {
-            headers: { 'X-Idempotency-Key': crypto.randomUUID() },
+            headers: { 'X-Idempotency-Key': voidKey },
             preserveScroll: true,
             onSuccess: onClose,
         });
