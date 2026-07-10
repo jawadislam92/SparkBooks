@@ -62,6 +62,23 @@ function navGroups(can: Record<string, boolean>): NavGroup[] {
             ],
         },
         {
+            label: 'Purchases',
+            items: [
+                {
+                    label: 'Expenses',
+                    href: route('expenses.index'),
+                    ability: 'expenses.draft',
+                    activeMatch: [route('expenses.new')],
+                },
+                {
+                    label: 'Bills',
+                    href: route('bills.index'),
+                    ability: 'bills.draft',
+                    activeMatch: [route('bills.new')],
+                },
+            ],
+        },
+        {
             label: 'Books',
             items: [
                 { label: 'Chart of accounts', href: route('accounts.index'), ability: 'accounts.manage' },

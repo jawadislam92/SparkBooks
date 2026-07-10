@@ -2,9 +2,11 @@
 
 use App\Http\Controllers\AccountController;
 use App\Http\Controllers\BankAccountController;
+use App\Http\Controllers\BillController;
 use App\Http\Controllers\CompanySwitchController;
 use App\Http\Controllers\ContactController;
 use App\Http\Controllers\DashboardController;
+use App\Http\Controllers\ExpenseController;
 use App\Http\Controllers\HealthController;
 use App\Http\Controllers\InvoiceController;
 use App\Http\Controllers\ItemController;
@@ -133,6 +135,28 @@ Route::middleware(['auth', 'verified', 'company', 'can:payments.record'])->group
 Route::middleware(['auth', 'verified', 'company', 'can:invoices.void'])->group(function () {
     Route::post('/invoices/{invoice}/void', [InvoiceController::class, 'void'])->name('invoices.void');
     Route::post('/invoices/{invoice}/payments/{payment}/void', [InvoiceController::class, 'voidPayment'])->name('invoices.payments.void');
+});
+
+// Phase 4 Task 2: draft-only expense/bill CRUD — expenses.draft/bills.draft
+// are held by ALL four roles (spec §7.14, Staff included), same shape as
+// invoices.draft. "Record"/"receive"/void/payments are later Phase 4 tasks
+// and will get their own narrower gates, mirroring invoices.send/void above.
+Route::middleware(['auth', 'verified', 'company', 'can:expenses.draft'])->group(function () {
+    Route::get('/expenses', [ExpenseController::class, 'index'])->name('expenses.index');
+    Route::get('/expenses/new', [ExpenseController::class, 'create'])->name('expenses.new');
+    Route::post('/expenses', [ExpenseController::class, 'store'])->name('expenses.store');
+    Route::get('/expenses/{expense}/edit', [ExpenseController::class, 'edit'])->name('expenses.edit');
+    Route::patch('/expenses/{expense}', [ExpenseController::class, 'update'])->name('expenses.update');
+    Route::delete('/expenses/{expense}', [ExpenseController::class, 'destroy'])->name('expenses.destroy');
+});
+
+Route::middleware(['auth', 'verified', 'company', 'can:bills.draft'])->group(function () {
+    Route::get('/bills', [BillController::class, 'index'])->name('bills.index');
+    Route::get('/bills/new', [BillController::class, 'create'])->name('bills.new');
+    Route::post('/bills', [BillController::class, 'store'])->name('bills.store');
+    Route::get('/bills/{bill}/edit', [BillController::class, 'edit'])->name('bills.edit');
+    Route::patch('/bills/{bill}', [BillController::class, 'update'])->name('bills.update');
+    Route::delete('/bills/{bill}', [BillController::class, 'destroy'])->name('bills.destroy');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:items.manage'])->group(function () {

@@ -37,6 +37,9 @@ class HandleInertiaRequests extends Middleware
         'invoices.send',
         'payments.record',
         'invoices.void',
+        // Phase 4 Task 2: draft-only expense/bill CRUD nav links.
+        'expenses.draft',
+        'bills.draft',
         'contacts.manage',
         'items.manage',
         'accounts.manage',
