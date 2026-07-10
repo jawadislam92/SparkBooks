@@ -149,7 +149,9 @@ interface ExpenseFormData {
 export default function Edit({ expense, contacts, bankAccounts, categoryAccounts, taxRates }: EditPageProps) {
     const { currentCompany, can, errors: pageErrors } = usePage<PageProps>().props;
     const currency = currentCompany?.base_currency ?? 'PKR';
-    const recordError = (pageErrors as Record<string, string | undefined> | undefined)?.status;
+    // Carries whichever whole-document action last failed (record OR void) —
+    // both post their guard failures onto the shared `status` error field.
+    const actionError = (pageErrors as Record<string, string | undefined> | undefined)?.status;
     const isEditing = expense !== null;
     const isDraft = expense === null || expense.status === 'draft';
     const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -272,9 +274,9 @@ export default function Edit({ expense, contacts, bankAccounts, categoryAccounts
                 </div>
             )}
 
-            {isDraft && recordError && (
+            {actionError && (
                 <p role="alert" className="mb-4 rounded-md bg-clay-50 px-3 py-2 text-sm text-clay">
-                    {recordError}
+                    {actionError}
                 </p>
             )}
 
