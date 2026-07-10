@@ -258,6 +258,16 @@ everything touches them) so they're drawn once.
                         source_type='invoice' entry of its own) — discovered live via the Task 13 browser
                         walkthrough as a false-positive finding on a freshly-paid opening invoice, fixed
                         same-task with a regression test (see §10).
+                        Phase 4 (Task 10) extended check (c) to bills/bill_payments: document_balance
+                        (bill.balance == total − Σ non-void payments, amount_paid tie-out, status-vs-
+                        balance consistency) + ap_reconciliation (per-bill ledger tie-out for normal
+                        bills, scoped to account 2000 ONLY, credit-normal sign convention — the AP-side
+                        mirror of the AR check, minus any FX tolerance since bills are base-currency-
+                        only in this phase). Opening bills are reconciled at the CONTACT level, same
+                        fbbe763 lesson applied proactively this time (a vendor with several opening
+                        bills in one run shares one ledger AP line keyed by contact_id, never bill_id).
+                        POSTED_INVOICE_STATUSES/POSTED_BILL_STATUSES are now both derived from their
+                        enum's own isPosted() rather than hand-duplicated (see §10 carried-cleanups note).
 
   SETUP / SUPPORT:
 
@@ -741,13 +751,14 @@ types (Task 11).
   input (e.g. `'abc'` → `ValueError`, not the same `InvalidArgumentException` family) — unreachable
   via HTTP today (upstream regex validation prevents it) but worth tightening if a non-HTTP caller
   is ever added (carried from Task 2's own review).
-- `IntegrityChecker::POSTED_INVOICE_STATUSES` duplicates `InvoiceStatus::isPosted()` — same three
-  values maintained in two places; low drift risk today (both are private/small) but should derive
-  from the enum directly (Task 12 carry-in).
-- Opening **payables** (vendor bills) have no symmetric `is_opening` Bill/AP treatment yet —
-  Task 6 only closed the receivable (customer/AR) side; Phase 4 (expenses & bills) is where the
-  mirror-image payable side gets built, and should decide whether it needs the same
-  contact_id-based checker attribution this task just added for AR.
+- ~~`IntegrityChecker::POSTED_INVOICE_STATUSES` duplicates `InvoiceStatus::isPosted()`~~ — **cleared
+  Phase 4 T10**: replaced with a `postedInvoiceStatuses()` method derived from the enum directly (plus
+  its new bill-side sibling `postedBillStatuses()` from `BillStatus::isPosted()`); no more
+  hand-maintained duplicate list on either side.
+- ~~Opening payables have no symmetric checker attribution~~ — **cleared Phase 4 T10**:
+  `IntegrityChecker` now covers bills/bill_payments end to end (`document_balance` +
+  `ap_reconciliation`), including the exact contact-level aggregate the fbbe763 AR fix established —
+  a vendor with multiple opening bills in one run reconciles correctly. See §9 note below.
 - `NAV_ABILITIES` (HandleInertiaRequests) is a hand-maintained subset of `config/permissions.php` —
   remember to extend it whenever a future task gates a new nav link (Phase 3 itself needed this for
   Invoices — no drift yet, but it's manual every time).
