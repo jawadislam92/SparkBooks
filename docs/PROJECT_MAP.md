@@ -8,11 +8,12 @@
 > service/controller/screen/table is added). It is committed to git. If it ever disagrees with
 > the code, the code wins — fix this file.
 >
-> Last updated: **end of Phase 3** (invoicing: lifecycle/numbering, draft+tax, send (P1),
-> payments incl. real cross-process concurrency proof (P2/P3), void (P9), opening-invoice
-> reconciliation, FX-lite send+payment (P1fx/P2fx, full — not just foundation), PDF, decoupled
-> email + resend, full invoice UI, checker extension — built on branch `phase-3-invoicing`,
-> exit-verified Task 13).
+> Last updated: **end of Phase 4** (expenses & bills, money out: draft CRUD + amount-based line
+> calc (no qty×price), CategoryAccountGuard (enables tax remittance/owner-drawings/fixed-asset
+> purchases — P12/P13/P15), record expense (P4/P5), receive bill (P6/P6t), pay bill (P7), void
+> reversals (P9, payments-first, is_opening guard), opening vendor payables → is_opening bills,
+> attachment upload hardening (spec §17.8: content-sniff allowlist, private disk), full Purchases
+> UI, checker extension to AP — built on branch `phase-4-expenses-bills`, Task 11 exit).
 > Companion docs: the binding spec is [`superpowers/specs/2026-07-08-accounting-software-v1-design.md`](superpowers/specs/2026-07-08-accounting-software-v1-design.md);
 > phase plans live in [`superpowers/plans/`](superpowers/plans/); per-task build/review evidence
 > is in `.superpowers/sdd/` (git-ignored scratch — read `progress.md` there when resuming).
@@ -55,13 +56,14 @@ invoicing is being built into v1 (spec §17.1 Path 2 "FX-lite"), not deferred. S
 | Opening balances (P8a–c, per-contact, re-run semantics) + CSV import templates | ✅ built | 2 |
 | Multi-currency — **FULL (Phase 3)**: FX Gain/Loss accounts (4950/5950), plus the complete FX-lite posting rules — foreign-currency invoice send (P1fx) and foreign-currency payment with realized FX gain/loss (P2fx), settlement rounding, checker tie-out under FX. Was foundation-only at Phase 2 exit | ✅ built | 2→3 |
 | Nav (Overview/Sales/Books/Reports/Settings) + dashboard (cash position + counts) | ✅ built | 2 |
-| Integrity checker: source-type-aware (reversals never false-flagged; unrecognized source_type fails loud); Phase 3 extended it to invoice/invoice_payment source coverage + the FX-tolerant base-AR tie-out (check (c) split) + opening-invoice AR attribution | ✅ extended | 2→3 |
-| **Invoicing (money in)** — lifecycle (draft→sent→partially_paid→paid, void), gap-free numbering, draft CRUD + per-line tax, send (P1) posting AR/income/tax, payments (P2/P3, row-locked, real cross-process concurrency proven), void with payments-first refusal (P9), opening-invoice reconciliation (payable via the unmodified payment path), FX-lite send+payment (P1fx/P2fx), branded PDF, decoupled email + resend, full UI | ✅ built | 3 |
-| Expenses & bills (money out) | ⛔ not built | 4 |
+| Integrity checker: source-type-aware (reversals never false-flagged; unrecognized source_type fails loud); Phase 3 extended it to invoice/invoice_payment source coverage + the FX-tolerant base-AR tie-out (check (c) split) + opening-invoice AR attribution; Phase 4 extended it again to expense/bill/bill_payment source coverage + bill document_balance/amount_paid/status tie-out + contact-level AP reconciliation for opening bills (the AR-side fbbe763 lesson applied proactively) + `postedInvoiceStatuses()`/`postedBillStatuses()` derived from each status enum's own `isPosted()` (was a hand-duplicated const list) | ✅ extended | 2→3→4 |
+| **Invoicing (money in)** — lifecycle (draft→sent→partially_paid→paid, void), gap-free numbering, draft CRUD + per-line tax, send (P1) posting AR/income/tax, payments (P2/P3, row-locked, real cross-process concurrency proven), void with payments-first refusal (P9), opening-invoice reconciliation (payable via the unmodified payment path), FX-lite send+payment (P1fx/P2fx), branded PDF, decoupled email + resend, full UI. Phase 4 retro-fix: void() now also refuses (friendly 422, not a confusing 404) on an is_opening invoice — correcting one must go through Opening Balances instead | ✅ built | 3→4 |
+| **Expenses & bills (money out) — posting lifecycle** — draft CRUD + amount-based line calc (`DocumentLineCalculator`, no qty×price, spec §7.8) + `CategoryAccountGuard` (dual-layer, mirrors `OtherReceiptService`'s guard shape: allows expense/asset/liability/equity categories — enables tax remittance via 2100 Tax Payable (P12), owner drawings via an equity account like 3900 (P13), fixed-asset purchases via an asset account like 1500 (P15); blocks control (AR/AP)/cash-bank/income/archived accounts); record expense (P4/P5 — Dr category per line, ONE combined Dr 2100 for input tax [a DEBIT, opposite invoicing's output-tax credit], Cr the paid-from bank/cash account); receive bill (P6/P6t — Cr 2000 AP with contact_id); pay bill (P7, row-locked overpayment guard, the exact AP mirror of invoice payments' proven concurrency-safe pattern); void (P9 reversals: void expense/bill-payment/bill, payments-first refusal, is_opening guard); opening vendor payables → is_opening Bills (payable via the completely unmodified P7 path) + `reconcile-opening-bills` backfill for pre-Task-7 opening payables | ✅ built | 4 |
+| **Expenses & bills — attachments, UI, checker** — receipt/bill-scan attachments (spec §17.8, hardened: content-sniffed allowlist [pdf/jpg/png/webp via `finfo`, never the client-declared mime/extension], private `local` disk, uuid filenames, scoped download, full audit trail on upload/delete/download, draft-delete cascade); full Purchases UI (Expenses/Bills Index with status filters + Bills' overdue highlight, Show detail pages for every status, Edit draft editors, Record/Receive/Pay/Void dialogs, shared `Components/documents/*`); integrity checker extended to expense/bill/bill_payment source coverage + contact-level AP reconciliation for opening bills (the AR-side fbbe763 lesson applied proactively) | ✅ built | 4 |
 | P&L, Balance Sheet, agings, GL, tax summary, dashboard | ⛔ not built | 5 |
 | Reconciliation, month-end close, exports, backups | ⛔ not built | 6 |
 
-Tests: **~619 PHP + 36 JS**, all green on real MySQL. No float on any money path (CI-enforced).
+Tests: **894 PHP + 48 JS**, all green on real MySQL. No float on any money path (CI-enforced).
 
 ---
 
@@ -152,6 +154,10 @@ everything touches them) so they're drawn once.
                                                        └─▶ AuditLogger
                               re-run: reverses prior run's entry first (OpeningBalancesLocked guards once
                               any OTHER non-opening entry exists), then posts fresh
+                              Phase 3 T6 / Phase 4 T7: each customer_lines/vendor_lines row ALSO
+                              creates an is_opening Invoice/Bill respectively (see the Phase 3/4
+                              write-side blocks below) — no ledger posting of its own, the P8b/P8c
+                              line above already covers it
     OpeningCsvController ─▶ OpeningCsvParser ── STAGES ONLY, never posts (no LedgerService/OpeningBalanceService
                                                  call); Money::parseToMinor, all-or-nothing, line-numbered errors
                               also serves the §17.7 CSV templates (bank/customer-invoice/vendor-bill kinds)
@@ -226,6 +232,100 @@ everything touches them) so they're drawn once.
                               DECOUPLED (spec §17.6): a mail failure NEVER touches the ledger or the
                               invoice's posted state — only email_status/EmailAttempt change. Idempotency-
                               keyed (send + resend), so a double-click queues the job once.
+
+    ── Phase 4 write-side services: expenses & bills (same Idempotency → LedgerService → Audit
+       shape as invoicing above; base-currency only — no FX in this phase, spec §17) ──
+
+    ExpenseController ─▶ ExpenseService ──┬─▶ IdempotencyService ─▶ IdempotencyKey (model)
+                          (draft CRUD,     ├─▶ CategoryAccountGuard::guard (re-checked service-level,
+                          record, void)    │     per line — the caller-independent half of the
+                                          │     dual-layer guard; ExpenseController::createLines
+                                          │     re-checks the same rule at draft-write time)
+                                          ├─▶ DocumentLineCalculator (amount-based: tax per line on
+                                          │     the typed net amount, no qty×price — spec §7.8)
+                                          ├─▶ LedgerService  P4/P5 (record): Dr category account per
+                                          │                       line / Dr ONE combined 2100 Tax
+                                          │                       Payable line if tax>0 (input tax is
+                                          │                       a DEBIT — nets against output tax,
+                                          │                       opposite invoicing's output-tax
+                                          │                       credit) / Cr the paid-from bank/cash
+                                          │                       account's linked ledger account
+                                          │                  P9  (void): generic reverse() — no
+                                          │                       live-payments/is_opening concept
+                                          │                       (an expense is a single cash-out
+                                          │                       event, always reversal-simple)
+                                          ├─▶ Expense, ExpenseLine (models; lines FROZEN once the
+                                          │     expense leaves draft — INCLUDING void, unlike
+                                          │     InvoiceLine which only freezes on isPosted() —
+                                          │     ExpenseLine::booted() guard)
+                                          └─▶ AuditLogger
+
+    BillController ─▶ BillService ──┬─▶ IdempotencyService, CategoryAccountGuard, DocumentLineCalculator
+                      (draft CRUD,  │     (all three identical to ExpenseService above — same shape)
+                      receive,      ├─▶ LedgerService  P6/P6t (receive): Dr category per line / Dr
+                      void)         │                       ONE combined 2100 Tax Payable line if
+                                    │                       tax>0 / Cr 2000 Accounts Payable for the
+                                    │                       gross total WITH the vendor's contact_id
+                                    │                  P9  (void): generic reverse() — REFUSED while
+                                    │                       any payment is still 'posted'
+                                    │                       (BillHasLivePayments) or if is_opening
+                                    │                       (BillIsOpening — manage via opening
+                                    │                       balances instead; the exact mirror of
+                                    │                       Invoicing\InvoiceIsOpening, folded into
+                                    │                       InvoiceService::void this same phase as a
+                                    │                       Phase 3 carry-in retro-fix)
+                                    ├─▶ Bill, BillLine (models; lines frozen on ANY non-draft status
+                                    │     incl. void, mirrors ExpenseLine::booted())
+                                    └─▶ AuditLogger
+                              extra guards vs. Expense: contact must be a vendor/both
+                              (BillContactNotEligible), due_date is REQUIRED not defaulted
+                              (BillDueDateRequired)
+
+    BillController ─▶ BillPaymentService ─┬─▶ LedgerService  P7: Dr 2000 Accounts Payable (WITH
+                        (recordPayment,    │                       contact_id) / Cr the paying bank/
+                        voidPayment)       │                       cash account's linked ledger
+                                          │                       account — two lines always, no FX
+                                          │                       plug (bills are base-currency-only)
+                                          ├─▶ BillPayment (model) + AuditLogger
+                                          └─▶ BankAccount (resolves the paying ledger account)
+                              overpayment guard: lockForUpdate() READ of the BILL row inside this
+                              method's own transaction — exact AP-side mirror of
+                              InvoicePaymentService's proven concurrency-safe pattern (Phase 3
+                              Task 13); void() locks bill THEN payment (same order as record()) and
+                              recomputes amount_paid/balance/status back toward
+                              received/partially_paid, never voiding the bill itself
+
+    ExpenseController/BillController ─▶ AttachmentService ─┬─▶ AttachmentContentSniffer (finfo
+                        (storeAttachment,                   │     magic-byte sniff — NEVER the
+                        downloadAttachment,                 │     client-declared mime or filename
+                        destroyAttachment — spec §17.8)     │     extension; pdf/jpg/png/webp
+                                                             │     allowlist shared with
+                                                             │     App\Rules\AllowedAttachmentContent,
+                                                             │     the FormRequest-layer friendly 422)
+                                                             ├─▶ Attachment (model, morphs to
+                                                             │     Expense|Bill) written to the
+                                                             │     PRIVATE `local` disk, uuid-
+                                                             │     randomized filename, under
+                                                             │     attachments/{company_id}/
+                                                             └─▶ AuditLogger (upload/delete/download,
+                                                                   all three)
+                              draft delete cascades attachments — rows now, disk files only once the
+                              caller's transaction commits (DB::afterCommit; deleteAllFor() throws if
+                              called outside a transaction, mirrors LedgerService::post's own guard)
+
+    OpeningBalanceService (Phase 2 T8, extended Phase 3 T6 for invoices, Phase 4 T7 for bills) ─▶
+                              createOpeningBill() ─▶ Bill (is_opening=true, status=Received) — the
+                              exact AP-side mirror of createOpeningInvoice() (see above): NEVER calls
+                              LedgerService itself, since the AP was already posted once by THIS
+                              RUN's own P8c combined entry (keyed by contact_id, not by any bill id).
+                              Payable via the completely unmodified BillPaymentService (P7) once
+                              Received. Re-run voids prior is_opening bills the same status-only way
+                              it voids prior is_opening invoices (no reversal — the AP was already
+                              reversed once, at the RUN level).
+                          ReconcileOpeningBills (artisan sparkbooks:reconcile-opening-bills) ─▶
+                              backfills an is_opening Bill for any pre-Task-7 opening payable that
+                              doesn't have one yet (idempotent; exact mirror of
+                              ReconcileOpeningInvoices).
 
     ── Phase 2 reference-data CRUD (no ledger writes; feed the write-side above) ──
 
@@ -380,6 +480,11 @@ Console/Commands/
   ConcurrencyProbeInvoicePayment.php  Phase 3 Task 13, TEST-SUPPORT ONLY (refuses outside local/
                               testing) — real cross-process row-lock contention probe for
                               InvoicePaymentConcurrencyTest. Not a product feature.
+  ReconcileOpeningBills.php   Phase 4 Task 7: `sparkbooks:reconcile-opening-bills` — the exact
+                              AP-side mirror of ReconcileOpeningInvoices; backfills an is_opening
+                              Bill for any pre-Task-7 opening payable that doesn't have one yet.
+                              Idempotent, not scheduled; NEVER posts a second ledger entry (the AP
+                              was already posted by the original opening_balance_run).
 Domain/Ledger/
   EntryDraft.php              readonly DTO: date, memo, source, lines[], role, reversesEntryId.
   LineDraft.php               readonly DTO: accountId, debit, credit, memo, contactId.
@@ -392,22 +497,51 @@ Enums/
                               opening-balance customer_lines/vendor_lines eligibility.
   InvoiceStatus.php            Phase 3: draft|sent|partially_paid|paid|void (+ isPosted(), canEdit(),
                               canReceivePayment(), canVoid()) — the invoice lifecycle state machine.
+  ExpenseStatus.php             Phase 4 T1: draft|recorded|void (+ isPosted(), canEdit(),
+                              canRecord(), canVoid()) — simpler than Bill/Invoice: no partial-paid
+                              state, an expense is a single cash-out event.
+  BillStatus.php                 Phase 4 T1: draft|received|partially_paid|paid|void (+ isPosted(),
+                              canEdit(), canReceive(), canReceivePayment(), canVoid()) — the exact
+                              AP-side mirror of InvoiceStatus.
 Exceptions/
   MissingCompanyContext.php   thrown when a tenant query runs with no company set (fail-closed).
   Ledger/LedgerException.php  base for all ledger errors; + UnbalancedEntry, EmptyEntry,
                               LockedPeriod, ControlAccountViolation, ArchivedAccount, ImmutableLedger.
-  IneligibleCategoryAccount.php  Phase 2 Task 7: OtherReceiptService rejects bank/cash-linked or
-                              control (AR/AP) accounts as a receipt "category" — caller-independent.
+  IneligibleCategoryAccount.php  Two independent rules share this one exception (Phase 4 T2 doc
+                              update): Phase 2 Task 7's OtherReceiptService rejects bank/cash-linked,
+                              control (AR/AP), or archived accounts as a money-IN "category"; Phase 4
+                              Task 2's CategoryAccountGuard (money-OUT — expense/bill lines) rejects
+                              the same three PLUS an income-type account (only expense/asset/
+                              liability/equity are eligible categories for money going out).
   OpeningBalancesLocked.php   Phase 2 Task 8: blocks a second opening-balance run once any OTHER
                               (non-'opening_balance_run') JournalEntry exists for the company.
+  AttachmentRejected.php        Phase 4 Task 8 (spec §17.8): thrown by AttachmentService::store on
+                              an oversize or content-sniffed-ineligible upload — the caller-
+                              independent backstop behind App\Rules\AllowedAttachmentContent's
+                              friendly 422. Mirrors IneligibleCategoryAccount's shape.
   Invoicing/*.php              Phase 3: the invoice/payment guard hierarchy — InvoiceSendException
                               (InvoiceNotDraft, InvoiceHasNoLines, InvoiceHasNoValue,
                               InvoiceContactNotEligible, InvoiceFxRateInvalid, InvoiceFxRateRequired),
                               PaymentException (InvoiceNotPayable, PaymentExceedsBalance,
                               InvalidPaymentAmount, PaymentBankAccountIneligible, PaymentAlreadyVoided),
-                              InvoiceVoidException (InvoiceNotVoidable, InvoiceHasLivePayments),
+                              InvoiceVoidException (InvoiceNotVoidable, InvoiceHasLivePayments,
+                              InvoiceIsOpening — Phase 4 T6 retro-fix: an is_opening invoice carries
+                              no P1 entry of its own to reverse, so voiding it directly now surfaces
+                              this friendly 422 instead of a confusing 404),
                               PaymentVoidException, InvoiceNotEmailable, InvoiceEmailException —
                               checked BEFORE LedgerService on every invoice/payment write path.
+  Documents/*.php               Phase 4 T3-T6: the expense/bill guard hierarchy, shared by BOTH
+                              document types where the rule is identical (mirrors Invoicing/*.php's
+                              own shape) — DocumentPostException (DocumentNotDraft, DocumentHasNoLines,
+                              DocumentHasNoValue, ExpenseBankAccountRequired, BillContactNotEligible,
+                              BillDueDateRequired), DocumentVoidException (DocumentNotVoidable,
+                              BillHasLivePayments, BillIsOpening), BillPaymentException (BillNotPayable,
+                              InvalidBillPaymentAmount, BillPaymentExceedsBalance,
+                              BillPaymentBankAccountIneligible), BillPaymentVoidException
+                              (BillPaymentAlreadyVoided) — all deliberately NOT LedgerException (these
+                              are business rules checked BEFORE LedgerService, not ledger posting-time
+                              violations); caught as one type per family by ExpenseController/
+                              BillController to surface a friendly 422.
 Http/Controllers/
   DashboardController.php       /dashboard — cash position (sum of non-archived bank/cash accounts'
                                 linked ledger balances via AccountBalances) + customer/vendor/bank-
@@ -439,6 +573,18 @@ Http/Controllers/
                                 send/void/recordPayment/voidPayment/pdf/email/resendEmail. Every
                                 mutating action gated per its own `invoices.*` permission (draft vs.
                                 send vs. void are independently gated — §7.14).
+  ExpenseController.php          Phase 4 T2/T3/T6/T8/T9: index/new/store/show/edit/update/destroy
+                                (draft only) + record/void + storeAttachment/downloadAttachment/
+                                destroyAttachment (spec §17.8). Show (T9) is the canonical landing
+                                page for every status; Edit stays the draft-only editor. No type
+                                restriction on the payee contact (spec §7.8, unlike Bill).
+  BillController.php             Phase 4 T2/T4/T5/T6/T8/T9: index/new/store/show/edit/update/destroy
+                                (draft only) + receive/recordPayment/void/voidPayment +
+                                storeAttachment/downloadAttachment/destroyAttachment. contact_id is
+                                REQUIRED and must be a vendor/both (spec §7.8); `reference` carries
+                                the vendor's own bill number (no internal numbering). Show (T9) also
+                                renders the payments list + the opening-bill banner (relocated here
+                                from Edit).
 Http/Middleware/
   SetCompanyContext.php        resolves current company → CompanyContext; repairs stale/foreign id.
   RequireCompany.php           redirects users with no company to onboarding.
@@ -447,7 +593,10 @@ Http/Middleware/
                                 NAV_ABILITIES — Phase 2 T10, hand-maintained, extend when a new nav
                                 link needs gating) the sidebar nav uses to decide what to render —
                                 every linked route still has its own server-side gate. Phase 3 extended
-                                NAV_ABILITIES for the Invoices nav link.
+                                NAV_ABILITIES for the Invoices nav link; Phase 4 extended it again for
+                                expenses.draft/bills.draft (nav links), expenses.record/bills.receive
+                                and expenses.void/bills.void (the Expenses/Bills Edit and Show pages'
+                                action-bar gating).
 Http/Requests/
   StoreCompanyRequest, StoreAccountRequest, UpdateAccountRequest, StoreManualJournalRequest,
   ProfileUpdateRequest, Auth/LoginRequest   — form validation.
@@ -458,6 +607,26 @@ Http/Requests/
                                 currency_code, per-line qty/unit_price/income_account/tax_rate).
   StorePaymentRequest            Phase 3: amount ≥ 1 (+ base_amount ≥ 1 required for a foreign-
                                 currency invoice), bank_account_id, payment_date.
+  Store/UpdateExpenseRequest, Store/UpdateBillRequest   — Phase 4 T2: draft shape validation
+                                (lines array, per-line description/category_account_id/tax_rate_id/
+                                amount — amount-based, no qty×price). Bill's contact_id is required +
+                                must be a vendor/both; Expense's is optional, no type restriction.
+                                Both use Concerns/ValidatesDocumentLines for the shared per-line
+                                category/tax-rate semantic checks.
+  StoreBillPaymentRequest        Phase 4 T5: amount ≥ 1, bank_account_id, payment_date — no
+                                base_amount (bills are base-currency-only, unlike StorePaymentRequest).
+  StoreAttachmentRequest         Phase 4 T8 (spec §17.8): file required, max:10240 (10MB, the
+                                friendly HTTP-path half of the size guard) + App\Rules\
+                                AllowedAttachmentContent (the content-sniff half).
+  Concerns/ValidatesDocumentLines.php   Phase 4 T2: shared trait for the four expense/bill
+                                FormRequests above — per-line category-account eligibility
+                                (delegates to CategoryAccountGuard::guard) + tax-rate tenant/archived
+                                checks, each its own field-level error.
+Rules/
+  AllowedAttachmentContent.php   Phase 4 T8 (spec §17.8): ValidationRule wrapping
+                                AttachmentContentSniffer — rejects a spoofed upload (e.g. a renamed
+                                .exe claiming to be a .pdf) with a friendly field-level 422 before
+                                AttachmentService is ever reached.
 Models/
   Company.php                  tenant root: name, base_currency, fiscal_year_start_month, books_locked_through.
   User.php                     + companies() pivot (role), current_company_id, roleIn() (cached).
@@ -484,7 +653,9 @@ Models/
                                 due_date/amount/status); composite tenant FK on contact_id+company_id
                                 (contact_id NOT NULL, unlike journal_lines); feeds Phase 5 aging.
                                 Phase 3 T6 added invoice_id (nullable FK → invoices) linking a
-                                receivable document to its is_opening Invoice.
+                                receivable document to its is_opening Invoice. Phase 4 T7 added
+                                bill_id (nullable FK → bills, nullOnDelete) — the exact AP-side
+                                mirror, linking a payable document to its is_opening Bill.
   Invoice.php                    Phase 3: number (nullable=draft; gap-free once assigned), status
                                 (InvoiceStatus), currency_code/fx_rate + base_subtotal/base_tax_total/
                                 base_total (doc vs. base split, spec §3), subtotal/tax_total/total/
@@ -500,6 +671,31 @@ Models/
   EmailAttempt.php                Phase 3 T10: one row per send/resend attempt — status (sent|failed)
                                 + error, append-only history distinct from Invoice.email_status
                                 (the CURRENT state) — spec §17.6 decoupled delivery.
+  Expense.php                     Phase 4 T1: contact_id (nullable — payee is optional, no type
+                                restriction, spec §7.8)/status (ExpenseStatus)/expense_date/
+                                bank_account_id/subtotal/tax_total/total/notes. lines() + morphMany
+                                attachments(). Row fields (status/recorded_at/voided_at) keep
+                                changing post-draft; only LINES freeze (see ExpenseLine).
+  ExpenseLine.php                  Phase 4 T1: description/category_account_id/tax_rate_id/
+                                tax_rate_snapshot (frozen at record)/amount (minor units, net — no
+                                qty/unit_price)/line_tax. booted() throws once the parent expense
+                                leaves draft — INCLUDING void (unlike InvoiceLine, which only
+                                freezes on isPosted()).
+  Bill.php                        Phase 4 T1: contact_id (NOT NULL, must be vendor/both)/reference
+                                (the vendor's OWN bill number — no internal numbering)/status
+                                (BillStatus)/bill_date/due_date/subtotal/tax_total/total/amount_paid/
+                                balance/is_opening. lines() + payments() + morphMany attachments() +
+                                openingDocument() (Phase 4 T7, AP mirror of Invoice::openingDocument).
+  BillLine.php                     Phase 4 T1: description/category_account_id/tax_rate_id/
+                                tax_rate_snapshot/amount/line_tax. booted() freeze guard — exact
+                                mirror of ExpenseLine's (freezes on ANY non-draft status incl. void).
+  BillPayment.php                  Phase 4 T1: bill_id/payment_date/amount (minor units — no
+                                base_amount/fx_rate/base_ar_relief, bills are base-currency-only,
+                                unlike InvoicePayment)/bank_account_id/status (posted|void)/memo.
+  Attachment.php                   Phase 4 T8 (spec §17.8): disk_path/original_name/mime/size/
+                                uploaded_by; morphTo attachable() (Expense|Bill). attachable_id/type
+                                deliberately absent from $fillable — set via the morph relation's
+                                setAttribute(), never mass-assigned.
 Providers/AppServiceProvider.php  registers Gates from config/permissions.php; scoped bindings.
 Services/
   CompanySetupService.php      create company, attach Owner, seed defaults.
@@ -519,6 +715,11 @@ Services/
   OtherReceiptService.php       Phase 2 T7: P14 posting + IneligibleCategoryAccount guard.
   OpeningBalanceService.php     Phase 2 T8: ⭐ P8a-c combined-entry posting + re-run void-then-repost;
                                 OpeningBalancesLocked guard distinguishes reversals from real activity.
+                                Phase 3 T6: also creates/voids an is_opening Invoice per customer
+                                opening receivable (createOpeningInvoice() — never calls
+                                LedgerService itself, see §5). Phase 4 T7: exact AP-side mirror —
+                                also creates/voids an is_opening Bill per vendor opening payable
+                                (createOpeningBill()), same "never posts its own entry" reasoning.
   OpeningCsvParser.php           Phase 2 T9: CSV → staged rows for bank/customer-invoice/vendor-bill
                                 kinds; Money::parseToMinor; NEVER calls LedgerService/OpeningBalanceService.
   InvoiceCalculator.php          Phase 3 T2: per-line total = quantity × unit_price (half-up, incl.
@@ -528,8 +729,10 @@ Services/
                                 Freezes tax_rate_snapshot + recomputes line totals BEFORE the
                                 status flip (still-draft), assigns the number via
                                 DocumentNumberService, then posts through LedgerService. void()
-                                refuses while any payment is 'posted' (InvoiceHasLivePayments) and
-                                404s on an is_opening invoice (manage via opening balances instead).
+                                refuses while any payment is 'posted' (InvoiceHasLivePayments) and —
+                                Phase 4 T6 retro-fix, closing a Phase 3 carry-in — now throws a
+                                friendly InvoiceIsOpening 422 on an is_opening invoice (manage via
+                                opening balances instead) rather than 404ing on the missing entry.
   InvoicePaymentService.php      Phase 3 T4/T8: ⭐ recordPayment() (P2/P3/P2fx) + voidPayment() (P9's
                                 payment-side mirror). The overpayment guard is a lockForUpdate() READ
                                 of the invoice row INSIDE this method's own transaction — proven
@@ -540,12 +743,36 @@ Services/
                                 (never fabricates an FX rate on a still-draft foreign invoice).
   DocumentNumberService.php       Phase 3 T1: gap-free, race-safe numbering — insertOrIgnore +
                                 lockForUpdate on a per-(company,type) document_counters row; no
-                                TOCTOU window.
-  OpeningBalanceService.php     Phase 2 T8: ⭐ P8a-c combined-entry posting + re-run void-then-repost;
-                                OpeningBalancesLocked guard distinguishes reversals from real activity.
-                                Phase 3 T6: also creates/voids an is_opening Invoice per customer
-                                opening receivable (createOpeningInvoice() — never calls
-                                LedgerService itself, see §5).
+                                TOCTOU window. Bills/expenses carry NO internal numbering (spec
+                                decision, Phase 4 brief) — this service is invoice-only.
+  DocumentLineCalculator.php      Phase 4 T2: pure expense/bill-totals calculator, the AP-side
+                                mirror of InvoiceCalculator — AMOUNT-based lines (no qty×price,
+                                spec §7.8): tax per line on the typed net amount via
+                                Money::taxMinorUnits, summed per-line-then-total, never on a
+                                pre-summed subtotal. No DB access, no float.
+  ExpenseService.php              Phase 4 T3: ⭐ record() (P4/P5) + void() (P9). Re-validates every
+                                line's category account (CategoryAccountGuard, caller-independent),
+                                freezes tax_rate_snapshot + recomputes totals BEFORE the status flip
+                                (still-draft — ExpenseLine::booted() would otherwise reject the
+                                write), then posts through LedgerService. Requires a non-archived,
+                                tenant-owned bank_account_id to record (ExpenseBankAccountRequired).
+  BillService.php                 Phase 4 T4/T6: ⭐ receive() (P6/P6t) + void() (P9). Identical
+                                shape to ExpenseService::record — same freeze-then-post ordering,
+                                same CategoryAccountGuard re-check. Extra guards vs. Expense: vendor
+                                contact required (BillContactNotEligible), due_date required
+                                (BillDueDateRequired). void() refuses while any payment is 'posted'
+                                (BillHasLivePayments, payments-first) or if is_opening (BillIsOpening).
+  BillPaymentService.php          Phase 4 T5: ⭐ record() (P7) + void() (P9's payment-side mirror).
+                                The overpayment guard is a lockForUpdate() READ of the BILL row
+                                INSIDE this method's own transaction — the exact AP-side mirror of
+                                InvoicePaymentService's pattern proven under genuine cross-process
+                                contention (Phase 3 Task 13). No FX (bills are base-currency-only).
+  AttachmentService.php           Phase 4 T8 (spec §17.8): ⭐ THE attachment read/write gate, shared
+                                by ExpenseController and BillController — store() (10MB cap +
+                                content-sniffed allowlist via AttachmentContentSniffer, uuid
+                                filename, private `local` disk), delete(), deleteAllFor() (draft-
+                                delete cascade — rows now, files after the caller's txn commits),
+                                download() (streams back the ORIGINAL filename). Every op audited.
 Support/
   CompanyContext.php           request-scoped current company; get() throws if unset.
   IdempotencyService.php       exactly-once execute() wrapper (baseline txn guard).
@@ -558,6 +785,19 @@ Support/
                                 time fx_rate and converting a minor-unit amount to base (half-up,
                                 bcmath) — both InvoiceService::send() and InvoicePaymentService
                                 delegate to it rather than each rolling their own conversion.
+  CategoryAccountGuard.php        Phase 4 T2 (spec §7.8): THE category-eligibility guard for
+                                expense/bill lines — allows expense/asset/liability/equity accounts
+                                (enables P12 tax remittance via 2100, P13 owner drawings via an
+                                equity account, P15 fixed-asset purchases via an asset account);
+                                blocks income/control(AR-AP)/cash-bank/archived. Static/stateless;
+                                eligibleQuery() keeps the category-picker option list in lockstep
+                                with guard()'s own rule (see its own test for the drift-proof check).
+  AttachmentContentSniffer.php    Phase 4 T8 (spec §17.8): THE server-side content sniff — reads a
+                                file's magic bytes via ext-fileinfo (finfo), NEVER the client-
+                                declared Content-Type or filename extension. pdf/jpg/png/webp
+                                allowlist shared by both App\Rules\AllowedAttachmentContent (HTTP-
+                                path 422) and AttachmentService::store (caller-independent guard) so
+                                the two can never drift apart. MAX_BYTES = 10MB.
 Jobs/
   SendInvoiceEmail.php            Phase 3 T10: queued job — sets CompanyContext via runFor, sends
                                 InvoiceMail, records an EmailAttempt, updates Invoice.email_status.
@@ -572,8 +812,21 @@ Mail/
 ```
 lib/
   money.ts (+ money.test.ts)   formatMoney (forced 2dp) + parseMoneyInput (string→minor units). No float.
+                                computeLineTax is now called by BOTH InvoiceLineEditor AND (Phase 4
+                                T2) the shared Components/documents/DocumentLineEditor — the latter
+                                calls it directly on a typed amount (no multiplyByQuantity step
+                                first, spec §7.8's amount-based lines).
   contactLabels.ts              Phase 2: shared customer/vendor/both label helpers (Contacts + opening
                                 balances both use these — hoisted to avoid duplication).
+  overdue.ts (+ overdue.test.ts)   Phase 4 T9: isBillOverdue (received/partially_paid + due_date <
+                                today — the AP mirror of Invoices/Index's own long-untested inline
+                                rule) + todayIsoDate. Deliberately extracted into its own tested
+                                module (unlike the invoice side, still untested since Phase 3) so
+                                this addition has direct vitest coverage. Client Date()-based — same
+                                pre-existing PKR-timezone footgun as the invoice side (see §10).
+  summarize.ts (+ summarize.test.ts)   Phase 4 T9: summarizeList — truncates a name list into a
+                                "A, B +N more" display string for Expenses/Bills Index's "categories"
+                                column.
 Components/ui/                  Button, Sheet, Field, MoneyText, StatTile — design-system primitives.
                                 StatTile added Phase 2 T10 for the dashboard's 3 stat cards.
 Components/ledger/
@@ -588,13 +841,37 @@ Components/invoices/            Phase 3 T11: invoice UI pieces.
                                 per-payment "Reverse" action, only reveals the final void-the-invoice
                                 form once none remain (spec §6 payments-first rule).
   StatusChip.tsx                   draft|sent|partially_paid|paid|void pill, shared by Index/Show.
+Components/documents/           Phase 4 T2/T5/T6/T8/T9: expense/bill UI pieces, the AP-side mirror
+                                of Components/invoices/ — shared by BOTH Expenses/* and Bills/*.
+  DocumentLineEditor.tsx          the amount-based line grid (category account + amount + tax rate,
+                                no qty×price — spec §7.8), live per-line/document totals mirroring
+                                DocumentLineCalculator's own math client-side.
+  AttachmentSection.tsx           receipt/bill-scan list + upload (spec §17.8) — works on a draft OR
+                                posted document (attachments addable anytime); upload/delete gates
+                                (canUpload/canDelete) passed in per caller, enforced server-side too.
+  BillPaymentModal.tsx            Record-payment dialog for a bill (Bills-only — Expenses have no
+                                separate payments concept). No FX/implied-rate display (unlike
+                                invoices/PaymentModal) — bills are base-currency-only.
+  VoidDialog.tsx                   the accounting-correct void flow, generalized over documents that
+                                may or may not carry a payments concept (Expense: none, straight to
+                                confirm; Bill: full live-payments-first flow, mirrors
+                                Components/invoices/VoidDialog). No date/memo fields — the server
+                                always reverses dated today with a generic memo.
+  PostConfirmDialog.tsx            shared "post it" confirmation for Expenses/Show's Record action
+                                and Bills/Show's Receive action — shows the computed totals about to
+                                post before the click fires.
+  StatusChip.tsx                   the expense/bill status chip (EXPENSE_STATUS_LABELS/
+                                BILL_STATUS_LABELS), shared by both Index pages so the two document
+                                types never drift on color/shape — mirrors invoices/StatusChip.
 Components/shell/               Wordmark, SidebarLink (gained `activeMatch` in Phase 2 T10 so e.g.
                                 Banking stays lit while on Transfers/Other-receipts), CompanyMenu,
                                 UserMenu — the app-shell chrome.
 Components/ (Breeze originals)  Modal, Dropdown, TextInput, InputError, … (still used by auth/profile forms).
 Layouts/
   AppShell.tsx                 ⭐ the ink-sidebar shell wrapping every in-app page. Phase 2 T10: filters
-                                nav items by the shared `can` map and drops empty groups.
+                                nav items by the shared `can` map and drops empty groups. Phase 4 T9
+                                added a "Purchases" nav group (Expenses/Bills, gated
+                                expenses.draft/bills.draft) alongside the existing Sales group.
   GuestLayout.tsx              centered card for auth pages. AuthenticatedLayout.tsx = Breeze leftover (unused).
 Pages/
   Dashboard.tsx                cash position + customer/vendor/bank-account StatTile cards (Phase 2
@@ -626,6 +903,23 @@ Pages/
                                 (≈ PKR + rate when foreign), line items, payments table (PKR
                                 received/implied rate columns on FX invoices), Record payment/Void/
                                 Download PDF/Send email(+Resend)/email status, all idempotency-keyed.
+  Expenses/Index.tsx              Phase 4 T9: expense list, status filter (Draft/Recorded/Void),
+                                search (payee/notes), "categories" summary column (summarizeList).
+  Expenses/Edit.tsx                the draft editor — payee/date/bank account + DocumentLineEditor +
+                                AttachmentSection + Save draft; Record moved to Show this task.
+  Expenses/Show.tsx                ⭐ the canonical detail page for every status — line items,
+                                attachments, Record (PostConfirmDialog)/Void (VoidDialog) actions,
+                                all idempotency-keyed. Mirrors Invoices/Show's shape.
+  Bills/Index.tsx                  Phase 4 T9: bill list, status filter incl. a synthetic "Overdue"
+                                chip (isBillOverdue), row highlight on an overdue bill, "categories"
+                                summary column, search (vendor/reference/notes).
+  Bills/Edit.tsx                   the draft editor — vendor/reference/dates + DocumentLineEditor +
+                                AttachmentSection + Save draft; Receive/payments moved to Show.
+  Bills/Show.tsx                   ⭐ the canonical detail page for every status — line items,
+                                payments table, opening-bill banner (relocated here from Edit),
+                                Receive (PostConfirmDialog)/Record payment (BillPaymentModal)/Void +
+                                per-payment Reverse (VoidDialog) actions, Overdue tag, all
+                                idempotency-keyed.
   Auth/*, Profile/*            Breeze auth + profile (restyled to tokens).
 types/                         index.d.ts (shared Inertia props incl. currentCompany), global.d.ts.
 app.tsx                        Inertia bootstrap; fonts; progress-bar color.
@@ -656,6 +950,21 @@ emails/invoice.blade.php        rendered by InvoiceMail; dev mail driver is `log
 2026_07_09_000010 document_counters (Phase 3 T1; numbers jump 8→10, cosmetic) | 000011 invoices | 000012 invoice_lines | 000013 invoice_payments  (Phase 3 T1)
 2026_07_09_000014 add_invoice_id_to_opening_documents (Phase 3 T6) | 000015 add_base_ar_relief_to_invoice_payments (Phase 3 T8)
 2026_07_10_000000 email_attempts                                                                    (Phase 3 T10)
+2026_07_10_000001 expenses | 000002 expense_lines                                                   (Phase 4 T1)
+2026_07_10_000003 bills (contact_id composite tenant FK, NOT NULL) | 000004 bill_lines               (Phase 4 T1)
+2026_07_10_000005 bill_payments (no base_amount/fx_rate — base-currency only)                        (Phase 4 T1)
+2026_07_10_000006 attachments (polymorphic attachable, private disk path, uuid filename)              (Phase 4 T8)
+2026_07_10_000007 add_bill_id_to_opening_documents (Phase 4 T7, nullable, nullOnDelete — AP mirror of invoice_id) (Phase 4 T7)
+```
+
+### Data — `database/factories/`
+
+```
+Existing factories (Company/User/Account/ManualJournal/Contact/TaxRate/Item/BankAccount/Transfer/
+OpeningBalanceRun/OpeningDocument/Invoice/InvoiceLine/InvoicePayment) unchanged. Phase 4 T1/T8 added
+their AP-side siblings, same shape as InvoiceFactory/InvoiceLineFactory/InvoicePaymentFactory:
+ExpenseFactory, ExpenseLineFactory, BillFactory, BillLineFactory, BillPaymentFactory,
+AttachmentFactory.
 ```
 
 ### Config / routes
@@ -664,10 +973,19 @@ emails/invoice.blade.php        rendered by InvoiceMail; dev mail driver is `log
 config/permissions.php   the §7.14 catalog + per-role permission lists (the authorization source of truth).
                           invoices.draft/send/void and payments.record were already in the Phase 0
                           catalog (built ahead of need, per §7.14); Phase 3 is the first phase to
-                          actually wire routes/gates to them — no config change needed.
+                          actually wire routes/gates to them — no config change needed. Same story
+                          for expenses.draft/record/void and bills.draft/receive/void: already in the
+                          Phase 0 catalog, Phase 4 is the first phase to wire routes/gates to them —
+                          no config change needed here either.
 routes/web.php           all in-app routes, each gated (see the gate on each group). Phase 3 added the
                           /invoices/* group, split into invoices.draft / invoices.send / payments.record /
-                          invoices.void gate groups (each narrower than invoices.draft).
+                          invoices.void gate groups (each narrower than invoices.draft). Phase 4 added
+                          /expenses/* (expenses.draft / expenses.record / expenses.void gate groups)
+                          and /bills/* (bills.draft / bills.receive / payments.record [shared with
+                          invoices] / bills.void gate groups) the same way; attachment upload/download
+                          share their document's own draft gate, delete reuses the void gate (spec
+                          §17.8's Owner/Admin/Accountant decision — the tightest existing ability that
+                          already maps to that exact role set, not a new permission).
 routes/auth.php          Breeze auth routes. routes/console.php  the ledger:verify schedule.
 ```
 
@@ -758,10 +1076,54 @@ types (Task 11).
 - ~~Opening payables have no symmetric checker attribution~~ — **cleared Phase 4 T10**:
   `IntegrityChecker` now covers bills/bill_payments end to end (`document_balance` +
   `ap_reconciliation`), including the exact contact-level aggregate the fbbe763 AR fix established —
-  a vendor with multiple opening bills in one run reconciles correctly. See §9 note below.
+  a vendor with multiple opening bills in one run reconciles correctly — see §5's IntegrityChecker
+  READ-side paragraph above (Phase 4 T10 entry) for the full contact-level reconciliation writeup.
 - `NAV_ABILITIES` (HandleInertiaRequests) is a hand-maintained subset of `config/permissions.php` —
   remember to extend it whenever a future task gates a new nav link (Phase 3 itself needed this for
   Invoices — no drift yet, but it's manual every time).
 - Contact type (customer/vendor/both) is enforced against `customer_lines`/`vendor_lines` at the
   opening-balance layer (tenant + archived + type all checked) — noted here only because it was a
   carried gap mid-Task-8 that got closed same-task; no outstanding gap.
+
+**New from Phase 4 (carry to Phase 5+):**
+- **LIVE BROWSER DRIVE of the purchases UI is PENDING.** Phase 4 was verified by the full test
+  suite (894 PHP + 48 JS) + `ledger:verify` + curl-rendered Inertia pages (Trial Balance
+  debits==credits on live data, Expenses/Show + Bills/Show render correctly), and Task 9's reviewer
+  did an exhaustive control→route audit standing in for a browser (every action button traced to
+  its route+method+idempotency, every gate-conditional render verified) — but the interactive
+  browser tooling was broken for the whole session (claude-in-chrome frame-error on every tab/url),
+  so a genuine human-style click-through of expense/bill record→pay→void, category enablement
+  (P12/P13/P15), and attachment upload/spoofed-extension-rejection was never done. **Do this before
+  the pre-handoff walkthrough** — it's the one Task 11 exit-criterion item not independently proven
+  live, unlike every other Phase since Phase 0.
+- **The client-side `todayIsoDate()` overdue computation is a standing PKR-timezone footgun** — a
+  pre-existing convention from Invoices/Index (Phase 3, still uncorrected), now duplicated a second
+  time for Bills (`isBillOverdue`/`todayIsoDate` in `lib/overdue.ts`, plus a third private copy
+  inside `BillPaymentModal.tsx`): "today" is computed from the *browser's* local clock, not the
+  server's. A viewer in a different timezone than the company's base currency's home timezone (PKR)
+  sees a different overdue boundary than the server would compute. Not a Phase 4 regression — flag
+  for a future server-date (or at least company-timezone-aware) fix across both invoice and bill
+  overdue logic together, ideally consolidating all three copies into one.
+- The contact-level opening reconciliation pattern (fbbe763, originally an AR-only fix) is now
+  **proven on both AR and AP** — `IntegrityChecker::checkOpeningArReconciliation()` and this phase's
+  `checkOpeningApReconciliation()` are near-identical siblings. Phase 5's aging report will likely
+  want the same "sum over a contact's opening documents, not a per-document split of a shared
+  ledger line" reasoning — reuse the pattern rather than re-deriving it.
+- Phase 5 aging will need to tie AR/AP agings to their control accounts (1100/2000) via each source
+  document's own due date: `opening_documents.due_date` (captured at opening-balance setup, Phase 2
+  T8) for opening receivables/payables, `invoices.due_date` (nullable — captured/edited in the
+  invoice form and exposed in payloads since Phase 3, but NOT required) for AR, and `bills.due_date`
+  (REQUIRED at receive time, Phase 4 T4's `BillDueDateRequired` guard) for AP. The asymmetry —
+  Invoice's due_date is optional (an invoice can have none), Bill's is mandatory — means AR aging
+  must define a fallback bucket for invoices with a null due_date before it is built.
+- `2000`/`2100` account lookups in ExpenseService/BillService/BillPaymentService are `firstOrFail`
+  (a raw 500, not a friendly error, if either seed account were ever missing) — the exact same
+  accepted risk as Phase 3's AR/Tax-Payable lookups (both accounts are seeded + non-deletable, so
+  unreachable in practice today).
+- `Money::taxMinorUnits`'s non-numeric-input guard (carried since Phase 3 Task 2) now has MORE
+  callers reaching it indirectly — `DocumentLineCalculator::compute()` (Expense/Bill lines) joins
+  `InvoiceCalculator` — but is still unreachable via HTTP (upstream regex/integer validation on
+  `lines.*.amount`/`tax_rate_id` prevents a non-numeric rate from ever reaching it either way).
+- `NAV_ABILITIES` needed extending again this phase (6 new entries: expenses.draft/record/void,
+  bills.draft/receive/void) — still a hand-maintained subset of `config/permissions.php`, still
+  manual every time a future task gates a new nav link or action-bar button.
