@@ -17,6 +17,7 @@ use App\Http\Controllers\OpeningCsvController;
 use App\Http\Controllers\OtherReceiptController;
 use App\Http\Controllers\PeriodLockController;
 use App\Http\Controllers\ProfileController;
+use App\Http\Controllers\Reports\ProfitAndLossController;
 use App\Http\Controllers\Reports\TrialBalanceController;
 use App\Http\Controllers\TaxRateController;
 use App\Http\Controllers\TransferController;
@@ -70,6 +71,11 @@ Route::middleware(['auth', 'verified', 'company', 'can:reports.view'])->group(fu
     Route::get('/reports/trial-balance/export.csv', [TrialBalanceController::class, 'exportCsv'])
         ->middleware('can:exports.run')
         ->name('reports.trial-balance.export');
+
+    Route::get('/reports/profit-and-loss', [ProfitAndLossController::class, 'show'])->name('reports.profit-and-loss');
+    Route::get('/reports/profit-and-loss/export.csv', [ProfitAndLossController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('reports.profit-and-loss.export');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:audit.view'])->group(function () {
