@@ -43,6 +43,9 @@ const INPUT_CLASSES =
 const TIE_OUT_NOTE =
     'Every dollar shown here is drawn from the same ledger balance as the Accounts Payable control account — this total is always expected to match it exactly.';
 
+const CURRENT_NOTE =
+    'Not yet due as of the report date. Bills with no due date are treated as current.';
+
 /**
  * A/P Aging (spec §7.11): outstanding vendor balances bucketed by how many
  * days past each bill's own due date the report date falls — the exact AP
@@ -123,7 +126,12 @@ export default function ApAging({ report, canExport }: ApAgingPageProps) {
                                             Vendor
                                         </th>
                                         {report.buckets.map((key) => (
-                                            <th key={key} scope="col" className="py-2 pl-3 text-right font-medium">
+                                            <th
+                                                key={key}
+                                                scope="col"
+                                                title={key === 'current' ? CURRENT_NOTE : undefined}
+                                                className={`py-2 pl-3 text-right font-medium${key === 'current' ? ' cursor-help' : ''}`}
+                                            >
                                                 {report.bucket_labels[key]}
                                             </th>
                                         ))}

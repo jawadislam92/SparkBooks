@@ -43,6 +43,9 @@ const INPUT_CLASSES =
 const TIE_OUT_NOTE =
     'Every dollar shown here is drawn from the same ledger balance as the Accounts Receivable control account — this total is always expected to match it exactly.';
 
+const CURRENT_NOTE =
+    'Not yet due as of the report date. Invoices with no due date are treated as current.';
+
 /**
  * A/R Aging (spec §7.11): outstanding customer balances bucketed by how many
  * days past each invoice's own due date the report date falls, rather than
@@ -124,7 +127,12 @@ export default function ArAging({ report, canExport }: ArAgingPageProps) {
                                             Customer
                                         </th>
                                         {report.buckets.map((key) => (
-                                            <th key={key} scope="col" className="py-2 pl-3 text-right font-medium">
+                                            <th
+                                                key={key}
+                                                scope="col"
+                                                title={key === 'current' ? CURRENT_NOTE : undefined}
+                                                className={`py-2 pl-3 text-right font-medium${key === 'current' ? ' cursor-help' : ''}`}
+                                            >
                                                 {report.bucket_labels[key]}
                                             </th>
                                         ))}

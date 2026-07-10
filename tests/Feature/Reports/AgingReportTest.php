@@ -17,6 +17,8 @@ use App\Models\Contact;
 use App\Models\Invoice;
 use App\Models\InvoicePayment;
 use App\Models\JournalEntry;
+use App\Models\OpeningBalanceRun;
+use App\Models\OpeningDocument;
 use App\Services\LedgerService;
 use App\Services\Reports\AgingReport;
 use App\Support\CompanyContext;
@@ -251,25 +253,47 @@ class AgingReportTest extends TestCase
     }
 
     /**
-     * An is_opening Invoice/Bill row PLUS a run-shaped ledger entry: one
-     * control-account line per document (all sharing contactId), plus an
+     * A real OpeningBalanceRun + one opening_documents row per doc (linking
+     * invoice_id/bill_id → the run) + the run's single combined ledger entry:
+     * one control-account line per document (all sharing contactId), plus an
      * OBE plug — mirrors OpeningBalanceService::buildLinesAndDocuments()'s
-     * actual shape, so a same-contact, multi-document run genuinely shares
-     * one ledger entry the way production data would.
+     * actual shape, so a same-contact, multi-document run genuinely shares one
+     * ledger entry AND the opening_documents linkage the report's date-gate
+     * resolves through, exactly the way production data would. Returns the run
+     * so callers can reference its id (e.g. to reverse it in the void test).
      *
      * @param  list<array{doc: Invoice|Bill, amount:int}>  $docs
      */
-    private function postOpeningRun(Account $controlAccount, Account $obe, array $docs, string $entryDate, int $runId, bool $isDebit): void
+    private function postOpeningRun(Account $controlAccount, Account $obe, array $docs, string $entryDate, bool $isDebit): OpeningBalanceRun
     {
+        // The real run entry is dated books_start_date − 1 (spec §6/§7.1), so
+        // its books_start_date is $entryDate + 1 day.
+        $run = OpeningBalanceRun::factory()->create([
+            'books_start_date' => CarbonImmutable::parse($entryDate)->addDay()->toDateString(),
+            'status' => 'active',
+        ]);
+
         $lines = [];
         $total = 0;
         foreach ($docs as $entry) {
-            $contactId = $entry['doc']->contact_id;
+            $doc = $entry['doc'];
             $amount = $entry['amount'];
             $lines[] = $isDebit
-                ? new LineDraft(accountId: $controlAccount->id, debit: $amount, credit: 0, contactId: $contactId)
-                : new LineDraft(accountId: $controlAccount->id, debit: 0, credit: $amount, contactId: $contactId);
+                ? new LineDraft(accountId: $controlAccount->id, debit: $amount, credit: 0, contactId: $doc->contact_id)
+                : new LineDraft(accountId: $controlAccount->id, debit: 0, credit: $amount, contactId: $doc->contact_id);
             $total += $amount;
+
+            OpeningDocument::factory()->create([
+                'opening_balance_run_id' => $run->id,
+                'contact_id' => $doc->contact_id,
+                'invoice_id' => $doc instanceof Invoice ? $doc->id : null,
+                'bill_id' => $doc instanceof Bill ? $doc->id : null,
+                'kind' => $isDebit ? 'receivable' : 'payable',
+                'original_date' => $entryDate,
+                'due_date' => $doc->due_date->toDateString(),
+                'amount' => $amount,
+                'status' => 'open',
+            ]);
         }
         $lines[] = $isDebit
             ? new LineDraft(accountId: $obe->id, debit: 0, credit: $total)
@@ -279,9 +303,11 @@ class AgingReportTest extends TestCase
             entryDate: CarbonImmutable::parse($entryDate),
             memo: 'Opening balances',
             sourceType: 'opening_balance_run',
-            sourceId: $runId,
+            sourceId: $run->id,
             lines: $lines,
         )));
+
+        return $run;
     }
 
     private function openingInvoice(Contact $contact, int $amount, string $originalDate, string $dueDate): Invoice
@@ -357,7 +383,7 @@ class AgingReportTest extends TestCase
 
         // Opening receivable for Alice.
         $openingInv = $this->openingInvoice($alice, 5000, '2026-01-01', '2026-01-31');
-        $this->postOpeningRun($ar, $obe, [['doc' => $openingInv, 'amount' => 5000]], '2025-12-31', 1, isDebit: true);
+        $this->postOpeningRun($ar, $obe, [['doc' => $openingInv, 'amount' => 5000]], '2025-12-31', isDebit: true);
 
         $report = $this->build()->buildReceivables(CarbonImmutable::parse('2026-07-15'));
 
@@ -397,7 +423,7 @@ class AgingReportTest extends TestCase
         $this->postOpeningRun($ap, $obe, [
             ['doc' => $openingBillA, 'amount' => 3000],
             ['doc' => $openingBillB, 'amount' => 7000],
-        ], '2025-12-31', 1, isDebit: false);
+        ], '2025-12-31', isDebit: false);
 
         $report = $this->build()->buildPayables(CarbonImmutable::parse('2026-07-15'));
 
@@ -638,13 +664,13 @@ class AgingReportTest extends TestCase
         $contact = $this->contact($company);
 
         $openingInvoice = $this->openingInvoice($contact, 6000, '2026-01-01', '2026-01-31');
-        $this->postOpeningRun($ar, $obe, [['doc' => $openingInvoice, 'amount' => 6000]], '2025-12-31', 1, isDebit: true);
+        $run = $this->postOpeningRun($ar, $obe, [['doc' => $openingInvoice, 'amount' => 6000]], '2025-12-31', isDebit: true);
 
         // Simulate a re-run voiding this one, dated the SAME day as the
         // original (OpeningBalanceService::voidPriorRun's actual behavior).
         $entry = JournalEntry::query()
             ->where('source_type', 'opening_balance_run')
-            ->where('source_id', 1)
+            ->where('source_id', $run->id)
             ->firstOrFail();
         DB::transaction(fn () => app(LedgerService::class)->reverse($entry, CarbonImmutable::parse('2025-12-31'), 'Re-run voiding prior setup'));
         $openingInvoice->forceFill(['status' => InvoiceStatus::Void->value, 'voided_at' => now()])->save();
@@ -654,6 +680,44 @@ class AgingReportTest extends TestCase
         $this->assertNull(collect($report['contacts'])->firstWhere('contact_id', $contact->id));
         $this->assertSame(0, $report['grand_total']);
         $this->assertSame(0, $report['control_balance']);
+        $this->assertLedgerBalances();
+    }
+
+    // ---------------------------------------------------------------
+    // A report dated BEFORE the opening run takes effect must exclude the
+    // opening document's own-total contribution — otherwise grand_total
+    // would include it while control_balance (correctly date-filtered)
+    // excludes it, breaking the tie-out. The opening entry here is dated
+    // 2025-12-31 (books_start_date − 1); as-of 2025-06-01 (earlier) the
+    // opening doc contributes 0 and the report still ties to control (0 == 0).
+    // ---------------------------------------------------------------
+
+    public function test_report_dated_before_the_opening_run_excludes_the_opening_document(): void
+    {
+        $company = Company::factory()->create();
+        app(CompanyContext::class)->set($company);
+        $ar = $this->arAccount($company);
+        $obe = $this->obeAccount($company);
+        $contact = $this->contact($company);
+
+        $openingInvoice = $this->openingInvoice($contact, 6000, '2026-01-01', '2026-01-31');
+        $this->postOpeningRun($ar, $obe, [['doc' => $openingInvoice, 'amount' => 6000]], '2025-12-31', isDebit: true);
+
+        // As-of BEFORE the run's own entry date (2025-12-31).
+        $report = $this->build()->buildReceivables(CarbonImmutable::parse('2025-06-01'));
+
+        $this->assertSame(0, $report['control_balance']);
+        $this->assertSame(0, $report['grand_total']);
+        $this->assertTrue($report['ties_to_control']);
+        $this->assertSame(0, $report['difference']);
+        $this->assertNull(collect($report['contacts'])->firstWhere('contact_id', $contact->id));
+
+        // Sanity: as-of ON the run's entry date, it IS included again (proving
+        // the exclusion above is date-driven, not a blanket opening drop).
+        $onDate = $this->build()->buildReceivables(CarbonImmutable::parse('2025-12-31'));
+        $this->assertSame(6000, $onDate['grand_total']);
+        $this->assertSame(6000, $onDate['control_balance']);
+        $this->assertTrue($onDate['ties_to_control']);
         $this->assertLedgerBalances();
     }
 

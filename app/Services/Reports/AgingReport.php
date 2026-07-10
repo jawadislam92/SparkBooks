@@ -2,6 +2,7 @@
 
 namespace App\Services\Reports;
 
+use App\Enums\EntryRole;
 use App\Models\Account;
 use App\Models\Bill;
 use App\Models\BillPayment;
@@ -9,6 +10,7 @@ use App\Models\Contact;
 use App\Models\Invoice;
 use App\Models\InvoicePayment;
 use App\Models\JournalLine;
+use App\Models\OpeningDocument;
 use Carbon\CarbonImmutable;
 
 /**
@@ -78,6 +80,16 @@ use Carbon\CarbonImmutable;
  * this is provably identical to the run's own contact-level ledger total
  * (each is one dedicated line; at most one run is ever active), so the tie-
  * out gate holds without ever needing to isolate a single line.
+ *
+ * That own-total contribution is STILL date-gated, exactly like every ledger
+ * branch: it counts only when the run's own primary journal entry is dated on
+ * or before $asOf (looked up per document via opening_documents → its run →
+ * that run's primary entry). Without this gate, a report dated BEFORE the
+ * opening run takes effect (earlier than books_start_date − 1) would include
+ * the opening total while control_balance — LedgerBalances::cumulativeAsOf,
+ * correctly date-filtered — excludes it, breaking the tie-out (grand_total =
+ * the opening amount, control_balance = 0). With it, the opening document
+ * contributes 0 until its run's effective date, matching the ledger exactly.
  *
  * A voided run (re-run, spec §7.1) reverses ALL of that run's lines and
  * flips ALL its documents to `status: void` in the same transaction. This
@@ -200,6 +212,29 @@ class AgingReport
             ? [Invoice::class, InvoicePayment::class, 'invoice', 'invoice_payment', 'invoice_id']
             : [Bill::class, BillPayment::class, 'bill', 'bill_payment', 'bill_id'];
 
+        // The primary opening-run entry date for every opening document, keyed
+        // by the document id it represents (opening_documents.invoice_id /
+        // bill_id → its run → the run's primary journal entry). An opening
+        // document's own-total contribution below is date-gated on THIS date,
+        // exactly like byOwnEntry/byPaymentEntry gate on entry_date <= $asOf —
+        // so a report dated BEFORE the opening run takes effect excludes it,
+        // matching LedgerBalances::cumulativeAsOf (which already does). The
+        // join on source_id is tenant-safe without an explicit company clause:
+        // opening_documents is already company-scoped (BelongsToCompany), and
+        // opening_balance_run ids are globally unique, so source_id can never
+        // collide across companies — but the company match is kept anyway as
+        // defense-in-depth, consistent with this codebase's composite-tenant-FK
+        // discipline.
+        $openingRunEntryDates = OpeningDocument::query()
+            ->join('journal_entries', function ($join) {
+                $join->on('journal_entries.source_id', '=', 'opening_documents.opening_balance_run_id')
+                    ->whereColumn('journal_entries.company_id', 'opening_documents.company_id')
+                    ->where('journal_entries.source_type', '=', 'opening_balance_run')
+                    ->where('journal_entries.entry_role', '=', EntryRole::Primary->value);
+            })
+            ->whereNotNull("opening_documents.{$parentKey}")
+            ->pluck('journal_entries.entry_date', "opening_documents.{$parentKey}");
+
         // Every normal document's OWN entry, netted (debit − credit), keyed
         // by the document id (journal_entries.source_id when
         // source_type is 'invoice'/'bill'). Opening documents never appear
@@ -255,9 +290,22 @@ class AgingReport
                 continue;
             }
 
-            $net = $doc->is_opening
-                ? ($direction === 'ar' ? (int) $doc->total : -(int) $doc->total)
-                : (int) ($byOwnEntry[$doc->id] ?? 0);
+            if ($doc->is_opening) {
+                // Date-gate the opening own-total contribution on its run's
+                // primary entry date — mirrors byOwnEntry/byPaymentEntry's own
+                // entry_date <= $asOf gate. Before the run takes effect (or if
+                // a degenerate opening doc has no posted run at all), the
+                // ledger holds nothing for it, so it contributes nothing and
+                // the tie-out to the control account is preserved.
+                $runEntryDate = $openingRunEntryDates->get($doc->id);
+                $isEffective = $runEntryDate !== null
+                    && CarbonImmutable::parse($runEntryDate)->lte($asOf);
+                $net = $isEffective
+                    ? ($direction === 'ar' ? (int) $doc->total : -(int) $doc->total)
+                    : 0;
+            } else {
+                $net = (int) ($byOwnEntry[$doc->id] ?? 0);
+            }
             $net += $paymentNetByDoc[$doc->id] ?? 0;
 
             $outstanding = $direction === 'ar' ? $net : -$net;
