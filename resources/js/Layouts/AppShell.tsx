@@ -104,6 +104,7 @@ function navGroups(can: Record<string, boolean>): NavGroup[] {
                 { label: 'A/P aging', href: route('reports.ap-aging'), ability: 'reports.view' },
                 { label: 'Trial balance', href: route('reports.trial-balance'), ability: 'reports.view' },
                 { label: 'General ledger', href: route('reports.general-ledger'), ability: 'reports.view' },
+                { label: 'Tax summary', href: route('reports.tax-summary'), ability: 'reports.view' },
             ],
         },
         {

@@ -22,6 +22,7 @@ use App\Http\Controllers\Reports\ArAgingController;
 use App\Http\Controllers\Reports\BalanceSheetController;
 use App\Http\Controllers\Reports\GeneralLedgerController;
 use App\Http\Controllers\Reports\ProfitAndLossController;
+use App\Http\Controllers\Reports\TaxSummaryController;
 use App\Http\Controllers\Reports\TrialBalanceController;
 use App\Http\Controllers\TaxRateController;
 use App\Http\Controllers\TransferController;
@@ -100,6 +101,11 @@ Route::middleware(['auth', 'verified', 'company', 'can:reports.view'])->group(fu
     Route::get('/reports/general-ledger/export.csv', [GeneralLedgerController::class, 'exportCsv'])
         ->middleware('can:exports.run')
         ->name('reports.general-ledger.export');
+
+    Route::get('/reports/tax-summary', [TaxSummaryController::class, 'show'])->name('reports.tax-summary');
+    Route::get('/reports/tax-summary/export.csv', [TaxSummaryController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('reports.tax-summary.export');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:audit.view'])->group(function () {
