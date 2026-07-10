@@ -12,8 +12,12 @@ use App\Enums\Role;
 use App\Models\Account;
 use App\Models\ActivityLog;
 use App\Models\BankAccount;
+use App\Models\Bill;
+use App\Models\BillLine;
 use App\Models\Company;
 use App\Models\Contact;
+use App\Models\Expense;
+use App\Models\ExpenseLine;
 use App\Models\IntegrityRun;
 use App\Models\Invoice;
 use App\Models\InvoiceLine;
@@ -22,6 +26,8 @@ use App\Models\JournalEntry;
 use App\Models\JournalLine;
 use App\Models\ManualJournal;
 use App\Models\User;
+use App\Services\BillService;
+use App\Services\ExpenseService;
 use App\Services\IntegrityChecker;
 use App\Services\LedgerService;
 use App\Services\OpeningBalanceService;
@@ -476,16 +482,28 @@ class IntegrityCheckerTest extends TestCase
         $this->assertOrphanDetectedForSourceType('opening_balance_run');
     }
 
+    public function test_orphaned_expense_source_entry_produces_finding(): void
+    {
+        $this->assertOrphanDetectedForSourceType('expense');
+    }
+
+    public function test_orphaned_bill_source_entry_produces_finding(): void
+    {
+        $this->assertOrphanDetectedForSourceType('bill');
+    }
+
     /**
      * The point of the whole extension: a source_type this checker has never
-     * heard of (a stand-in for some future Phase 4+ document type someone
-     * forgets to register in IntegrityChecker::SOURCE_TABLES — 'bill' is a
-     * genuine example: Phase 4 expenses/bills haven't landed yet as of this
-     * task) must fail loud — a distinct 'unrecognized_source' finding —
-     * rather than being silently skipped by the per-source-type loop.
-     * ('invoice' itself is no longer a valid stand-in here — Task 12
-     * registers it in SOURCE_TABLES, see the invoice/invoice_payment orphan
-     * tests below.)
+     * heard of (a stand-in for some future document type someone forgets to
+     * register in IntegrityChecker::SOURCE_TABLES — 'bill_payment' is the
+     * current genuine example: BillPayment's schema/model already exist as
+     * of Phase 4 T1, but no service posts through it yet, so this source
+     * type is real future work, not a fictional placeholder) must fail loud
+     * — a distinct 'unrecognized_source' finding — rather than being
+     * silently skipped by the per-source-type loop. ('invoice' was the
+     * original stand-in until Task 12 registered it; 'bill' was the stand-in
+     * from Task 12 through Phase 4 T2 until THIS task registered it too —
+     * see the expense/bill orphan tests above.)
      */
     public function test_unknown_source_type_produces_unrecognized_source_finding(): void
     {
@@ -495,7 +513,7 @@ class IntegrityCheckerTest extends TestCase
             'company_id' => $company->id,
             'entry_date' => '2026-07-01',
             'memo' => 'Future source type (raw insert)',
-            'source_type' => 'bill',
+            'source_type' => 'bill_payment',
             'source_id' => 1,
             'entry_role' => 'primary',
             'created_by' => null,
@@ -507,7 +525,7 @@ class IntegrityCheckerTest extends TestCase
         $this->assertContains('unrecognized_source', $checks);
         $this->assertNotContains('orphan_entries', $checks);
         $finding = collect($findings)->firstWhere('check', 'unrecognized_source');
-        $this->assertStringContainsString('bill', $finding['detail']);
+        $this->assertStringContainsString('bill_payment', $finding['detail']);
     }
 
     /**
@@ -713,6 +731,87 @@ class IntegrityCheckerTest extends TestCase
         $this->assertNotContains('unrecognized_source', $checks);
         // The invoice is back to Sent/fully-unpaid — balance and base AR
         // both reconcile exactly as if the payment never happened.
+        $this->assertSame([], $findings);
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 4 T3/T4: source coverage for 'expense' / 'bill' — the real
+    // documents that finally landed behind the 'bill' stand-in the
+    // unrecognized-source test above used to use. Mirrors the Task 12
+    // invoice/invoice_payment section: post a genuine P4/P5 expense and a
+    // genuine P6/P6t bill straight through their real services, and prove
+    // IntegrityChecker sees exactly what those services posted — no
+    // orphan/unrecognized false positive now that SOURCE_TABLES registers
+    // both.
+    // ---------------------------------------------------------------
+
+    /** @param array<string, mixed> $overrides */
+    private function categoryAccount(Company $company, array $overrides = []): Account
+    {
+        return Account::factory()->create(array_merge([
+            'company_id' => $company->id,
+            'code' => '5000',
+            'type' => AccountType::Expense->value,
+            'subtype' => AccountSubtype::OperatingExpense->value,
+        ], $overrides));
+    }
+
+    public function test_clean_company_with_a_recorded_expense_and_a_received_bill_yields_no_findings(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        // ExpenseService/BillService are called directly below (not via
+        // HTTP), so CompanyContext needs to be set explicitly — mirrors
+        // test_clean_multi_source_company_with_reversals_yields_no_findings'
+        // own identical reasoning for TransferService/OtherReceiptService.
+        app(CompanyContext::class)->set($company);
+        $bank = $this->bankAccountModel($company);
+        $vendor = $this->customer($company, ['type' => ContactType::Vendor->value]);
+        $expenseCategory = $this->categoryAccount($company, ['code' => '5000']);
+        $billCategory = $this->categoryAccount($company, ['code' => '5010']);
+        $this->taxPayableAccount($company);
+        // Seeds the 2000 AP account BillService::p6Lines resolves by code —
+        // not otherwise referenced below.
+        Account::factory()->create([
+            'company_id' => $company->id,
+            'code' => '2000',
+            'name' => 'Accounts Payable',
+            'type' => AccountType::Liability->value,
+            'subtype' => AccountSubtype::Payable->value,
+            'is_system' => true,
+        ]);
+
+        $expense = Expense::factory()->create([
+            'company_id' => $company->id,
+            'status' => 'draft',
+            'bank_account_id' => $bank->id,
+        ]);
+        app(CompanyContext::class)->runFor($company, fn () => ExpenseLine::factory()->create([
+            'expense_id' => $expense->id,
+            'company_id' => $company->id,
+            'category_account_id' => $expenseCategory->id,
+            'amount' => 15000,
+            'tax_rate_id' => null,
+        ]));
+        app(ExpenseService::class)->record((string) Str::uuid(), $expense);
+
+        $bill = Bill::factory()->create([
+            'company_id' => $company->id,
+            'contact_id' => $vendor->id,
+            'status' => 'draft',
+            'due_date' => '2026-08-01',
+        ]);
+        app(CompanyContext::class)->runFor($company, fn () => BillLine::factory()->create([
+            'bill_id' => $bill->id,
+            'company_id' => $company->id,
+            'category_account_id' => $billCategory->id,
+            'amount' => 22000,
+            'tax_rate_id' => null,
+        ]));
+        app(BillService::class)->receive((string) Str::uuid(), $bill);
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+
         $this->assertSame([], $findings);
     }
 

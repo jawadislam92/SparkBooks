@@ -103,12 +103,35 @@ interface BillFormData {
 }
 
 export default function Edit({ bill, contacts, categoryAccounts, taxRates }: EditPageProps) {
-    const { currentCompany } = usePage<PageProps>().props;
+    const { currentCompany, can, errors: pageErrors } = usePage<PageProps>().props;
     const currency = currentCompany?.base_currency ?? 'PKR';
+    const receiveError = (pageErrors as Record<string, string | undefined> | undefined)?.status;
     const isEditing = bill !== null;
     const isDraft = bill === null || bill.status === 'draft';
     const [confirmingDelete, setConfirmingDelete] = useState(false);
     const [deleting, setDeleting] = useState(false);
+    const [receiving, setReceiving] = useState(false);
+
+    // Minimal wiring ahead of the full Show page (Task 9): mirrors how
+    // Invoices/Edit carried its own Send action before Invoices/Show existed
+    // (Phase 3 T3/T11), and Expenses/Edit's Record button (this same Phase 4
+    // task). Posts BillController::receive with a fresh idempotency key per
+    // click and reloads this same page.
+    function receiveBill() {
+        if (!bill) {
+            return;
+        }
+        setReceiving(true);
+        router.post(
+            route('bills.receive', bill.id),
+            {},
+            {
+                headers: { 'X-Idempotency-Key': crypto.randomUUID() },
+                preserveScroll: true,
+                onFinish: () => setReceiving(false),
+            },
+        );
+    }
 
     const [rows, setRows] = useState<DocumentLineRow[]>(() =>
         bill && bill.lines.length > 0
@@ -183,6 +206,12 @@ export default function Edit({ bill, contacts, categoryAccounts, taxRates }: Edi
                 </div>
             )}
 
+            {isDraft && receiveError && (
+                <p role="alert" className="mb-4 rounded-md bg-clay-50 px-3 py-2 text-sm text-clay">
+                    {receiveError}
+                </p>
+            )}
+
             <form onSubmit={submit}>
                 <Sheet
                     title={pageTitle}
@@ -201,6 +230,11 @@ export default function Edit({ bill, contacts, categoryAccounts, taxRates }: Edi
                                 <Button type="submit" disabled={form.processing}>
                                     {form.processing ? 'Saving…' : 'Save draft'}
                                 </Button>
+                                {isEditing && can['bills.receive'] && (
+                                    <Button type="button" onClick={receiveBill} disabled={receiving}>
+                                        {receiving ? 'Receiving…' : 'Receive bill'}
+                                    </Button>
+                                )}
                             </div>
                         ) : undefined
                     }

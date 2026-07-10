@@ -5,7 +5,9 @@ namespace App\Services;
 use App\Enums\AccountSubtype;
 use App\Enums\InvoiceStatus;
 use App\Models\Account;
+use App\Models\Bill;
 use App\Models\Company;
+use App\Models\Expense;
 use App\Models\Invoice;
 use App\Models\InvoicePayment;
 use App\Models\JournalEntry;
@@ -41,7 +43,7 @@ class IntegrityChecker
      * any special-casing: the source row they point at is the original
      * document, which still exists.
      *
-     * @var array<string, class-string<ManualJournal|Transfer|OtherReceipt|OpeningBalanceRun|Invoice|InvoicePayment>>
+     * @var array<string, class-string<ManualJournal|Transfer|OtherReceipt|OpeningBalanceRun|Invoice|InvoicePayment|Expense|Bill>>
      */
     private const SOURCE_TABLES = [
         'manual_journal' => ManualJournal::class,
@@ -50,6 +52,14 @@ class IntegrityChecker
         'opening_balance_run' => OpeningBalanceRun::class,
         'invoice' => Invoice::class,
         'invoice_payment' => InvoicePayment::class,
+        // Phase 4 T3/T4: ExpenseService::record/BillService::receive post
+        // source_type 'expense'/'bill' (P4/P5/P6/P6t) — registered here from
+        // the moment they exist so a real posted expense/bill is never
+        // mistaken for an unrecognized source (see
+        // IntegrityCheckerTest::test_unknown_source_type_produces_unrecognized_source_finding's
+        // own docblock, which used 'bill' as its stand-in until this task).
+        'expense' => Expense::class,
+        'bill' => Bill::class,
     ];
 
     /**

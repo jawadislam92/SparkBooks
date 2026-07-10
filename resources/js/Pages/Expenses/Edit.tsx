@@ -107,12 +107,35 @@ interface ExpenseFormData {
 }
 
 export default function Edit({ expense, contacts, bankAccounts, categoryAccounts, taxRates }: EditPageProps) {
-    const { currentCompany } = usePage<PageProps>().props;
+    const { currentCompany, can, errors: pageErrors } = usePage<PageProps>().props;
     const currency = currentCompany?.base_currency ?? 'PKR';
+    const recordError = (pageErrors as Record<string, string | undefined> | undefined)?.status;
     const isEditing = expense !== null;
     const isDraft = expense === null || expense.status === 'draft';
     const [confirmingDelete, setConfirmingDelete] = useState(false);
     const [deleting, setDeleting] = useState(false);
+    const [recording, setRecording] = useState(false);
+
+    // Minimal wiring ahead of the full Show page (Task 9): mirrors how
+    // Invoices/Edit carried its own Send action before Invoices/Show existed
+    // (Phase 3 T3/T11). Posts ExpenseController::record with a fresh
+    // idempotency key per click and reloads this same page — the
+    // now-Recorded expense renders read-only via the isDraft checks below.
+    function recordExpense() {
+        if (!expense) {
+            return;
+        }
+        setRecording(true);
+        router.post(
+            route('expenses.record', expense.id),
+            {},
+            {
+                headers: { 'X-Idempotency-Key': crypto.randomUUID() },
+                preserveScroll: true,
+                onFinish: () => setRecording(false),
+            },
+        );
+    }
 
     const [rows, setRows] = useState<DocumentLineRow[]>(() =>
         expense && expense.lines.length > 0
@@ -185,6 +208,12 @@ export default function Edit({ expense, contacts, bankAccounts, categoryAccounts
                 </div>
             )}
 
+            {isDraft && recordError && (
+                <p role="alert" className="mb-4 rounded-md bg-clay-50 px-3 py-2 text-sm text-clay">
+                    {recordError}
+                </p>
+            )}
+
             <form onSubmit={submit}>
                 <Sheet
                     title={pageTitle}
@@ -203,6 +232,11 @@ export default function Edit({ expense, contacts, bankAccounts, categoryAccounts
                                 <Button type="submit" disabled={form.processing}>
                                     {form.processing ? 'Saving…' : 'Save draft'}
                                 </Button>
+                                {isEditing && can['expenses.record'] && (
+                                    <Button type="button" onClick={recordExpense} disabled={recording}>
+                                        {recording ? 'Recording…' : 'Record expense'}
+                                    </Button>
+                                )}
                             </div>
                         ) : undefined
                     }

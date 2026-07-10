@@ -3,7 +3,9 @@
 namespace App\Http\Controllers;
 
 use App\Enums\ExpenseStatus;
+use App\Exceptions\Documents\DocumentPostException;
 use App\Exceptions\IneligibleCategoryAccount;
+use App\Exceptions\Ledger\LedgerException;
 use App\Http\Requests\StoreExpenseRequest;
 use App\Http\Requests\UpdateExpenseRequest;
 use App\Models\Account;
@@ -13,11 +15,14 @@ use App\Models\Expense;
 use App\Models\ExpenseLine;
 use App\Models\TaxRate;
 use App\Services\DocumentLineCalculator;
+use App\Services\ExpenseService;
 use App\Support\AuditLogger;
 use App\Support\CategoryAccountGuard;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -146,6 +151,41 @@ class ExpenseController extends Controller
         });
 
         $audit->log('expense.draft_updated', $model, before: $before, after: $model->only(self::AUDITED_FIELDS));
+
+        return redirect()->route('expenses.edit', $model->id);
+    }
+
+    /**
+     * Records a draft expense — posting rule P4/P5 (Dr category per line, Dr
+     * ONE combined 2100 Tax Payable line if any tax, Cr the paid-from bank/
+     * cash account for the gross total) via ExpenseService, flipping the
+     * draft to Recorded. $expense is a plain route parameter (not implicit
+     * binding), same reasoning as edit()/update()/destroy() above —
+     * SubstituteBindings runs before SetCompanyContext.
+     *
+     * The idempotency key travels in a header (like every posting action in
+     * this app — mirrors InvoiceController::send). Every guard failure
+     * (IneligibleCategoryAccount, this service's own DocumentPostException
+     * family, or a LedgerException such as a locked period) surfaces as a
+     * 422 on a generic `status` field — there's no single natural form field
+     * for a whole-document action like this one.
+     */
+    public function record(Request $request, string $expense, ExpenseService $service): RedirectResponse
+    {
+        $model = Expense::query()->findOrFail($expense);
+
+        $idempotencyKey = $request->header('X-Idempotency-Key');
+        if (! is_string($idempotencyKey) || ! Str::isUuid($idempotencyKey)) {
+            throw ValidationException::withMessages([
+                'idempotency_key' => 'A valid X-Idempotency-Key header (UUID) is required.',
+            ]);
+        }
+
+        try {
+            $service->record($idempotencyKey, $model);
+        } catch (IneligibleCategoryAccount|DocumentPostException|LedgerException $e) {
+            throw ValidationException::withMessages(['status' => $e->getMessage()]);
+        }
 
         return redirect()->route('expenses.edit', $model->id);
     }

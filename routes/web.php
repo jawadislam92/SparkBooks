@@ -139,8 +139,9 @@ Route::middleware(['auth', 'verified', 'company', 'can:invoices.void'])->group(f
 
 // Phase 4 Task 2: draft-only expense/bill CRUD — expenses.draft/bills.draft
 // are held by ALL four roles (spec §7.14, Staff included), same shape as
-// invoices.draft. "Record"/"receive"/void/payments are later Phase 4 tasks
-// and will get their own narrower gates, mirroring invoices.send/void above.
+// invoices.draft. Record/receive (Task 3/4, below) got their own narrower
+// gates, mirroring invoices.send/void above; void/payments are still later
+// Phase 4 tasks.
 Route::middleware(['auth', 'verified', 'company', 'can:expenses.draft'])->group(function () {
     Route::get('/expenses', [ExpenseController::class, 'index'])->name('expenses.index');
     Route::get('/expenses/new', [ExpenseController::class, 'create'])->name('expenses.new');
@@ -150,6 +151,13 @@ Route::middleware(['auth', 'verified', 'company', 'can:expenses.draft'])->group(
     Route::delete('/expenses/{expense}', [ExpenseController::class, 'destroy'])->name('expenses.destroy');
 });
 
+// expenses.record is a narrower gate than expenses.draft (Staff can draft but
+// not record, see config/permissions.php §7.14), so it needs its own group —
+// mirrors invoices.send/invoices.draft's split (Phase 3 T3).
+Route::middleware(['auth', 'verified', 'company', 'can:expenses.record'])->group(function () {
+    Route::post('/expenses/{expense}/record', [ExpenseController::class, 'record'])->name('expenses.record');
+});
+
 Route::middleware(['auth', 'verified', 'company', 'can:bills.draft'])->group(function () {
     Route::get('/bills', [BillController::class, 'index'])->name('bills.index');
     Route::get('/bills/new', [BillController::class, 'create'])->name('bills.new');
@@ -157,6 +165,12 @@ Route::middleware(['auth', 'verified', 'company', 'can:bills.draft'])->group(fun
     Route::get('/bills/{bill}/edit', [BillController::class, 'edit'])->name('bills.edit');
     Route::patch('/bills/{bill}', [BillController::class, 'update'])->name('bills.update');
     Route::delete('/bills/{bill}', [BillController::class, 'destroy'])->name('bills.destroy');
+});
+
+// bills.receive is a narrower gate than bills.draft (Staff can draft but not
+// receive) — mirrors expenses.record/expenses.draft above.
+Route::middleware(['auth', 'verified', 'company', 'can:bills.receive'])->group(function () {
+    Route::post('/bills/{bill}/receive', [BillController::class, 'receive'])->name('bills.receive');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:items.manage'])->group(function () {

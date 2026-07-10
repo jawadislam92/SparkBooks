@@ -4,7 +4,9 @@ namespace App\Http\Controllers;
 
 use App\Enums\BillStatus;
 use App\Enums\ContactType;
+use App\Exceptions\Documents\DocumentPostException;
 use App\Exceptions\IneligibleCategoryAccount;
+use App\Exceptions\Ledger\LedgerException;
 use App\Http\Requests\StoreBillRequest;
 use App\Http\Requests\UpdateBillRequest;
 use App\Models\Account;
@@ -12,12 +14,15 @@ use App\Models\Bill;
 use App\Models\BillLine;
 use App\Models\Contact;
 use App\Models\TaxRate;
+use App\Services\BillService;
 use App\Services\DocumentLineCalculator;
 use App\Support\AuditLogger;
 use App\Support\CategoryAccountGuard;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -160,6 +165,35 @@ class BillController extends Controller
         });
 
         $audit->log('bill.draft_updated', $model, before: $before, after: $model->only(self::AUDITED_FIELDS));
+
+        return redirect()->route('bills.edit', $model->id);
+    }
+
+    /**
+     * Receives a draft bill — posting rule P6/P6t (Dr category per line, Dr
+     * ONE combined 2100 Tax Payable line if any tax, Cr 2000 Accounts
+     * Payable for the gross total with the vendor's contact_id) via
+     * BillService, flipping the draft to Received. $bill is a plain route
+     * parameter (not implicit binding), same reasoning as
+     * edit()/update()/destroy() above. Mirrors ExpenseController::record
+     * exactly.
+     */
+    public function receive(Request $request, string $bill, BillService $service): RedirectResponse
+    {
+        $model = Bill::query()->findOrFail($bill);
+
+        $idempotencyKey = $request->header('X-Idempotency-Key');
+        if (! is_string($idempotencyKey) || ! Str::isUuid($idempotencyKey)) {
+            throw ValidationException::withMessages([
+                'idempotency_key' => 'A valid X-Idempotency-Key header (UUID) is required.',
+            ]);
+        }
+
+        try {
+            $service->receive($idempotencyKey, $model);
+        } catch (IneligibleCategoryAccount|DocumentPostException|LedgerException $e) {
+            throw ValidationException::withMessages(['status' => $e->getMessage()]);
+        }
 
         return redirect()->route('bills.edit', $model->id);
     }
