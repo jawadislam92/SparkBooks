@@ -4,11 +4,13 @@ namespace App\Services;
 
 use App\Domain\Ledger\EntryDraft;
 use App\Domain\Ledger\LineDraft;
+use App\Enums\BillStatus;
 use App\Enums\EntryRole;
 use App\Enums\InvoiceStatus;
 use App\Exceptions\OpeningBalancesLocked;
 use App\Models\Account;
 use App\Models\BankAccount;
+use App\Models\Bill;
 use App\Models\Company;
 use App\Models\Invoice;
 use App\Models\JournalEntry;
@@ -52,6 +54,14 @@ class OpeningBalanceService
      * (payable) lines are unaffected — they stay opening_documents-only
      * until Phase 4 bills exist. See buildLinesAndDocuments() below and
      * .superpowers/sdd/task-6-report.md for the full design writeup.
+     *
+     * Phase 4 Task 7 (the exact AP-side mirror of Task 6): each vendor_lines
+     * row ALSO gets an is_opening Bill (status Received, balance/total =
+     * amount), created straight to Received with NO ledger posting of its
+     * own — the AP line built here (P8c) already covers it. The bill is what
+     * makes the opening payable PAYABLE: BillPaymentService::record (Phase 4
+     * Task 5) settles it through the ordinary P7 path, unmodified. See
+     * createOpeningBill() below and .superpowers/sdd/task-7-report.md.
      *
      * Re-running (an 'active' run already exists) VOIDS the prior run FIRST:
      * reverses its ledger entry, marks the run 'voided' and its opening
@@ -158,6 +168,16 @@ class OpeningBalanceService
      * invoice: hasRealTransaction above already refuses the whole re-run
      * the moment any payment (source_type=invoice_payment) has posted
      * against one of this run's invoices, before any of this runs.
+     *
+     * Task 7 addendum: exact AP-side mirror of the Task 6 addendum above —
+     * also voids every is_opening Bill this run created (found via
+     * opening_documents.bill_id). Same reasoning throughout: the reversal
+     * already wiped the AP off the books, an is_opening bill never posted
+     * its own P6/P6t (see buildLinesAndDocuments()), so there's no P9 to
+     * reverse — marking it void directly is correct — and hasRealTransaction
+     * above already refuses the whole re-run once any payment
+     * (source_type=bill_payment) has posted against one of this run's
+     * bills, so a PAID bill can never be orphaned here either.
      */
     private function voidPriorRun(OpeningBalanceRun $priorRun): void
     {
@@ -191,6 +211,17 @@ class OpeningBalanceService
         if ($invoiceIds->isNotEmpty()) {
             Invoice::query()->whereIn('id', $invoiceIds)->update([
                 'status' => InvoiceStatus::Void->value,
+                'voided_at' => now(),
+            ]);
+        }
+
+        $billIds = OpeningDocument::query()
+            ->where('opening_balance_run_id', $priorRun->id)
+            ->whereNotNull('bill_id')
+            ->pluck('bill_id');
+        if ($billIds->isNotEmpty()) {
+            Bill::query()->whereIn('id', $billIds)->update([
+                'status' => BillStatus::Void->value,
                 'voided_at' => now(),
             ]);
         }
@@ -266,9 +297,12 @@ class OpeningBalanceService
             }
             $apAccount ??= Account::query()->where('code', '2000')->firstOrFail();
 
+            $openingBill = $this->createOpeningBill($vendorLine);
+
             OpeningDocument::query()->create([
                 'opening_balance_run_id' => $run->id,
                 'contact_id' => $vendorLine['contact_id'],
+                'bill_id' => $openingBill->id,
                 'kind' => 'payable',
                 'reference' => $vendorLine['reference'] ?? null,
                 'original_date' => $vendorLine['original_date'],
@@ -336,6 +370,50 @@ class OpeningBalanceService
             'is_opening' => true,
             'created_by' => auth()->id(),
             'sent_at' => now(),
+        ]);
+    }
+
+    /**
+     * Creates the is_opening Bill that represents one vendor opening payable
+     * (Task 7) — the exact AP-side mirror of createOpeningInvoice() above.
+     * Deliberately created straight to Received (never through
+     * BillService::receive()) with NO ledger posting — the P8c line built by
+     * the caller already covers this same amount, so this method touches
+     * only the bills/opening_documents tables. No BillLine either, mirroring
+     * createOpeningInvoice()'s identical "no invoice_lines" reasoning: an
+     * opening balance is a lump-sum carry-in from the old books, not an
+     * itemized purchase, and there's no category account it would be correct
+     * to attribute it to.
+     *
+     * Deviation from the invoice mirror: `reference` IS carried over from
+     * vendorLine here (unlike createOpeningInvoice(), which never sets a
+     * `reference` on the Invoice it creates) — Bill has a `reference` column
+     * for exactly this purpose ("the VENDOR's own bill number", see the
+     * bills migration), whereas Invoice has no such column at all (its
+     * `number` is the internally generated OB-series identifier, never the
+     * vendor/customer's own reference). There is nothing to mirror on the
+     * invoice side because the field doesn't exist there.
+     *
+     * @param  array{contact_id:int, reference?:?string, original_date:string, due_date:string, amount:int}  $vendorLine
+     */
+    private function createOpeningBill(array $vendorLine): Bill
+    {
+        $amount = $vendorLine['amount'];
+
+        return Bill::query()->create([
+            'contact_id' => $vendorLine['contact_id'],
+            'reference' => $vendorLine['reference'] ?? null,
+            'status' => BillStatus::Received->value,
+            'bill_date' => $vendorLine['original_date'],
+            'due_date' => $vendorLine['due_date'],
+            'subtotal' => $amount,
+            'tax_total' => 0,
+            'total' => $amount,
+            'amount_paid' => 0,
+            'balance' => $amount,
+            'is_opening' => true,
+            'created_by' => auth()->id(),
+            'received_at' => now(),
         ]);
     }
 }

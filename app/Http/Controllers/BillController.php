@@ -481,6 +481,7 @@ class BillController extends Controller
         return [
             'id' => $bill->id,
             'status' => $bill->status->value,
+            'is_opening' => $bill->is_opening,
             'contact_id' => $bill->contact_id,
             'reference' => $bill->reference,
             'bill_date' => $bill->bill_date?->toDateString(),

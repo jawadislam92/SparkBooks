@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
 
 class Bill extends Model
@@ -78,5 +79,15 @@ class Bill extends Model
     public function attachments(): MorphMany
     {
         return $this->morphMany(Attachment::class, 'attachable');
+    }
+
+    /**
+     * The Phase 4 opening_documents row this is_opening bill represents
+     * (Task 7) — null for every ordinary (non-opening) bill. Exact AP-side
+     * mirror of Invoice::openingDocument().
+     */
+    public function openingDocument(): HasOne
+    {
+        return $this->hasOne(OpeningDocument::class);
     }
 }

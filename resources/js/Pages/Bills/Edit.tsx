@@ -63,6 +63,7 @@ interface BillPaymentData {
 interface BillData {
     id: number;
     status: string;
+    is_opening: boolean;
     contact_id: number;
     reference: string | null;
     bill_date: string | null;
@@ -189,8 +190,14 @@ export default function Edit({ bill, contacts, categoryAccounts, taxRates, bankA
     const [deleting, setDeleting] = useState(false);
     const [receiving, setReceiving] = useState(false);
     const [paymentModalOpen, setPaymentModalOpen] = useState(false);
+    // is_opening bills (Phase 4 Task 7) are never voidable from here — mirrors
+    // Invoices/Show's identical `canVoid && !invoice.is_opening` gating.
+    // BillService::void refuses them server-side too (BillIsOpening, Task 6);
+    // hiding the button is just the friendlier UX layer on top of that.
     const isVoidable =
-        bill !== null && (bill.status === 'received' || bill.status === 'partially_paid' || bill.status === 'paid');
+        bill !== null &&
+        !bill.is_opening &&
+        (bill.status === 'received' || bill.status === 'partially_paid' || bill.status === 'paid');
     const [confirmingVoid, setConfirmingVoid] = useState(false);
     const [voiding, setVoiding] = useState(false);
     // Which payment (by id) is mid-confirm for "reverse this payment" — null
@@ -335,6 +342,13 @@ export default function Edit({ bill, contacts, categoryAccounts, taxRates, bankA
                         Back to bills &rarr;
                     </Link>
                 </div>
+            )}
+
+            {bill?.is_opening && (
+                <p className="mb-4 rounded-md bg-paper px-3 py-2 text-sm text-ink-700">
+                    Opening bill — manage via opening balances, not here. It can&apos;t be voided from
+                    this screen.
+                </p>
             )}
 
             {receiveError && (
