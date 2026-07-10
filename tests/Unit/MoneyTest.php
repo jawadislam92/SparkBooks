@@ -247,4 +247,35 @@ class MoneyTest extends TestCase
     {
         $this->assertNull(Money::parseToMinor('.'));
     }
+
+    // -----------------------------------------------------------------
+    // minorToDecimalString — exact decimal rendering for report CSVs
+    // (extracted from TrialBalanceController::exportCsv in the Phase 5
+    // reporting-foundation task so every future report's CSV shares it).
+    // -----------------------------------------------------------------
+
+    public function test_renders_an_odd_paisa_amount_exactly(): void
+    {
+        $this->assertSame('33.33', Money::minorToDecimalString(3333));
+    }
+
+    public function test_renders_a_round_amount_with_zero_padded_cents(): void
+    {
+        $this->assertSame('1500.50', Money::minorToDecimalString(150050));
+    }
+
+    public function test_renders_zero(): void
+    {
+        $this->assertSame('0.00', Money::minorToDecimalString(0));
+    }
+
+    public function test_renders_a_single_digit_minor_unit_zero_padded(): void
+    {
+        $this->assertSame('0.05', Money::minorToDecimalString(5));
+    }
+
+    public function test_renders_a_negative_amount_sign_safely(): void
+    {
+        $this->assertSame('-33.33', Money::minorToDecimalString(-3333));
+    }
 }
