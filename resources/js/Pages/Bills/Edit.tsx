@@ -2,6 +2,7 @@ import Button from '@/Components/ui/Button';
 import Field from '@/Components/ui/Field';
 import MoneyText from '@/Components/ui/MoneyText';
 import Sheet from '@/Components/ui/Sheet';
+import BillPaymentModal, { BillPaymentModalBankAccount } from '@/Components/documents/BillPaymentModal';
 import DocumentLineEditor, {
     CategoryAccountOption,
     DocumentLineRow,
@@ -23,6 +24,17 @@ import {
 } from '@headlessui/react';
 import { FormEventHandler, useMemo, useState } from 'react';
 
+function formatDate(value: string | null): string {
+    if (!value) {
+        return '—';
+    }
+    return new Date(`${value}T00:00:00`).toLocaleDateString('en-PK', {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+    });
+}
+
 interface ContactOption {
     id: number;
     name: string;
@@ -38,6 +50,16 @@ interface BillLineData {
     line_tax: number;
 }
 
+interface BillPaymentData {
+    id: number;
+    payment_date: string;
+    /** Integer minor units, base currency (bills are base-currency-only in this phase). */
+    amount: number;
+    status: 'posted' | 'void' | string;
+    memo: string | null;
+    bank_account: { id: number; name: string } | null;
+}
+
 interface BillData {
     id: number;
     status: string;
@@ -49,7 +71,10 @@ interface BillData {
     subtotal: number;
     tax_total: number;
     total: number;
+    amount_paid: number;
+    balance: number;
     lines: BillLineData[];
+    payments: BillPaymentData[];
 }
 
 interface EditPageProps extends PageProps {
@@ -57,6 +82,7 @@ interface EditPageProps extends PageProps {
     contacts: ContactOption[];
     categoryAccounts: CategoryAccountOption[];
     taxRates: TaxRateOption[];
+    bankAccounts: BillPaymentModalBankAccount[];
 }
 
 const INPUT_CLASSES =
@@ -102,15 +128,17 @@ interface BillFormData {
     notes: string;
 }
 
-export default function Edit({ bill, contacts, categoryAccounts, taxRates }: EditPageProps) {
+export default function Edit({ bill, contacts, categoryAccounts, taxRates, bankAccounts }: EditPageProps) {
     const { currentCompany, can, errors: pageErrors } = usePage<PageProps>().props;
     const currency = currentCompany?.base_currency ?? 'PKR';
     const receiveError = (pageErrors as Record<string, string | undefined> | undefined)?.status;
     const isEditing = bill !== null;
     const isDraft = bill === null || bill.status === 'draft';
+    const canReceivePayment = bill !== null && (bill.status === 'received' || bill.status === 'partially_paid');
     const [confirmingDelete, setConfirmingDelete] = useState(false);
     const [deleting, setDeleting] = useState(false);
     const [receiving, setReceiving] = useState(false);
+    const [paymentModalOpen, setPaymentModalOpen] = useState(false);
 
     // Minimal wiring ahead of the full Show page (Task 9): mirrors how
     // Invoices/Edit carried its own Send action before Invoices/Show existed
@@ -206,7 +234,7 @@ export default function Edit({ bill, contacts, categoryAccounts, taxRates }: Edi
                 </div>
             )}
 
-            {isDraft && receiveError && (
+            {receiveError && (
                 <p role="alert" className="mb-4 rounded-md bg-clay-50 px-3 py-2 text-sm text-clay">
                     {receiveError}
                 </p>
@@ -236,6 +264,10 @@ export default function Edit({ bill, contacts, categoryAccounts, taxRates }: Edi
                                     </Button>
                                 )}
                             </div>
+                        ) : canReceivePayment && can['payments.record'] ? (
+                            <Button type="button" onClick={() => setPaymentModalOpen(true)}>
+                                Record payment
+                            </Button>
                         ) : undefined
                     }
                 >
@@ -354,6 +386,18 @@ export default function Edit({ bill, contacts, categoryAccounts, taxRates }: Edi
                                 size="md"
                             />
                         </div>
+                        {!isDraft && bill && (
+                            <>
+                                <div className="flex w-full max-w-xs items-center justify-between text-sm text-ink-700">
+                                    <span>Paid</span>
+                                    <MoneyText minor={bill.amount_paid} currency={currency} size="sm" />
+                                </div>
+                                <div className="flex w-full max-w-xs items-center justify-between text-sm font-semibold text-ink">
+                                    <span>Balance</span>
+                                    <MoneyText minor={bill.balance} currency={currency} size="sm" />
+                                </div>
+                            </>
+                        )}
                     </div>
 
                     <Field label="Notes" htmlFor="bill-notes" error={errors.notes} className="mt-6">
@@ -370,11 +414,65 @@ export default function Edit({ bill, contacts, categoryAccounts, taxRates }: Edi
                 </Sheet>
             </form>
 
+            {!isDraft && bill && (
+                <Sheet title="Payments" className="mt-6">
+                    {bill.payments.length === 0 ? (
+                        <p className="py-8 text-center text-sm text-ink-700">No payments recorded yet.</p>
+                    ) : (
+                        <table className="w-full border-collapse text-left text-sm">
+                            <thead>
+                                <tr className="border-b border-rule text-xs font-medium uppercase tracking-wide text-ink-700">
+                                    <th scope="col" className="py-2 pr-3 font-medium">Date</th>
+                                    <th scope="col" className="py-2 pr-3 font-medium">Account</th>
+                                    <th scope="col" className="py-2 pr-3 font-medium">Status</th>
+                                    <th scope="col" className="py-2 pl-3 text-right font-medium">Amount</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {bill.payments.map((payment) => (
+                                    <tr key={payment.id} className="border-b border-rule last:border-b-0">
+                                        <td className="py-3 pr-3 align-top text-ink-700">
+                                            {formatDate(payment.payment_date)}
+                                        </td>
+                                        <td className="py-3 pr-3 align-top">
+                                            {payment.bank_account?.name ?? '—'}
+                                        </td>
+                                        <td className="py-3 pr-3 align-top">
+                                            {payment.status === 'void' ? (
+                                                <span className="inline-block rounded-full bg-clay-50 px-2 py-0.5 text-xs font-medium text-clay">
+                                                    Reversed
+                                                </span>
+                                            ) : (
+                                                <span className="inline-block rounded-full bg-spark-50 px-2 py-0.5 text-xs font-medium text-ink">
+                                                    Posted
+                                                </span>
+                                            )}
+                                        </td>
+                                        <td className="py-3 pl-3 align-top text-right">
+                                            <MoneyText minor={payment.amount} currency={currency} size="sm" />
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    )}
+                </Sheet>
+            )}
+
             {confirmingDelete && (
                 <DeleteConfirmDialog
                     onCancel={() => setConfirmingDelete(false)}
                     onConfirm={confirmDelete}
                     processing={deleting}
+                />
+            )}
+
+            {paymentModalOpen && bill && (
+                <BillPaymentModal
+                    bill={{ id: bill.id, reference: bill.reference, balance: bill.balance }}
+                    bankAccounts={bankAccounts}
+                    currency={currency}
+                    onClose={() => setPaymentModalOpen(false)}
                 />
             )}
         </AppShell>

@@ -4,16 +4,21 @@ namespace App\Http\Controllers;
 
 use App\Enums\BillStatus;
 use App\Enums\ContactType;
+use App\Exceptions\Documents\BillPaymentException;
 use App\Exceptions\Documents\DocumentPostException;
 use App\Exceptions\IneligibleCategoryAccount;
 use App\Exceptions\Ledger\LedgerException;
+use App\Http\Requests\StoreBillPaymentRequest;
 use App\Http\Requests\StoreBillRequest;
 use App\Http\Requests\UpdateBillRequest;
 use App\Models\Account;
+use App\Models\BankAccount;
 use App\Models\Bill;
 use App\Models\BillLine;
+use App\Models\BillPayment;
 use App\Models\Contact;
 use App\Models\TaxRate;
+use App\Services\BillPaymentService;
 use App\Services\BillService;
 use App\Services\DocumentLineCalculator;
 use App\Support\AuditLogger;
@@ -34,14 +39,14 @@ use Inertia\Response;
  * edited here always has status=draft. Only a draft bill is editable/
  * deletable — BillLine::booted() enforces the same rule at the model layer
  * as a defense-in-depth backstop below the checks in update()/destroy()
- * here. "Receive" (posting P6/P6t) and payments (P7) are later Phase 4
- * tasks.
+ * here. "Receive" (posting P6/P6t, Task 4) and "pay" (posting P7, Task 5)
+ * live in this same controller too — void is a later Phase 4 task.
  *
  * Unlike Expense: `contact_id` is REQUIRED and must be a vendor/both contact
  * (spec §7.8 — a bill always names a vendor); there is no `bank_account_id`
- * (a bill is on credit — the paying bank account is chosen per BillPayment,
- * a later task); `reference` carries the vendor's own bill number (no
- * internal numbering, per Task 1).
+ * on the bill itself (a bill is on credit — the paying bank account is
+ * chosen per BillPayment, at pay time); `reference` carries the vendor's own
+ * bill number (no internal numbering, per Task 1).
  */
 class BillController extends Controller
 {
@@ -118,7 +123,13 @@ class BillController extends Controller
      */
     public function edit(string $bill): Response
     {
-        $model = Bill::query()->with('lines')->findOrFail($bill);
+        $model = Bill::query()
+            ->with([
+                'lines',
+                'payments' => fn ($query) => $query->orderBy('payment_date')->orderBy('id'),
+                'payments.bankAccount:id,name',
+            ])
+            ->findOrFail($bill);
 
         return Inertia::render('Bills/Edit', array_merge(
             ['bill' => $this->billEditPayload($model)],
@@ -192,6 +203,32 @@ class BillController extends Controller
         try {
             $service->receive($idempotencyKey, $model);
         } catch (IneligibleCategoryAccount|DocumentPostException|LedgerException $e) {
+            throw ValidationException::withMessages(['status' => $e->getMessage()]);
+        }
+
+        return redirect()->route('bills.edit', $model->id);
+    }
+
+    /**
+     * Records a payment (posting rule P7, spec §6) against a received/
+     * partially-paid bill via BillPaymentService. $bill is a plain route
+     * parameter (not implicit binding), same reasoning as
+     * edit()/update()/destroy()/receive() above. Both BillPaymentException
+     * (this action's own domain guards: not payable, invalid amount,
+     * overpayment, ineligible bank account) and LedgerException (e.g. a
+     * locked period) surface as a 422 on a generic `status` field, mirroring
+     * receive()/InvoiceController::recordPayment — there's no single natural
+     * form field for a whole-bill guard like "already paid" or "locked
+     * period".
+     */
+    public function recordPayment(StoreBillPaymentRequest $request, string $bill, BillPaymentService $service): RedirectResponse
+    {
+        $model = Bill::query()->findOrFail($bill);
+        $data = $request->validated();
+
+        try {
+            $service->record($data['idempotency_key'], $model, $data);
+        } catch (BillPaymentException|LedgerException $e) {
             throw ValidationException::withMessages(['status' => $e->getMessage()]);
         }
 
@@ -306,6 +343,13 @@ class BillController extends Controller
                     'rate' => (string) $taxRate->rate,
                 ])
                 ->values(),
+            // For the payment form (Task 5) — mirrors InvoiceController::show's
+            // own bankAccounts payload exactly.
+            'bankAccounts' => BankAccount::query()
+                ->where('is_archived', false)
+                ->orderBy('name')
+                ->get(['id', 'name'])
+                ->values(),
         ];
     }
 
@@ -338,8 +382,29 @@ class BillController extends Controller
             'subtotal' => $bill->subtotal,
             'tax_total' => $bill->tax_total,
             'total' => $bill->total,
+            'amount_paid' => $bill->amount_paid,
+            'balance' => $bill->balance,
             'lines' => $this->linesPayload($bill->lines),
+            'payments' => $this->paymentsPayload($bill->payments),
         ];
+    }
+
+    /**
+     * @param  Collection<int, BillPayment>  $payments
+     * @return array<int, array<string, mixed>>
+     */
+    private function paymentsPayload(Collection $payments): array
+    {
+        return $payments->map(fn (BillPayment $payment) => [
+            'id' => $payment->id,
+            'payment_date' => $payment->payment_date->toDateString(),
+            'amount' => $payment->amount,
+            'status' => $payment->status,
+            'memo' => $payment->memo,
+            'bank_account' => $payment->bankAccount !== null
+                ? ['id' => $payment->bankAccount->id, 'name' => $payment->bankAccount->name]
+                : null,
+        ])->values()->all();
     }
 
     /**

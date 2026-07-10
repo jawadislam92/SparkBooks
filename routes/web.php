@@ -173,6 +173,14 @@ Route::middleware(['auth', 'verified', 'company', 'can:bills.receive'])->group(f
     Route::post('/bills/{bill}/receive', [BillController::class, 'receive'])->name('bills.receive');
 });
 
+// Phase 4 Task 5: pay bill (P7) — payments.record is the SAME permission
+// invoices.payments.record uses above (Owner/Admin/Accountant, not Staff —
+// config/permissions.php §7.14): recording a payment is one ability shared
+// across both AR and AP, not a separate bills-specific gate.
+Route::middleware(['auth', 'verified', 'company', 'can:payments.record'])->group(function () {
+    Route::post('/bills/{bill}/payments', [BillController::class, 'recordPayment'])->name('bills.payments.record');
+});
+
 Route::middleware(['auth', 'verified', 'company', 'can:items.manage'])->group(function () {
     Route::get('/items', [ItemController::class, 'index'])->name('items.index');
     Route::post('/items', [ItemController::class, 'store'])->name('items.store');

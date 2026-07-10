@@ -26,6 +26,7 @@ use App\Models\JournalEntry;
 use App\Models\JournalLine;
 use App\Models\ManualJournal;
 use App\Models\User;
+use App\Services\BillPaymentService;
 use App\Services\BillService;
 use App\Services\ExpenseService;
 use App\Services\IntegrityChecker;
@@ -493,17 +494,30 @@ class IntegrityCheckerTest extends TestCase
     }
 
     /**
+     * Phase 4 T5: source coverage for 'bill_payment' — the real document
+     * type that finally landed behind the 'bill_payment' stand-in the
+     * unrecognized-source test below used to use.
+     */
+    public function test_orphaned_bill_payment_source_entry_produces_finding(): void
+    {
+        $this->assertOrphanDetectedForSourceType('bill_payment');
+    }
+
+    /**
      * The point of the whole extension: a source_type this checker has never
      * heard of (a stand-in for some future document type someone forgets to
-     * register in IntegrityChecker::SOURCE_TABLES — 'bill_payment' is the
-     * current genuine example: BillPayment's schema/model already exist as
-     * of Phase 4 T1, but no service posts through it yet, so this source
-     * type is real future work, not a fictional placeholder) must fail loud
-     * — a distinct 'unrecognized_source' finding — rather than being
-     * silently skipped by the per-source-type loop. ('invoice' was the
-     * original stand-in until Task 12 registered it; 'bill' was the stand-in
-     * from Task 12 through Phase 4 T2 until THIS task registered it too —
-     * see the expense/bill orphan tests above.)
+     * register in IntegrityChecker::SOURCE_TABLES) must fail loud — a
+     * distinct 'unrecognized_source' finding — rather than being silently
+     * skipped by the per-source-type loop. Uses a made-up literal
+     * ('nonexistent_source') rather than a real-but-not-yet-registered
+     * source type: 'invoice' was the original stand-in until Task 12
+     * registered it, 'bill' was the stand-in from Task 12 through Phase 4 T2
+     * until Phase 4 T4 registered it, and 'bill_payment' was the stand-in
+     * from Phase 4 T4 until THIS task registered it too (see the
+     * bill_payment orphan test above) — the pattern of borrowing the next
+     * unshipped feature as a placeholder kept forcing this test to be
+     * rewritten every time that feature landed, so this test now depends on
+     * nothing ever being registered here.
      */
     public function test_unknown_source_type_produces_unrecognized_source_finding(): void
     {
@@ -513,7 +527,7 @@ class IntegrityCheckerTest extends TestCase
             'company_id' => $company->id,
             'entry_date' => '2026-07-01',
             'memo' => 'Future source type (raw insert)',
-            'source_type' => 'bill_payment',
+            'source_type' => 'nonexistent_source',
             'source_id' => 1,
             'entry_role' => 'primary',
             'created_by' => null,
@@ -525,7 +539,7 @@ class IntegrityCheckerTest extends TestCase
         $this->assertContains('unrecognized_source', $checks);
         $this->assertNotContains('orphan_entries', $checks);
         $finding = collect($findings)->firstWhere('check', 'unrecognized_source');
-        $this->assertStringContainsString('bill_payment', $finding['detail']);
+        $this->assertStringContainsString('nonexistent_source', $finding['detail']);
     }
 
     /**
@@ -809,6 +823,61 @@ class IntegrityCheckerTest extends TestCase
             'tax_rate_id' => null,
         ]));
         app(BillService::class)->receive((string) Str::uuid(), $bill);
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+
+        $this->assertSame([], $findings);
+    }
+
+    /**
+     * Phase 4 T5: round-trip coverage for 'bill_payment' — a genuine P7
+     * posting via BillPaymentService (not a hand-rolled ledger row), proving
+     * IntegrityChecker sees exactly what that service posts: no orphan/
+     * unrecognized-source false positive now that SOURCE_TABLES registers
+     * 'bill_payment'. Mirrors test_clean_company_with_a_recorded_expense_and_a_received_bill_yields_no_findings
+     * one document-lifecycle stage further (received -> partially paid).
+     */
+    public function test_clean_company_with_a_received_bill_and_a_recorded_payment_yields_no_findings(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        // BillService/BillPaymentService are called directly below (not via
+        // HTTP), so CompanyContext needs to be set explicitly — mirrors
+        // test_clean_company_with_a_recorded_expense_and_a_received_bill_yields_no_findings's
+        // own identical reasoning.
+        app(CompanyContext::class)->set($company);
+        $bank = $this->bankAccountModel($company);
+        $vendor = $this->customer($company, ['type' => ContactType::Vendor->value]);
+        $billCategory = $this->categoryAccount($company);
+        Account::factory()->create([
+            'company_id' => $company->id,
+            'code' => '2000',
+            'name' => 'Accounts Payable',
+            'type' => AccountType::Liability->value,
+            'subtype' => AccountSubtype::Payable->value,
+            'is_system' => true,
+        ]);
+
+        $bill = Bill::factory()->create([
+            'company_id' => $company->id,
+            'contact_id' => $vendor->id,
+            'status' => 'draft',
+            'due_date' => '2026-08-01',
+        ]);
+        app(CompanyContext::class)->runFor($company, fn () => BillLine::factory()->create([
+            'bill_id' => $bill->id,
+            'company_id' => $company->id,
+            'category_account_id' => $billCategory->id,
+            'amount' => 22000,
+            'tax_rate_id' => null,
+        ]));
+        app(BillService::class)->receive((string) Str::uuid(), $bill);
+
+        app(BillPaymentService::class)->record((string) Str::uuid(), $bill->fresh(), [
+            'amount' => 10000,
+            'bank_account_id' => $bank->id,
+            'payment_date' => '2026-07-05',
+        ]);
 
         $findings = app(IntegrityChecker::class)->checkCompany($company);
 
