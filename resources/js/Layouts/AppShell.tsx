@@ -99,6 +99,7 @@ function navGroups(can: Record<string, boolean>): NavGroup[] {
             label: 'Reports',
             items: [
                 { label: 'Profit & loss', href: route('reports.profit-and-loss'), ability: 'reports.view' },
+                { label: 'Balance sheet', href: route('reports.balance-sheet'), ability: 'reports.view' },
                 { label: 'Trial balance', href: route('reports.trial-balance'), ability: 'reports.view' },
             ],
         },
