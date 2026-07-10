@@ -140,7 +140,7 @@ class BillReceiveTest extends TestCase
         $this->billLine($bill, $category, ['amount' => 30000, 'tax_rate_id' => null]);
 
         $response = $this->receiveBill($bill);
-        $response->assertRedirect(route('bills.edit', $bill->id));
+        $response->assertRedirect(route('bills.show', $bill->id));
 
         $bill->refresh();
         $this->assertSame(BillStatus::Received, $bill->status);

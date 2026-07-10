@@ -187,7 +187,7 @@ class BillPaymentTest extends TestCase
             'payment_date' => '2026-07-15',
         ]);
 
-        $response->assertRedirect(route('bills.edit', $bill->id));
+        $response->assertRedirect(route('bills.show', $bill->id));
 
         $bill->refresh();
         $this->assertSame(BillStatus::Paid, $bill->status);

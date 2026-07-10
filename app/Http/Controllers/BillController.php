@@ -73,7 +73,11 @@ class BillController extends Controller
     public function index(): Response
     {
         $bills = Bill::query()
-            ->with('contact')
+            // lines.categoryAccount is only for the list row's "categories"
+            // summary (Phase 4 Task 9) — mirrors ExpenseController::index's
+            // own identical enrichment, a read-only display addition, not a
+            // posting-logic change.
+            ->with(['contact', 'lines.categoryAccount:id,name'])
             ->orderByDesc('id')
             ->get()
             ->map(fn (Bill $bill) => $this->billListPayload($bill))
@@ -132,11 +136,13 @@ class BillController extends Controller
      */
     public function edit(string $bill): Response
     {
+        // No `payments` eager load here (unlike show() below) — Phase 4 Task
+        // 9 moved the payments list + Receive/Void/Record-payment actions to
+        // Bills/Show; Edit is purely the draft field/line editor now, so it
+        // has nothing to show a payments table for.
         $model = Bill::query()
             ->with([
                 'lines',
-                'payments' => fn ($query) => $query->orderBy('payment_date')->orderBy('id'),
-                'payments.bankAccount:id,name',
                 'attachments' => fn ($query) => $query->orderByDesc('id'),
             ])
             ->findOrFail($bill);
@@ -145,6 +151,40 @@ class BillController extends Controller
             ['bill' => $this->billEditPayload($model)],
             $this->formOptions(),
         ));
+    }
+
+    /**
+     * The bill detail screen (Phase 4 Task 9) — the canonical landing page
+     * for a RECEIVED bill (receive()/recordPayment()/void()/voidPayment()
+     * below all redirect back here) and also viewable for a draft (Edit
+     * remains the draft EDITOR; Show is the read-only detail + action-bar +
+     * payments-list view for every status, including the relocated
+     * opening-bill banner). Mirrors ExpenseController::show/
+     * InvoiceController::show exactly. $bill is a plain route parameter,
+     * same SubstituteBindings-ordering reasoning as every other action here.
+     */
+    public function show(string $bill): Response
+    {
+        $model = Bill::query()
+            ->with([
+                'contact:id,name',
+                'lines' => fn ($query) => $query->orderBy('id'),
+                'lines.categoryAccount:id,code,name',
+                'lines.taxRate:id,name',
+                'payments' => fn ($query) => $query->orderBy('payment_date')->orderBy('id'),
+                'payments.bankAccount:id,name',
+                'attachments' => fn ($query) => $query->orderByDesc('id'),
+            ])
+            ->findOrFail($bill);
+
+        return Inertia::render('Bills/Show', [
+            'bill' => $this->billShowPayload($model),
+            'bankAccounts' => BankAccount::query()
+                ->where('is_archived', false)
+                ->orderBy('name')
+                ->get(['id', 'name'])
+                ->values(),
+        ]);
     }
 
     public function update(UpdateBillRequest $request, string $bill, AuditLogger $audit): RedirectResponse
@@ -216,7 +256,9 @@ class BillController extends Controller
             throw ValidationException::withMessages(['status' => $e->getMessage()]);
         }
 
-        return redirect()->route('bills.edit', $model->id);
+        // Phase 4 Task 9: Show is now the canonical landing page for a
+        // received bill — mirrors InvoiceController::send -> invoices.show.
+        return redirect()->route('bills.show', $model->id);
     }
 
     /**
@@ -242,7 +284,8 @@ class BillController extends Controller
             throw ValidationException::withMessages(['status' => $e->getMessage()]);
         }
 
-        return redirect()->route('bills.edit', $model->id);
+        // Phase 4 Task 9: mirrors receive() above.
+        return redirect()->route('bills.show', $model->id);
     }
 
     public function destroy(string $bill, AuditLogger $audit, AttachmentService $attachments): RedirectResponse
@@ -305,7 +348,8 @@ class BillController extends Controller
             throw ValidationException::withMessages(['status' => 'This bill has already been voided.']);
         }
 
-        return redirect()->route('bills.edit', $model->id);
+        // Phase 4 Task 9: mirrors receive() above.
+        return redirect()->route('bills.show', $model->id);
     }
 
     /**
@@ -339,7 +383,8 @@ class BillController extends Controller
             throw ValidationException::withMessages(['status' => 'This payment has already been reversed.']);
         }
 
-        return redirect()->route('bills.edit', $model->id);
+        // Phase 4 Task 9: mirrors receive() above.
+        return redirect()->route('bills.show', $model->id);
     }
 
     /**
@@ -364,7 +409,10 @@ class BillController extends Controller
             throw ValidationException::withMessages(['file' => $e->getMessage()]);
         }
 
-        return redirect()->route('bills.edit', $model->id);
+        // Phase 4 Task 9: mirrors ExpenseController::storeAttachment's own
+        // back()-with-fallback reasoning — AttachmentSection now renders
+        // from both Edit and Show.
+        return redirect()->back(fallback: route('bills.show', $model->id));
     }
 
     /**
@@ -398,7 +446,8 @@ class BillController extends Controller
 
         $service->delete($attachmentModel);
 
-        return redirect()->route('bills.edit', $model->id);
+        // Mirrors storeAttachment's own back()-with-fallback reasoning above.
+        return redirect()->back(fallback: route('bills.show', $model->id));
     }
 
     /**
@@ -521,13 +570,6 @@ class BillController extends Controller
                     'rate' => (string) $taxRate->rate,
                 ])
                 ->values(),
-            // For the payment form (Task 5) — mirrors InvoiceController::show's
-            // own bankAccounts payload exactly.
-            'bankAccounts' => BankAccount::query()
-                ->where('is_archived', false)
-                ->orderBy('name')
-                ->get(['id', 'name'])
-                ->values(),
         ];
     }
 
@@ -541,19 +583,45 @@ class BillController extends Controller
             'contact_name' => $bill->contact->name,
             'bill_date' => $bill->bill_date?->toDateString(),
             'due_date' => $bill->due_date?->toDateString(),
+            'notes' => $bill->notes,
+            // Distinct category account names across this bill's lines, in
+            // line order — Bills/Index's "categories" summary column (Phase
+            // 4 Task 9). Mirrors ExpenseController::expenseListPayload's own
+            // identical field; relies on index()'s own lines.categoryAccount
+            // eager load. due_date + status above are what the client
+            // derives its own "Overdue" filter/highlight from (mirrors how
+            // Invoices/Index computes overdue purely from those same two
+            // fields, already present before this task).
+            'categories' => $bill->lines
+                ->pluck('categoryAccount.name')
+                ->filter()
+                ->unique()
+                ->values()
+                ->all(),
             'total' => $bill->total,
             'balance' => $bill->balance,
         ];
     }
 
-    /** @return array<string, mixed> */
-    private function billEditPayload(Bill $bill): array
+    /**
+     * The full detail payload for Bills/Show (Phase 4 Task 9) — every field
+     * the header, line table, payments list, and action-bar gating
+     * (is_opening, overdue) need. Unlike billEditPayload (draft-editor only,
+     * IDs for the editable dropdowns), this enriches each line with its
+     * category account/tax rate DISPLAY info (name, not just id) since Show
+     * never re-renders the editable DocumentLineEditor. Mirrors
+     * InvoiceController::invoiceShowPayload's own shape/reasoning; reuses
+     * paymentsPayload/attachmentsPayload as-is (both already display-shaped).
+     *
+     * @return array<string, mixed>
+     */
+    private function billShowPayload(Bill $bill): array
     {
         return [
             'id' => $bill->id,
             'status' => $bill->status->value,
             'is_opening' => $bill->is_opening,
-            'contact_id' => $bill->contact_id,
+            'contact' => ['id' => $bill->contact->id, 'name' => $bill->contact->name],
             'reference' => $bill->reference,
             'bill_date' => $bill->bill_date?->toDateString(),
             'due_date' => $bill->due_date?->toDateString(),
@@ -563,8 +631,58 @@ class BillController extends Controller
             'total' => $bill->total,
             'amount_paid' => $bill->amount_paid,
             'balance' => $bill->balance,
-            'lines' => $this->linesPayload($bill->lines),
+            'received_at' => $bill->received_at?->toIso8601String(),
+            'voided_at' => $bill->voided_at?->toIso8601String(),
+            'lines' => $this->showLinesPayload($bill->lines),
             'payments' => $this->paymentsPayload($bill->payments),
+            'attachments' => $this->attachmentsPayload($bill->attachments),
+        ];
+    }
+
+    /**
+     * @param  Collection<int, BillLine>  $lines
+     * @return array<int, array<string, mixed>>
+     */
+    private function showLinesPayload(Collection $lines): array
+    {
+        return $lines->map(fn (BillLine $line) => [
+            'id' => $line->id,
+            'description' => $line->description,
+            'category_account' => [
+                'id' => $line->categoryAccount->id,
+                'code' => $line->categoryAccount->code,
+                'name' => $line->categoryAccount->name,
+            ],
+            'tax_rate' => $line->taxRate !== null
+                ? ['id' => $line->taxRate->id, 'name' => $line->taxRate->name]
+                : null,
+            'amount' => $line->amount,
+            'line_tax' => $line->line_tax,
+        ])->values()->all();
+    }
+
+    /**
+     * The draft-editor payload for Bills/Edit. No `is_opening`/`payments`
+     * (unlike billShowPayload) — an is_opening bill is never draft in the
+     * first place, and the payments list moved to Show this same task, so
+     * Edit's own BillData type on the client doesn't carry either field.
+     *
+     * @return array<string, mixed>
+     */
+    private function billEditPayload(Bill $bill): array
+    {
+        return [
+            'id' => $bill->id,
+            'status' => $bill->status->value,
+            'contact_id' => $bill->contact_id,
+            'reference' => $bill->reference,
+            'bill_date' => $bill->bill_date?->toDateString(),
+            'due_date' => $bill->due_date?->toDateString(),
+            'notes' => $bill->notes,
+            'subtotal' => $bill->subtotal,
+            'tax_total' => $bill->tax_total,
+            'total' => $bill->total,
+            'lines' => $this->linesPayload($bill->lines),
             'attachments' => $this->attachmentsPayload($bill->attachments),
         ];
     }

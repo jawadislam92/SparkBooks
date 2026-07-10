@@ -57,7 +57,10 @@ class ExpenseController extends Controller
     public function index(): Response
     {
         $expenses = Expense::query()
-            ->with('contact')
+            // lines.categoryAccount is only for the list row's "categories"
+            // summary (Phase 4 Task 9) — a read-only display enrichment, not
+            // a posting-logic change.
+            ->with(['contact', 'lines.categoryAccount:id,name'])
             ->orderByDesc('id')
             ->get()
             ->map(fn (Expense $expense) => $this->expenseListPayload($expense))
@@ -119,6 +122,38 @@ class ExpenseController extends Controller
             ['expense' => $this->expenseEditPayload($model)],
             $this->formOptions(),
         ));
+    }
+
+    /**
+     * The expense detail screen (Phase 4 Task 9) — the canonical landing
+     * page for a RECORDED expense (record()/void() below both redirect back
+     * here) and also viewable for a draft (Edit remains the draft EDITOR;
+     * Show is the read-only detail + action-bar view for every status).
+     * Mirrors InvoiceController::show exactly, including the gate reasoning:
+     * every role that can see an expense at all (Owner/Admin/Accountant/
+     * Staff hold expenses.draft) may view this page; the narrower actions it
+     * renders (Record/Void) are gated client-side on expenses.record/
+     * expenses.void (shared via HandleInertiaRequests::NAV_ABILITIES), with
+     * both routes independently gated server-side too. $expense is a plain
+     * route parameter, same SubstituteBindings-ordering reasoning as every
+     * other action in this controller.
+     */
+    public function show(string $expense): Response
+    {
+        $model = Expense::query()
+            ->with([
+                'contact:id,name',
+                'bankAccount:id,name',
+                'lines' => fn ($query) => $query->orderBy('id'),
+                'lines.categoryAccount:id,code,name',
+                'lines.taxRate:id,name',
+                'attachments' => fn ($query) => $query->orderByDesc('id'),
+            ])
+            ->findOrFail($expense);
+
+        return Inertia::render('Expenses/Show', [
+            'expense' => $this->expenseShowPayload($model),
+        ]);
     }
 
     public function update(UpdateExpenseRequest $request, string $expense, AuditLogger $audit): RedirectResponse
@@ -194,7 +229,10 @@ class ExpenseController extends Controller
             throw ValidationException::withMessages(['status' => $e->getMessage()]);
         }
 
-        return redirect()->route('expenses.edit', $model->id);
+        // Phase 4 Task 9: Show is now the canonical landing page for a
+        // recorded expense — mirrors InvoiceController::send redirecting to
+        // invoices.show, not invoices.edit.
+        return redirect()->route('expenses.show', $model->id);
     }
 
     public function destroy(string $expense, AuditLogger $audit, AttachmentService $attachments): RedirectResponse
@@ -267,7 +305,9 @@ class ExpenseController extends Controller
             throw ValidationException::withMessages(['status' => 'This expense has already been voided.']);
         }
 
-        return redirect()->route('expenses.edit', $model->id);
+        // Phase 4 Task 9: mirrors record() above — Show is the canonical
+        // landing page, mirrors InvoiceController::void -> invoices.show.
+        return redirect()->route('expenses.show', $model->id);
     }
 
     /**
@@ -293,7 +333,16 @@ class ExpenseController extends Controller
             throw ValidationException::withMessages(['file' => $e->getMessage()]);
         }
 
-        return redirect()->route('expenses.edit', $model->id);
+        // Phase 4 Task 9: AttachmentSection now renders from BOTH Edit (the
+        // draft editor) and Show (the canonical detail page for every
+        // status), so this returns to whichever one the browser's own
+        // Referer header names (back()) rather than a single fixed route —
+        // a same-origin fetch/XHR (what Inertia's router issues) always
+        // carries that header. The fallback (used when no Referer is
+        // present, e.g. a plain HTTP test request) is expenses.show, since
+        // that's the canonical destination for every OTHER whole-document
+        // action in this controller.
+        return redirect()->back(fallback: route('expenses.show', $model->id));
     }
 
     /**
@@ -329,7 +378,8 @@ class ExpenseController extends Controller
 
         $service->delete($attachmentModel);
 
-        return redirect()->route('expenses.edit', $model->id);
+        // Mirrors storeAttachment's own back()-with-fallback reasoning above.
+        return redirect()->back(fallback: route('expenses.show', $model->id));
     }
 
     /**
@@ -466,8 +516,75 @@ class ExpenseController extends Controller
             'status' => $expense->status->value,
             'contact_name' => $expense->contact?->name,
             'expense_date' => $expense->expense_date?->toDateString(),
+            'notes' => $expense->notes,
+            // Distinct category account names across this expense's lines,
+            // in line order — Expenses/Index's "categories" summary column
+            // (Phase 4 Task 9), a read-only display enrichment. Relies on
+            // index()'s own lines.categoryAccount eager load.
+            'categories' => $expense->lines
+                ->pluck('categoryAccount.name')
+                ->filter()
+                ->unique()
+                ->values()
+                ->all(),
             'total' => $expense->total,
         ];
+    }
+
+    /**
+     * The full detail payload for Expenses/Show (Phase 4 Task 9) — every
+     * field the header, line table, and action-bar gating need. Unlike
+     * expenseEditPayload (draft-editor only, IDs for the editable dropdowns),
+     * this covers every status and enriches each line with its category
+     * account/tax rate DISPLAY info (name, not just id) since Show never
+     * re-renders the editable DocumentLineEditor. Mirrors
+     * InvoiceController::invoiceShowPayload's own shape/reasoning.
+     *
+     * @return array<string, mixed>
+     */
+    private function expenseShowPayload(Expense $expense): array
+    {
+        return [
+            'id' => $expense->id,
+            'status' => $expense->status->value,
+            'contact' => $expense->contact !== null
+                ? ['id' => $expense->contact->id, 'name' => $expense->contact->name]
+                : null,
+            'expense_date' => $expense->expense_date?->toDateString(),
+            'bank_account' => $expense->bankAccount !== null
+                ? ['id' => $expense->bankAccount->id, 'name' => $expense->bankAccount->name]
+                : null,
+            'notes' => $expense->notes,
+            'subtotal' => $expense->subtotal,
+            'tax_total' => $expense->tax_total,
+            'total' => $expense->total,
+            'recorded_at' => $expense->recorded_at?->toIso8601String(),
+            'voided_at' => $expense->voided_at?->toIso8601String(),
+            'lines' => $this->showLinesPayload($expense->lines),
+            'attachments' => $this->attachmentsPayload($expense->attachments),
+        ];
+    }
+
+    /**
+     * @param  Collection<int, ExpenseLine>  $lines
+     * @return array<int, array<string, mixed>>
+     */
+    private function showLinesPayload(Collection $lines): array
+    {
+        return $lines->map(fn (ExpenseLine $line) => [
+            'id' => $line->id,
+            'description' => $line->description,
+            'category_account' => [
+                'id' => $line->categoryAccount->id,
+                'code' => $line->categoryAccount->code,
+                'name' => $line->categoryAccount->name,
+            ],
+            'tax_rate' => $line->taxRate !== null
+                ? ['id' => $line->taxRate->id, 'name' => $line->taxRate->name]
+                : null,
+            'amount' => $line->amount,
+            'line_tax' => $line->line_tax,
+        ])->values()->all();
     }
 
     /** @return array<string, mixed> */

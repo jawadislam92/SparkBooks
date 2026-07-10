@@ -153,7 +153,7 @@ class ExpenseVoidTest extends TestCase
             ->where('entry_role', EntryRole::Primary->value)->sole();
 
         $response = $this->voidExpenseHttp($expense);
-        $response->assertRedirect(route('expenses.edit', $expense->id));
+        $response->assertRedirect(route('expenses.show', $expense->id));
 
         $expense->refresh();
         $this->assertSame(ExpenseStatus::Void, $expense->status);

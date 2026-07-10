@@ -146,6 +146,12 @@ Route::middleware(['auth', 'verified', 'company', 'can:expenses.draft'])->group(
     Route::get('/expenses', [ExpenseController::class, 'index'])->name('expenses.index');
     Route::get('/expenses/new', [ExpenseController::class, 'create'])->name('expenses.new');
     Route::post('/expenses', [ExpenseController::class, 'store'])->name('expenses.store');
+    // Registered BEFORE /edit below on purpose — mirrors invoices.show/
+    // invoices.edit's own ordering comment (Phase 3 T11): both are GETs
+    // under /expenses/{expense}/..., Laravel matches in registration order.
+    // Phase 4 Task 9: the canonical landing page for every status, including
+    // draft (Edit remains the draft EDITOR only, as of this task).
+    Route::get('/expenses/{expense}', [ExpenseController::class, 'show'])->name('expenses.show');
     Route::get('/expenses/{expense}/edit', [ExpenseController::class, 'edit'])->name('expenses.edit');
     Route::patch('/expenses/{expense}', [ExpenseController::class, 'update'])->name('expenses.update');
     Route::delete('/expenses/{expense}', [ExpenseController::class, 'destroy'])->name('expenses.destroy');
@@ -180,6 +186,11 @@ Route::middleware(['auth', 'verified', 'company', 'can:bills.draft'])->group(fun
     Route::get('/bills', [BillController::class, 'index'])->name('bills.index');
     Route::get('/bills/new', [BillController::class, 'create'])->name('bills.new');
     Route::post('/bills', [BillController::class, 'store'])->name('bills.store');
+    // Registered BEFORE /edit below — mirrors expenses.show's own ordering
+    // comment above (Phase 4 Task 9). The canonical landing page for every
+    // status, including draft and the opening-bill banner (relocated here
+    // from Edit this same task).
+    Route::get('/bills/{bill}', [BillController::class, 'show'])->name('bills.show');
     Route::get('/bills/{bill}/edit', [BillController::class, 'edit'])->name('bills.edit');
     Route::patch('/bills/{bill}', [BillController::class, 'update'])->name('bills.update');
     Route::delete('/bills/{bill}', [BillController::class, 'destroy'])->name('bills.destroy');

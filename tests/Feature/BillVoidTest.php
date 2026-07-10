@@ -201,7 +201,7 @@ class BillVoidTest extends TestCase
             ->where('entry_role', EntryRole::Primary->value)->sole();
 
         $response = $this->voidBillHttp($bill);
-        $response->assertRedirect(route('bills.edit', $bill->id));
+        $response->assertRedirect(route('bills.show', $bill->id));
 
         $bill->refresh();
         $this->assertSame(BillStatus::Void, $bill->status);

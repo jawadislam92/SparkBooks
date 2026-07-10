@@ -3,7 +3,6 @@ import Field from '@/Components/ui/Field';
 import MoneyText from '@/Components/ui/MoneyText';
 import Sheet from '@/Components/ui/Sheet';
 import AttachmentSection, { AttachmentData } from '@/Components/documents/AttachmentSection';
-import BillPaymentModal, { BillPaymentModalBankAccount } from '@/Components/documents/BillPaymentModal';
 import DocumentLineEditor, {
     CategoryAccountOption,
     DocumentLineRow,
@@ -25,17 +24,6 @@ import {
 } from '@headlessui/react';
 import { FormEventHandler, useMemo, useState } from 'react';
 
-function formatDate(value: string | null): string {
-    if (!value) {
-        return '—';
-    }
-    return new Date(`${value}T00:00:00`).toLocaleDateString('en-PK', {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-    });
-}
-
 interface ContactOption {
     id: number;
     name: string;
@@ -51,16 +39,6 @@ interface BillLineData {
     line_tax: number;
 }
 
-interface BillPaymentData {
-    id: number;
-    payment_date: string;
-    /** Integer minor units, base currency (bills are base-currency-only in this phase). */
-    amount: number;
-    status: 'posted' | 'void' | string;
-    memo: string | null;
-    bank_account: { id: number; name: string } | null;
-}
-
 interface BillData {
     id: number;
     status: string;
@@ -73,10 +51,7 @@ interface BillData {
     subtotal: number;
     tax_total: number;
     total: number;
-    amount_paid: number;
-    balance: number;
     lines: BillLineData[];
-    payments: BillPaymentData[];
     attachments: AttachmentData[];
 }
 
@@ -85,7 +60,6 @@ interface EditPageProps extends PageProps {
     contacts: ContactOption[];
     categoryAccounts: CategoryAccountOption[];
     taxRates: TaxRateOption[];
-    bankAccounts: BillPaymentModalBankAccount[];
 }
 
 const INPUT_CLASSES =
@@ -123,56 +97,6 @@ function DeleteConfirmDialog({ onCancel, onConfirm, processing }: DeleteConfirmD
     );
 }
 
-interface VoidConfirmDialogProps {
-    title: string;
-    description: string;
-    confirmLabel: string;
-    processingLabel: string;
-    onCancel: () => void;
-    onConfirm: () => void;
-    processing: boolean;
-}
-
-/**
- * Minimal void confirmation (Phase 4 Task 6), shared by both "void the whole
- * bill" and "reverse a single payment" — Task 9 polishes this into the full
- * accounting-correct flow (mirrors Components/invoices/VoidDialog, which
- * lists live payments inline; here the payments-first rule is enforced
- * server-side and surfaces as the error banner instead — see BillService::
- * void's BillHasLivePayments guard).
- */
-function VoidConfirmDialog({
-    title,
-    description,
-    confirmLabel,
-    processingLabel,
-    onCancel,
-    onConfirm,
-    processing,
-}: VoidConfirmDialogProps) {
-    return (
-        <Dialog open onClose={onCancel} className="relative z-50">
-            <DialogBackdrop className="fixed inset-0 bg-ink/30" />
-            <div className="fixed inset-0 flex items-center justify-center p-4">
-                <DialogPanel className="w-full max-w-sm rounded-sheet bg-paper-raised p-6 shadow-sheet">
-                    <DialogTitle className="font-display text-lg font-semibold text-ink">
-                        {title}
-                    </DialogTitle>
-                    <p className="mt-2 text-sm text-ink-700">{description}</p>
-                    <div className="mt-5 flex justify-end gap-2">
-                        <Button type="button" variant="quiet" onClick={onCancel}>
-                            Cancel
-                        </Button>
-                        <Button type="button" variant="danger" onClick={onConfirm} disabled={processing}>
-                            {processing ? processingLabel : confirmLabel}
-                        </Button>
-                    </div>
-                </DialogPanel>
-            </div>
-        </Dialog>
-    );
-}
-
 interface BillFormData {
     contact_id: string;
     reference: string;
@@ -181,52 +105,25 @@ interface BillFormData {
     notes: string;
 }
 
-export default function Edit({ bill, contacts, categoryAccounts, taxRates, bankAccounts }: EditPageProps) {
-    const { currentCompany, can, errors: pageErrors } = usePage<PageProps>().props;
+/**
+ * The draft bill editor (Phase 4 Task 2, polished to Invoices/Edit parity in
+ * Task 9). As of Task 9, Receive/Record payment/Void all moved to Bills/Show
+ * (the canonical landing page for a posted bill) — mirrors Invoices/Edit
+ * exactly, which has never carried Send/Record payment/Void of its own
+ * (Invoices/Show has always owned those, since Phase 3 T3/T11). This page is
+ * purely the draft field/line editor: save/delete a draft, plus a read-only
+ * view + "View bill" link once the bill has left draft status. The
+ * opening-bill banner is likewise relocated to Show this same task — an
+ * is_opening bill is never draft in the first place, so it has nothing to
+ * say here anymore.
+ */
+export default function Edit({ bill, contacts, categoryAccounts, taxRates }: EditPageProps) {
+    const { currentCompany, can } = usePage<PageProps>().props;
     const currency = currentCompany?.base_currency ?? 'PKR';
-    const receiveError = (pageErrors as Record<string, string | undefined> | undefined)?.status;
     const isEditing = bill !== null;
     const isDraft = bill === null || bill.status === 'draft';
-    const canReceivePayment = bill !== null && (bill.status === 'received' || bill.status === 'partially_paid');
     const [confirmingDelete, setConfirmingDelete] = useState(false);
     const [deleting, setDeleting] = useState(false);
-    const [receiving, setReceiving] = useState(false);
-    const [paymentModalOpen, setPaymentModalOpen] = useState(false);
-    // is_opening bills (Phase 4 Task 7) are never voidable from here — mirrors
-    // Invoices/Show's identical `canVoid && !invoice.is_opening` gating.
-    // BillService::void refuses them server-side too (BillIsOpening, Task 6);
-    // hiding the button is just the friendlier UX layer on top of that.
-    const isVoidable =
-        bill !== null &&
-        !bill.is_opening &&
-        (bill.status === 'received' || bill.status === 'partially_paid' || bill.status === 'paid');
-    const [confirmingVoid, setConfirmingVoid] = useState(false);
-    const [voiding, setVoiding] = useState(false);
-    // Which payment (by id) is mid-confirm for "reverse this payment" — null
-    // when no payment-void confirmation is open.
-    const [confirmingVoidPaymentId, setConfirmingVoidPaymentId] = useState<number | null>(null);
-    const [voidingPayment, setVoidingPayment] = useState(false);
-
-    // Minimal wiring ahead of the full Show page (Task 9): mirrors how
-    // Invoices/Edit carried its own Send action before Invoices/Show existed
-    // (Phase 3 T3/T11), and Expenses/Edit's Record button (this same Phase 4
-    // task). Posts BillController::receive with a fresh idempotency key per
-    // click and reloads this same page.
-    function receiveBill() {
-        if (!bill) {
-            return;
-        }
-        setReceiving(true);
-        router.post(
-            route('bills.receive', bill.id),
-            {},
-            {
-                headers: { 'X-Idempotency-Key': crypto.randomUUID() },
-                preserveScroll: true,
-                onFinish: () => setReceiving(false),
-            },
-        );
-    }
 
     const [rows, setRows] = useState<DocumentLineRow[]>(() =>
         bill && bill.lines.length > 0
@@ -280,51 +177,6 @@ export default function Edit({ bill, contacts, categoryAccounts, taxRates, bankA
         });
     }
 
-    // Posts BillController::void with a fresh idempotency key per click —
-    // mirrors receiveBill()'s own shape. BillService::void refuses (with a
-    // friendly error banner) while any payment is still posted — the
-    // payments-first rule, spec §6 — so voiding a paid bill means reversing
-    // each payment below first.
-    function confirmVoid() {
-        if (!bill) {
-            return;
-        }
-        setVoiding(true);
-        router.post(
-            route('bills.void', bill.id),
-            {},
-            {
-                headers: { 'X-Idempotency-Key': crypto.randomUUID() },
-                preserveScroll: true,
-                onFinish: () => {
-                    setVoiding(false);
-                    setConfirmingVoid(false);
-                },
-            },
-        );
-    }
-
-    // Posts BillController::voidPayment for one payment — mirrors
-    // confirmVoid()'s own shape.
-    function confirmVoidPayment(paymentId: number) {
-        if (!bill) {
-            return;
-        }
-        setVoidingPayment(true);
-        router.post(
-            route('bills.payments.void', { bill: bill.id, payment: paymentId }),
-            {},
-            {
-                headers: { 'X-Idempotency-Key': crypto.randomUUID() },
-                preserveScroll: true,
-                onFinish: () => {
-                    setVoidingPayment(false);
-                    setConfirmingVoidPaymentId(null);
-                },
-            },
-        );
-    }
-
     const pageTitle = isEditing ? (bill!.reference ?? 'Bill') : 'New bill';
 
     return (
@@ -338,25 +190,12 @@ export default function Edit({ bill, contacts, categoryAccounts, taxRates, bankA
                         be edited here.
                     </span>
                     <Link
-                        href={route('bills.index')}
+                        href={route('bills.show', bill.id)}
                         className="shrink-0 font-medium text-lagoon hover:underline"
                     >
-                        Back to bills &rarr;
+                        View bill &rarr;
                     </Link>
                 </div>
-            )}
-
-            {bill?.is_opening && (
-                <p className="mb-4 rounded-md bg-paper px-3 py-2 text-sm text-ink-700">
-                    Opening bill — manage via opening balances, not here. It can&apos;t be voided from
-                    this screen.
-                </p>
-            )}
-
-            {receiveError && (
-                <p role="alert" className="mb-4 rounded-md bg-clay-50 px-3 py-2 text-sm text-clay">
-                    {receiveError}
-                </p>
             )}
 
             <form onSubmit={submit}>
@@ -377,30 +216,8 @@ export default function Edit({ bill, contacts, categoryAccounts, taxRates, bankA
                                 <Button type="submit" disabled={form.processing}>
                                     {form.processing ? 'Saving…' : 'Save draft'}
                                 </Button>
-                                {isEditing && can['bills.receive'] && (
-                                    <Button type="button" onClick={receiveBill} disabled={receiving}>
-                                        {receiving ? 'Receiving…' : 'Receive bill'}
-                                    </Button>
-                                )}
                             </div>
-                        ) : (
-                            <div className="flex items-center gap-2">
-                                {isVoidable && can['bills.void'] && (
-                                    <Button
-                                        type="button"
-                                        variant="danger"
-                                        onClick={() => setConfirmingVoid(true)}
-                                    >
-                                        Void bill
-                                    </Button>
-                                )}
-                                {canReceivePayment && can['payments.record'] && (
-                                    <Button type="button" onClick={() => setPaymentModalOpen(true)}>
-                                        Record payment
-                                    </Button>
-                                )}
-                            </div>
-                        )
+                        ) : undefined
                     }
                 >
                     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -518,18 +335,6 @@ export default function Edit({ bill, contacts, categoryAccounts, taxRates, bankA
                                 size="md"
                             />
                         </div>
-                        {!isDraft && bill && (
-                            <>
-                                <div className="flex w-full max-w-xs items-center justify-between text-sm text-ink-700">
-                                    <span>Paid</span>
-                                    <MoneyText minor={bill.amount_paid} currency={currency} size="sm" />
-                                </div>
-                                <div className="flex w-full max-w-xs items-center justify-between text-sm font-semibold text-ink">
-                                    <span>Balance</span>
-                                    <MoneyText minor={bill.balance} currency={currency} size="sm" />
-                                </div>
-                            </>
-                        )}
                     </div>
 
                     <Field label="Notes" htmlFor="bill-notes" error={errors.notes} className="mt-6">
@@ -545,65 +350,6 @@ export default function Edit({ bill, contacts, categoryAccounts, taxRates, bankA
                     </Field>
                 </Sheet>
             </form>
-
-            {!isDraft && bill && (
-                <Sheet title="Payments" className="mt-6">
-                    {bill.payments.length === 0 ? (
-                        <p className="py-8 text-center text-sm text-ink-700">No payments recorded yet.</p>
-                    ) : (
-                        <table className="w-full border-collapse text-left text-sm">
-                            <thead>
-                                <tr className="border-b border-rule text-xs font-medium uppercase tracking-wide text-ink-700">
-                                    <th scope="col" className="py-2 pr-3 font-medium">Date</th>
-                                    <th scope="col" className="py-2 pr-3 font-medium">Account</th>
-                                    <th scope="col" className="py-2 pr-3 font-medium">Status</th>
-                                    <th scope="col" className="py-2 pr-3 text-right font-medium">Amount</th>
-                                    {can['bills.void'] && <th scope="col" className="py-2 pl-3" />}
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {bill.payments.map((payment) => (
-                                    <tr key={payment.id} className="border-b border-rule last:border-b-0">
-                                        <td className="py-3 pr-3 align-top text-ink-700">
-                                            {formatDate(payment.payment_date)}
-                                        </td>
-                                        <td className="py-3 pr-3 align-top">
-                                            {payment.bank_account?.name ?? '—'}
-                                        </td>
-                                        <td className="py-3 pr-3 align-top">
-                                            {payment.status === 'void' ? (
-                                                <span className="inline-block rounded-full bg-clay-50 px-2 py-0.5 text-xs font-medium text-clay">
-                                                    Reversed
-                                                </span>
-                                            ) : (
-                                                <span className="inline-block rounded-full bg-spark-50 px-2 py-0.5 text-xs font-medium text-ink">
-                                                    Posted
-                                                </span>
-                                            )}
-                                        </td>
-                                        <td className="py-3 pr-3 align-top text-right">
-                                            <MoneyText minor={payment.amount} currency={currency} size="sm" />
-                                        </td>
-                                        {can['bills.void'] && (
-                                            <td className="py-3 pl-3 align-top text-right">
-                                                {payment.status !== 'void' && (
-                                                    <Button
-                                                        type="button"
-                                                        variant="quiet"
-                                                        onClick={() => setConfirmingVoidPaymentId(payment.id)}
-                                                    >
-                                                        Reverse
-                                                    </Button>
-                                                )}
-                                            </td>
-                                        )}
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    )}
-                </Sheet>
-            )}
 
             {isEditing && (
                 <Sheet className="mt-6">
@@ -623,39 +369,6 @@ export default function Edit({ bill, contacts, categoryAccounts, taxRates, bankA
                     onCancel={() => setConfirmingDelete(false)}
                     onConfirm={confirmDelete}
                     processing={deleting}
-                />
-            )}
-
-            {confirmingVoid && (
-                <VoidConfirmDialog
-                    title="Void this bill?"
-                    description="This posts a reversing entry that clears the vendor's outstanding balance on the books. The bill stays visible, marked Void, but this cannot be undone — to receive it again you'll need a new bill. If any payment is still posted, voiding is refused until you reverse it below first."
-                    confirmLabel="Void bill"
-                    processingLabel="Voiding…"
-                    onCancel={() => setConfirmingVoid(false)}
-                    onConfirm={confirmVoid}
-                    processing={voiding}
-                />
-            )}
-
-            {confirmingVoidPaymentId !== null && (
-                <VoidConfirmDialog
-                    title="Reverse this payment?"
-                    description="This posts a reversing entry that undoes the payment and reopens the bill's balance by that amount. This cannot be undone."
-                    confirmLabel="Reverse payment"
-                    processingLabel="Reversing…"
-                    onCancel={() => setConfirmingVoidPaymentId(null)}
-                    onConfirm={() => confirmVoidPayment(confirmingVoidPaymentId)}
-                    processing={voidingPayment}
-                />
-            )}
-
-            {paymentModalOpen && bill && (
-                <BillPaymentModal
-                    bill={{ id: bill.id, reference: bill.reference, balance: bill.balance }}
-                    bankAccounts={bankAccounts}
-                    currency={currency}
-                    onClose={() => setPaymentModalOpen(false)}
                 />
             )}
         </AppShell>

@@ -145,11 +145,17 @@ class AttachmentTest extends TestCase
             : route('bills.attachments.destroy', [$model->id, $attachment->id]);
     }
 
-    private function editRoute(Expense|Bill $model): string
+    /**
+     * Phase 4 Task 9: storeAttachment/destroyAttachment now redirect via
+     * back()-with-fallback (AttachmentSection renders from both Edit and
+     * Show), and a plain HTTP test request carries no Referer header, so
+     * every assertion below lands on the FALLBACK — the *.show route.
+     */
+    private function showRoute(Expense|Bill $model): string
     {
         return $model instanceof Expense
-            ? route('expenses.edit', $model->id)
-            : route('bills.edit', $model->id);
+            ? route('expenses.show', $model->id)
+            : route('bills.show', $model->id);
     }
 
     // ---------------------------------------------------------------
@@ -287,7 +293,7 @@ class AttachmentTest extends TestCase
     {
         $response = $this->post($this->storeRoute($model), ['file' => $this->pdfFile('my receipt.pdf')]);
 
-        $response->assertRedirect($this->editRoute($model));
+        $response->assertRedirect($this->showRoute($model));
 
         $attachment = Attachment::query()->sole();
         $this->assertSame($expectedType, $attachment->attachable_type);
@@ -334,7 +340,7 @@ class AttachmentTest extends TestCase
     {
         $response = $this->post($this->storeRoute($model), ['file' => $this->jpgFile('scan.jpg')]);
 
-        $response->assertRedirect($this->editRoute($model));
+        $response->assertRedirect($this->showRoute($model));
 
         $attachment = Attachment::query()->sole();
         $this->assertSame('image/jpeg', $attachment->mime);
@@ -563,7 +569,7 @@ class AttachmentTest extends TestCase
             $diskPath = $attachment->disk_path;
 
             $this->delete($this->destroyRoute($model, $attachment))
-                ->assertRedirect($this->editRoute($model));
+                ->assertRedirect($this->showRoute($model));
 
             $this->assertSame(0, Attachment::query()->count());
             Storage::disk('local')->assertMissing($diskPath);
@@ -623,7 +629,7 @@ class AttachmentTest extends TestCase
     private function assertStaffCanUpload(Expense|Bill $model): void
     {
         $this->post($this->storeRoute($model), ['file' => $this->pdfFile()])
-            ->assertRedirect($this->editRoute($model));
+            ->assertRedirect($this->showRoute($model));
 
         $this->assertSame(1, Attachment::query()->count());
     }
@@ -639,7 +645,7 @@ class AttachmentTest extends TestCase
         $expense = $this->recordedExpense($company);
 
         $this->post($this->storeRoute($expense), ['file' => $this->pdfFile()])
-            ->assertRedirect($this->editRoute($expense));
+            ->assertRedirect($this->showRoute($expense));
 
         $this->assertSame(1, Attachment::query()->count());
     }
@@ -652,7 +658,7 @@ class AttachmentTest extends TestCase
         $bill = $this->receivedBill($company, $contact);
 
         $this->post($this->storeRoute($bill), ['file' => $this->pdfFile()])
-            ->assertRedirect($this->editRoute($bill));
+            ->assertRedirect($this->showRoute($bill));
 
         $this->assertSame(1, Attachment::query()->count());
     }

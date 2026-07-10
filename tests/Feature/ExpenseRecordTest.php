@@ -136,7 +136,7 @@ class ExpenseRecordTest extends TestCase
         $this->expenseLine($expense, $categoryB, ['amount' => 45000, 'tax_rate_id' => null]);
 
         $response = $this->recordExpense($expense);
-        $response->assertRedirect(route('expenses.edit', $expense->id));
+        $response->assertRedirect(route('expenses.show', $expense->id));
 
         $expense->refresh();
         $this->assertSame(ExpenseStatus::Recorded, $expense->status);

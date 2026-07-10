@@ -3,6 +3,7 @@ import MoneyText from '@/Components/ui/MoneyText';
 import Sheet from '@/Components/ui/Sheet';
 import StatusChip, { EXPENSE_STATUS_LABELS } from '@/Components/documents/StatusChip';
 import AppShell from '@/Layouts/AppShell';
+import { summarizeList } from '@/lib/summarize';
 import { PageProps } from '@/types';
 import { Head, router, usePage } from '@inertiajs/react';
 import { useMemo, useState } from 'react';
@@ -12,6 +13,8 @@ interface ExpenseRow {
     status: string;
     contact_name: string | null;
     expense_date: string | null;
+    notes: string | null;
+    categories: string[];
     /** Integer minor units. */
     total: number;
 }
@@ -29,6 +32,9 @@ const STATUS_FILTER_OPTIONS: { value: StatusFilter; label: string }[] = [
     { value: 'void', label: 'Void' },
 ];
 
+const SEARCH_INPUT_CLASSES =
+    'h-10 w-64 rounded-md border border-rule bg-paper-raised px-3 text-sm text-ink placeholder:text-ink-700/50 transition duration-[120ms] ease-out motion-reduce:transition-none focus:outline-none focus:ring-2 focus:ring-spark';
+
 function formatDate(value: string | null): string {
     if (!value) {
         return '';
@@ -40,45 +46,68 @@ function formatDate(value: string | null): string {
     });
 }
 
+/** Matches a row's payee name or notes against the search text, case-insensitively. */
+function matchesSearch(expense: ExpenseRow, search: string): boolean {
+    if (search === '') {
+        return true;
+    }
+    const needle = search.toLowerCase();
+    return (
+        (expense.contact_name?.toLowerCase().includes(needle) ?? false) ||
+        (expense.notes?.toLowerCase().includes(needle) ?? false)
+    );
+}
+
 export default function Index({ expenses }: IndexPageProps) {
     const { currentCompany } = usePage<PageProps>().props;
     const currency = currentCompany?.base_currency ?? 'PKR';
     const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+    const [search, setSearch] = useState('');
 
     const visibleExpenses = useMemo(
         () =>
-            statusFilter === 'all'
-                ? expenses
-                : expenses.filter((expense) => expense.status === statusFilter),
-        [expenses, statusFilter],
+            expenses
+                .filter((expense) => statusFilter === 'all' || expense.status === statusFilter)
+                .filter((expense) => matchesSearch(expense, search)),
+        [expenses, statusFilter, search],
     );
 
     return (
         <AppShell title="Expenses">
             <Head title="Expenses" />
 
-            <div className="mb-4 flex items-center justify-between gap-4">
-                <div
-                    role="group"
-                    aria-label="Filter by status"
-                    className="inline-flex flex-wrap rounded-lg border border-rule bg-paper-raised p-0.5"
-                >
-                    {STATUS_FILTER_OPTIONS.map((option) => (
-                        <button
-                            key={option.value}
-                            type="button"
-                            aria-pressed={statusFilter === option.value}
-                            onClick={() => setStatusFilter(option.value)}
-                            className={
-                                `rounded-md px-3 py-1 text-sm font-medium transition duration-[120ms] ease-out motion-reduce:transition-none focus:outline-none focus-visible:ring-2 focus-visible:ring-spark ` +
-                                (statusFilter === option.value
-                                    ? 'bg-ink text-white'
-                                    : 'text-ink-700 hover:bg-paper')
-                            }
-                        >
-                            {option.label}
-                        </button>
-                    ))}
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-4">
+                <div className="flex flex-wrap items-center gap-3">
+                    <div
+                        role="group"
+                        aria-label="Filter by status"
+                        className="inline-flex flex-wrap rounded-lg border border-rule bg-paper-raised p-0.5"
+                    >
+                        {STATUS_FILTER_OPTIONS.map((option) => (
+                            <button
+                                key={option.value}
+                                type="button"
+                                aria-pressed={statusFilter === option.value}
+                                onClick={() => setStatusFilter(option.value)}
+                                className={
+                                    `rounded-md px-3 py-1 text-sm font-medium transition duration-[120ms] ease-out motion-reduce:transition-none focus:outline-none focus-visible:ring-2 focus-visible:ring-spark ` +
+                                    (statusFilter === option.value
+                                        ? 'bg-ink text-white'
+                                        : 'text-ink-700 hover:bg-paper')
+                                }
+                            >
+                                {option.label}
+                            </button>
+                        ))}
+                    </div>
+                    <input
+                        type="search"
+                        value={search}
+                        onChange={(event) => setSearch(event.target.value)}
+                        placeholder="Search payee or notes"
+                        aria-label="Search expenses"
+                        className={SEARCH_INPUT_CLASSES}
+                    />
                 </div>
                 <Button type="button" onClick={() => router.visit(route('expenses.new'))}>
                     New expense
@@ -87,11 +116,18 @@ export default function Index({ expenses }: IndexPageProps) {
 
             <Sheet>
                 {visibleExpenses.length === 0 ? (
-                    <p className="py-8 text-center text-sm text-ink-700">
-                        {expenses.length === 0
-                            ? 'No expenses yet.'
-                            : 'No expenses match this filter.'}
-                    </p>
+                    <div className="py-8 text-center text-sm text-ink-700">
+                        {expenses.length === 0 ? (
+                            <div className="flex flex-col items-center gap-3">
+                                <p>No expenses yet.</p>
+                                <Button type="button" onClick={() => router.visit(route('expenses.new'))}>
+                                    New expense
+                                </Button>
+                            </div>
+                        ) : (
+                            <p>No expenses match this filter.</p>
+                        )}
+                    </div>
                 ) : (
                     <table className="w-full border-collapse text-left text-sm">
                         <thead>
@@ -101,6 +137,9 @@ export default function Index({ expenses }: IndexPageProps) {
                                 </th>
                                 <th scope="col" className="py-2 pr-3 font-medium">
                                     Date
+                                </th>
+                                <th scope="col" className="py-2 pr-3 font-medium">
+                                    Categories
                                 </th>
                                 <th scope="col" className="py-2 pr-3 font-medium">
                                     Status
@@ -116,11 +155,11 @@ export default function Index({ expenses }: IndexPageProps) {
                                     key={expense.id}
                                     tabIndex={0}
                                     role="button"
-                                    onClick={() => router.visit(route('expenses.edit', expense.id))}
+                                    onClick={() => router.visit(route('expenses.show', expense.id))}
                                     onKeyDown={(event) => {
                                         if (event.key === 'Enter' || event.key === ' ') {
                                             event.preventDefault();
-                                            router.visit(route('expenses.edit', expense.id));
+                                            router.visit(route('expenses.show', expense.id));
                                         }
                                     }}
                                     className="cursor-pointer border-b border-rule text-ink transition duration-[120ms] ease-out motion-reduce:transition-none hover:bg-paper focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-spark last:border-b-0"
@@ -132,6 +171,9 @@ export default function Index({ expenses }: IndexPageProps) {
                                     </td>
                                     <td className="py-3 pr-3 align-top text-ink-700">
                                         {formatDate(expense.expense_date)}
+                                    </td>
+                                    <td className="py-3 pr-3 align-top text-ink-700">
+                                        {summarizeList(expense.categories)}
                                     </td>
                                     <td className="py-3 pr-3 align-top">
                                         <StatusChip status={expense.status} labels={EXPENSE_STATUS_LABELS} />
