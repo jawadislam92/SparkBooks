@@ -37,6 +37,19 @@ class HandleInertiaRequests extends Middleware
         'invoices.send',
         'payments.record',
         'invoices.void',
+        // Phase 4 Task 2: draft-only expense/bill CRUD nav links.
+        'expenses.draft',
+        'bills.draft',
+        // Phase 4 Task 3/4: Expenses/Edit's Record button and Bills/Edit's
+        // Receive button gate on these — narrower than expenses.draft/
+        // bills.draft (Staff holds neither), mirroring invoices.send above.
+        'expenses.record',
+        'bills.receive',
+        // Phase 4 Task 6: Expenses/Edit's and Bills/Edit's Void buttons (and,
+        // for Bills, the per-payment "Reverse" action) gate on these —
+        // mirrors invoices.void above.
+        'expenses.void',
+        'bills.void',
         'contacts.manage',
         'items.manage',
         'accounts.manage',

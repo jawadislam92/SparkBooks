@@ -15,6 +15,7 @@ class OpeningDocument extends Model
         'opening_balance_run_id',
         'contact_id',
         'invoice_id',
+        'bill_id',
         'kind',
         'reference',
         'original_date',
@@ -51,5 +52,17 @@ class OpeningDocument extends Model
     public function invoice(): BelongsTo
     {
         return $this->belongsTo(Invoice::class);
+    }
+
+    /**
+     * Null for a receivable (customer) document, and for a payable document
+     * created before Task 7 that hasn't been reconciled yet (see
+     * ReconcileOpeningBills) — set for every payable document
+     * OpeningBalanceService::apply() creates going forward. Exact AP-side
+     * mirror of invoice() above.
+     */
+    public function bill(): BelongsTo
+    {
+        return $this->belongsTo(Bill::class);
     }
 }

@@ -164,9 +164,14 @@ export function multiplyMinorByQuantity(minor: number, quantityText: string): nu
 /**
  * Mirrors Money::taxMinorUnits: tax on a net line amount (minor units) at a
  * percent rate string (up to 4dp, e.g. "18", "18.5"), half-up to the nearest
- * minor unit. Returns 0 for a rate that doesn't parse (the invoice line
- * editor only ever passes rates straight from the server-provided tax rate
- * list, so this is a defensive fallback, not an expected path).
+ * minor unit. Returns 0 for a rate that doesn't parse (every caller — the
+ * invoice line editor AND, as of Phase 4 T2, the shared
+ * Components/documents/DocumentLineEditor used by Expenses/Bills — only ever
+ * passes rates straight from the server-provided tax rate list, so this is a
+ * defensive fallback, not an expected path). Expense/bill lines are
+ * amount-based (spec §7.8, no qty x price), so DocumentLineEditor calls this
+ * directly on the typed amount rather than going through
+ * multiplyMinorByQuantity first.
  */
 export function computeLineTax(lineSubtotalMinor: number, ratePercent: string): number {
     const scaledRate = scaleDecimalToInteger(ratePercent, 4);

@@ -12,8 +12,13 @@ use App\Enums\Role;
 use App\Models\Account;
 use App\Models\ActivityLog;
 use App\Models\BankAccount;
+use App\Models\Bill;
+use App\Models\BillLine;
+use App\Models\BillPayment;
 use App\Models\Company;
 use App\Models\Contact;
+use App\Models\Expense;
+use App\Models\ExpenseLine;
 use App\Models\IntegrityRun;
 use App\Models\Invoice;
 use App\Models\InvoiceLine;
@@ -22,6 +27,9 @@ use App\Models\JournalEntry;
 use App\Models\JournalLine;
 use App\Models\ManualJournal;
 use App\Models\User;
+use App\Services\BillPaymentService;
+use App\Services\BillService;
+use App\Services\ExpenseService;
 use App\Services\IntegrityChecker;
 use App\Services\LedgerService;
 use App\Services\OpeningBalanceService;
@@ -476,16 +484,41 @@ class IntegrityCheckerTest extends TestCase
         $this->assertOrphanDetectedForSourceType('opening_balance_run');
     }
 
+    public function test_orphaned_expense_source_entry_produces_finding(): void
+    {
+        $this->assertOrphanDetectedForSourceType('expense');
+    }
+
+    public function test_orphaned_bill_source_entry_produces_finding(): void
+    {
+        $this->assertOrphanDetectedForSourceType('bill');
+    }
+
+    /**
+     * Phase 4 T5: source coverage for 'bill_payment' — the real document
+     * type that finally landed behind the 'bill_payment' stand-in the
+     * unrecognized-source test below used to use.
+     */
+    public function test_orphaned_bill_payment_source_entry_produces_finding(): void
+    {
+        $this->assertOrphanDetectedForSourceType('bill_payment');
+    }
+
     /**
      * The point of the whole extension: a source_type this checker has never
-     * heard of (a stand-in for some future Phase 4+ document type someone
-     * forgets to register in IntegrityChecker::SOURCE_TABLES — 'bill' is a
-     * genuine example: Phase 4 expenses/bills haven't landed yet as of this
-     * task) must fail loud — a distinct 'unrecognized_source' finding —
-     * rather than being silently skipped by the per-source-type loop.
-     * ('invoice' itself is no longer a valid stand-in here — Task 12
-     * registers it in SOURCE_TABLES, see the invoice/invoice_payment orphan
-     * tests below.)
+     * heard of (a stand-in for some future document type someone forgets to
+     * register in IntegrityChecker::SOURCE_TABLES) must fail loud — a
+     * distinct 'unrecognized_source' finding — rather than being silently
+     * skipped by the per-source-type loop. Uses a made-up literal
+     * ('nonexistent_source') rather than a real-but-not-yet-registered
+     * source type: 'invoice' was the original stand-in until Task 12
+     * registered it, 'bill' was the stand-in from Task 12 through Phase 4 T2
+     * until Phase 4 T4 registered it, and 'bill_payment' was the stand-in
+     * from Phase 4 T4 until THIS task registered it too (see the
+     * bill_payment orphan test above) — the pattern of borrowing the next
+     * unshipped feature as a placeholder kept forcing this test to be
+     * rewritten every time that feature landed, so this test now depends on
+     * nothing ever being registered here.
      */
     public function test_unknown_source_type_produces_unrecognized_source_finding(): void
     {
@@ -495,7 +528,7 @@ class IntegrityCheckerTest extends TestCase
             'company_id' => $company->id,
             'entry_date' => '2026-07-01',
             'memo' => 'Future source type (raw insert)',
-            'source_type' => 'bill',
+            'source_type' => 'nonexistent_source',
             'source_id' => 1,
             'entry_role' => 'primary',
             'created_by' => null,
@@ -507,7 +540,7 @@ class IntegrityCheckerTest extends TestCase
         $this->assertContains('unrecognized_source', $checks);
         $this->assertNotContains('orphan_entries', $checks);
         $finding = collect($findings)->firstWhere('check', 'unrecognized_source');
-        $this->assertStringContainsString('bill', $finding['detail']);
+        $this->assertStringContainsString('nonexistent_source', $finding['detail']);
     }
 
     /**
@@ -676,7 +709,7 @@ class IntegrityCheckerTest extends TestCase
         $this->assertNotContains('orphan_entries', $checks);
         $this->assertNotContains('unrecognized_source', $checks);
         // A voided invoice is fully excluded from check (c) too (see
-        // POSTED_INVOICE_STATUSES) — nothing left to flag at all.
+        // postedInvoiceStatuses()) — nothing left to flag at all.
         $this->assertSame([], $findings);
     }
 
@@ -714,6 +747,653 @@ class IntegrityCheckerTest extends TestCase
         // The invoice is back to Sent/fully-unpaid — balance and base AR
         // both reconcile exactly as if the payment never happened.
         $this->assertSame([], $findings);
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 4 T3/T4: source coverage for 'expense' / 'bill' — the real
+    // documents that finally landed behind the 'bill' stand-in the
+    // unrecognized-source test above used to use. Mirrors the Task 12
+    // invoice/invoice_payment section: post a genuine P4/P5 expense and a
+    // genuine P6/P6t bill straight through their real services, and prove
+    // IntegrityChecker sees exactly what those services posted — no
+    // orphan/unrecognized false positive now that SOURCE_TABLES registers
+    // both.
+    // ---------------------------------------------------------------
+
+    /** @param array<string, mixed> $overrides */
+    private function categoryAccount(Company $company, array $overrides = []): Account
+    {
+        return Account::factory()->create(array_merge([
+            'company_id' => $company->id,
+            'code' => '5000',
+            'type' => AccountType::Expense->value,
+            'subtype' => AccountSubtype::OperatingExpense->value,
+        ], $overrides));
+    }
+
+    // ---------------------------------------------------------------
+    // Helpers — Phase 4 T10 (bill/bill_payment coverage + AP reconciliation,
+    // the exact AP-side mirror of Task 12/13's invoice helpers above). Bill/
+    // BillPayment/Expense round-trip through their REAL services
+    // (BillService/BillPaymentService), called directly (not via HTTP) —
+    // mirrors test_clean_company_with_a_recorded_expense_and_a_received_bill_yields_no_findings's
+    // own established pattern for this exact document pair.
+    // ---------------------------------------------------------------
+
+    /** @param array<string, mixed> $overrides */
+    private function vendor(Company $company, array $overrides = []): Contact
+    {
+        return $this->customer($company, array_merge(['type' => ContactType::Vendor->value], $overrides));
+    }
+
+    /** Seeds the 2000 AP account BillService/BillPaymentService resolve by code. */
+    private function apAccount(Company $company): Account
+    {
+        return Account::factory()->create([
+            'company_id' => $company->id,
+            'code' => '2000',
+            'name' => 'Accounts Payable',
+            'type' => AccountType::Liability->value,
+            'subtype' => AccountSubtype::Payable->value,
+            'is_system' => true,
+        ]);
+    }
+
+    /**
+     * @param  array<string, mixed>  $overrides
+     */
+    private function draftBill(Company $company, Contact $vendor, array $overrides = []): Bill
+    {
+        return Bill::factory()->create(array_merge([
+            'company_id' => $company->id,
+            'contact_id' => $vendor->id,
+            'status' => 'draft',
+            'due_date' => '2026-08-01',
+        ], $overrides));
+    }
+
+    /**
+     * Wrapped in CompanyContext::runFor — BillLine::booted()'s freeze guard
+     * needs a live CompanyContext on every create (mirrors invoiceLine()).
+     *
+     * @param  array<string, mixed>  $overrides
+     */
+    private function billLine(Bill $bill, Account $categoryAccount, array $overrides = []): BillLine
+    {
+        $company = Company::query()->findOrFail($bill->company_id);
+
+        return app(CompanyContext::class)->runFor($company, fn () => BillLine::factory()->create(array_merge([
+            'bill_id' => $bill->id,
+            'company_id' => $bill->company_id,
+            'category_account_id' => $categoryAccount->id,
+        ], $overrides)));
+    }
+
+    private function receiveBill(Company $company, Bill $bill): Bill
+    {
+        app(CompanyContext::class)->set($company);
+
+        return app(BillService::class)->receive((string) Str::uuid(), $bill);
+    }
+
+    /** @param array<string, mixed> $data */
+    private function payBill(Company $company, Bill $bill, array $data): BillPayment
+    {
+        app(CompanyContext::class)->set($company);
+
+        return app(BillPaymentService::class)->record((string) Str::uuid(), $bill, $data);
+    }
+
+    private function voidBill(Company $company, Bill $bill): Bill
+    {
+        app(CompanyContext::class)->set($company);
+
+        return app(BillService::class)->void((string) Str::uuid(), $bill);
+    }
+
+    /**
+     * Posts TWO vendor_lines for the SAME vendor in one apply() call — the
+     * exact AP-side mirror of setUpContactWithTwoOpeningInvoices() above,
+     * same reasoning: neither OpeningBalanceService nor
+     * StoreOpeningBalanceRequest dedups vendor_lines by contact, and the UI
+     * freely allows multiple rows per vendor (a realistic cutover: a vendor
+     * with two old unpaid bills).
+     *
+     * @return array{0: Contact, 1: Account, 2: BankAccount, 3: list<Bill>}
+     */
+    private function setUpVendorWithTwoOpeningBills(Company $company): array
+    {
+        $vendor = $this->vendor($company);
+        $ap = $this->apAccount($company);
+        $this->equityAccount($company, ['code' => '3100', 'name' => 'Opening Balance Equity']);
+        $bank = $this->bankAccountModel($company);
+
+        app(CompanyContext::class)->set($company);
+        app(OpeningBalanceService::class)->apply((string) Str::uuid(), [
+            'books_start_date' => '2026-06-01',
+            'bank_lines' => [],
+            'vendor_lines' => [
+                ['contact_id' => $vendor->id, 'reference' => 'Old bill 1', 'original_date' => '2026-04-01', 'due_date' => '2026-05-01', 'amount' => 300000],
+                ['contact_id' => $vendor->id, 'reference' => 'Old bill 2', 'original_date' => '2026-04-15', 'due_date' => '2026-05-15', 'amount' => 200000],
+            ],
+        ]);
+
+        $bills = Bill::query()->where('is_opening', true)->orderBy('id')->get()->all();
+        $this->assertCount(2, $bills);
+
+        return [$vendor, $ap, $bank, $bills];
+    }
+
+    public function test_clean_company_with_a_recorded_expense_and_a_received_bill_yields_no_findings(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        // ExpenseService/BillService are called directly below (not via
+        // HTTP), so CompanyContext needs to be set explicitly — mirrors
+        // test_clean_multi_source_company_with_reversals_yields_no_findings'
+        // own identical reasoning for TransferService/OtherReceiptService.
+        app(CompanyContext::class)->set($company);
+        $bank = $this->bankAccountModel($company);
+        $vendor = $this->customer($company, ['type' => ContactType::Vendor->value]);
+        $expenseCategory = $this->categoryAccount($company, ['code' => '5000']);
+        $billCategory = $this->categoryAccount($company, ['code' => '5010']);
+        $this->taxPayableAccount($company);
+        // Seeds the 2000 AP account BillService::p6Lines resolves by code —
+        // not otherwise referenced below.
+        Account::factory()->create([
+            'company_id' => $company->id,
+            'code' => '2000',
+            'name' => 'Accounts Payable',
+            'type' => AccountType::Liability->value,
+            'subtype' => AccountSubtype::Payable->value,
+            'is_system' => true,
+        ]);
+
+        $expense = Expense::factory()->create([
+            'company_id' => $company->id,
+            'status' => 'draft',
+            'bank_account_id' => $bank->id,
+        ]);
+        app(CompanyContext::class)->runFor($company, fn () => ExpenseLine::factory()->create([
+            'expense_id' => $expense->id,
+            'company_id' => $company->id,
+            'category_account_id' => $expenseCategory->id,
+            'amount' => 15000,
+            'tax_rate_id' => null,
+        ]));
+        app(ExpenseService::class)->record((string) Str::uuid(), $expense);
+
+        $bill = Bill::factory()->create([
+            'company_id' => $company->id,
+            'contact_id' => $vendor->id,
+            'status' => 'draft',
+            'due_date' => '2026-08-01',
+        ]);
+        app(CompanyContext::class)->runFor($company, fn () => BillLine::factory()->create([
+            'bill_id' => $bill->id,
+            'company_id' => $company->id,
+            'category_account_id' => $billCategory->id,
+            'amount' => 22000,
+            'tax_rate_id' => null,
+        ]));
+        app(BillService::class)->receive((string) Str::uuid(), $bill);
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+
+        $this->assertSame([], $findings);
+    }
+
+    /**
+     * Phase 4 T5: round-trip coverage for 'bill_payment' — a genuine P7
+     * posting via BillPaymentService (not a hand-rolled ledger row), proving
+     * IntegrityChecker sees exactly what that service posts: no orphan/
+     * unrecognized-source false positive now that SOURCE_TABLES registers
+     * 'bill_payment'. Mirrors test_clean_company_with_a_recorded_expense_and_a_received_bill_yields_no_findings
+     * one document-lifecycle stage further (received -> partially paid).
+     */
+    public function test_clean_company_with_a_received_bill_and_a_recorded_payment_yields_no_findings(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        // BillService/BillPaymentService are called directly below (not via
+        // HTTP), so CompanyContext needs to be set explicitly — mirrors
+        // test_clean_company_with_a_recorded_expense_and_a_received_bill_yields_no_findings's
+        // own identical reasoning.
+        app(CompanyContext::class)->set($company);
+        $bank = $this->bankAccountModel($company);
+        $vendor = $this->customer($company, ['type' => ContactType::Vendor->value]);
+        $billCategory = $this->categoryAccount($company);
+        Account::factory()->create([
+            'company_id' => $company->id,
+            'code' => '2000',
+            'name' => 'Accounts Payable',
+            'type' => AccountType::Liability->value,
+            'subtype' => AccountSubtype::Payable->value,
+            'is_system' => true,
+        ]);
+
+        $bill = Bill::factory()->create([
+            'company_id' => $company->id,
+            'contact_id' => $vendor->id,
+            'status' => 'draft',
+            'due_date' => '2026-08-01',
+        ]);
+        app(CompanyContext::class)->runFor($company, fn () => BillLine::factory()->create([
+            'bill_id' => $bill->id,
+            'company_id' => $company->id,
+            'category_account_id' => $billCategory->id,
+            'amount' => 22000,
+            'tax_rate_id' => null,
+        ]));
+        app(BillService::class)->receive((string) Str::uuid(), $bill);
+
+        app(BillPaymentService::class)->record((string) Str::uuid(), $bill->fresh(), [
+            'amount' => 10000,
+            'bank_account_id' => $bank->id,
+            'payment_date' => '2026-07-05',
+        ]);
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+
+        $this->assertSame([], $findings);
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 4 T10: check (c)'s AP-side mirror — document_balance +
+    // ap_reconciliation for bills/bill_payments, incl. the fbbe763
+    // contact-level opening-AP lesson applied to vendors with multiple
+    // opening bills in one run.
+    // ---------------------------------------------------------------
+
+    /**
+     * The comprehensive no-false-positive test (item 1 of the task brief): a
+     * company with an invoice, an expense, THREE normal bills across
+     * different lifecycle stages (partially paid, paid, voided), AND opening
+     * AR + opening AP (the opening AP vendor carrying TWO opening bills from
+     * one run — the exact multi-doc shape the fbbe763 fix addressed on the
+     * AR side) must come back COMPLETELY clean. Round-trips through every
+     * real service (InvoiceService/ExpenseService/BillService/
+     * BillPaymentService/OpeningBalanceService) — no hand-built ledger rows.
+     */
+    public function test_clean_multi_source_company_with_invoices_expenses_bills_and_opening_ar_ap_yields_no_findings(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        app(CompanyContext::class)->set($company);
+
+        $customer = $this->customer($company);
+        $vendor = $this->vendor($company);
+        $this->invoiceChart($company);
+        $this->apAccount($company);
+        $this->equityAccount($company, ['code' => '3100', 'name' => 'Opening Balance Equity']);
+        $income = $this->incomeAccount($company);
+        $expenseCategory = $this->categoryAccount($company, ['code' => '5000']);
+        $billCategory = $this->categoryAccount($company, ['code' => '5010']);
+        $bank = $this->bankAccountModel($company);
+
+        // Normal invoice: sent, partially paid.
+        $invoice = $this->domesticDraftInvoice($company, $customer);
+        $this->invoiceLine($invoice, $income, ['quantity' => '1', 'unit_price' => 20000, 'tax_rate_id' => null]);
+        $this->sendInvoice($invoice)->assertRedirect();
+        $this->pay($invoice->fresh(), ['amount' => 8000, 'bank_account_id' => $bank->id, 'payment_date' => '2026-07-05'])->assertRedirect();
+
+        // Expense recorded.
+        $expense = Expense::factory()->create([
+            'company_id' => $company->id,
+            'status' => 'draft',
+            'bank_account_id' => $bank->id,
+        ]);
+        app(CompanyContext::class)->runFor($company, fn () => ExpenseLine::factory()->create([
+            'expense_id' => $expense->id,
+            'company_id' => $company->id,
+            'category_account_id' => $expenseCategory->id,
+            'amount' => 15000,
+            'tax_rate_id' => null,
+        ]));
+        app(ExpenseService::class)->record((string) Str::uuid(), $expense);
+
+        // Normal bill: received, partially paid.
+        $billPartial = $this->draftBill($company, $vendor);
+        $this->billLine($billPartial, $billCategory, ['amount' => 22000, 'tax_rate_id' => null]);
+        $billPartial = $this->receiveBill($company, $billPartial);
+        $this->payBill($company, $billPartial, ['amount' => 10000, 'bank_account_id' => $bank->id, 'payment_date' => '2026-07-06']);
+
+        // Normal bill: received, paid in full.
+        $billPaid = $this->draftBill($company, $vendor);
+        $this->billLine($billPaid, $billCategory, ['amount' => 5000, 'tax_rate_id' => null]);
+        $billPaid = $this->receiveBill($company, $billPaid);
+        $this->payBill($company, $billPaid, ['amount' => 5000, 'bank_account_id' => $bank->id, 'payment_date' => '2026-07-07']);
+
+        // Normal bill: received, then voided (no payments — direct void path).
+        $billVoided = $this->draftBill($company, $vendor);
+        $this->billLine($billVoided, $billCategory, ['amount' => 3000, 'tax_rate_id' => null]);
+        $billVoided = $this->receiveBill($company, $billVoided);
+        $this->voidBill($company, $billVoided);
+
+        // Opening AR (one customer, one opening invoice, partially paid) +
+        // opening AP (ONE vendor, TWO opening bills from the same run — the
+        // multi-doc shape fbbe763 fixed on the AR side, mirrored here).
+        app(OpeningBalanceService::class)->apply((string) Str::uuid(), [
+            'books_start_date' => '2026-06-01',
+            'bank_lines' => [],
+            'customer_lines' => [
+                ['contact_id' => $customer->id, 'reference' => 'Opening INV', 'original_date' => '2026-05-01', 'due_date' => '2026-06-01', 'amount' => 40000],
+            ],
+            'vendor_lines' => [
+                ['contact_id' => $vendor->id, 'reference' => 'Old bill 1', 'original_date' => '2026-04-01', 'due_date' => '2026-05-01', 'amount' => 30000],
+                ['contact_id' => $vendor->id, 'reference' => 'Old bill 2', 'original_date' => '2026-04-15', 'due_date' => '2026-05-15', 'amount' => 20000],
+            ],
+        ]);
+
+        $openingInvoice = Invoice::query()->where('is_opening', true)->sole();
+        $this->pay($openingInvoice, ['amount' => 15000, 'bank_account_id' => $bank->id, 'payment_date' => '2026-07-08'])->assertRedirect();
+
+        $openingBills = Bill::query()->where('is_opening', true)->orderBy('id')->get();
+        $this->assertCount(2, $openingBills);
+        $this->payBill($company, $openingBills[0], ['amount' => 30000, 'bank_account_id' => $bank->id, 'payment_date' => '2026-07-09']);
+        $this->payBill($company, $openingBills[1], ['amount' => 5000, 'bank_account_id' => $bank->id, 'payment_date' => '2026-07-10']);
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+
+        $this->assertSame([], $findings);
+    }
+
+    /**
+     * document_balance, sub-check (1): raw-tamper a bill's stored `balance`
+     * (bypassing BillPaymentService entirely) so it disagrees with total
+     * minus non-void payments. Mirrors
+     * test_document_balance_finding_when_invoice_balance_disagrees_with_payments
+     * exactly, AP side.
+     */
+    public function test_document_balance_finding_when_bill_balance_disagrees_with_payments(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        app(CompanyContext::class)->set($company);
+        $vendor = $this->vendor($company);
+        $this->apAccount($company);
+        $category = $this->categoryAccount($company);
+        $bank = $this->bankAccountModel($company);
+
+        $bill = $this->draftBill($company, $vendor);
+        $this->billLine($bill, $category, ['amount' => 10000, 'tax_rate_id' => null]);
+        $bill = $this->receiveBill($company, $bill);
+        $this->payBill($company, $bill, ['amount' => 4000, 'bank_account_id' => $bank->id, 'payment_date' => '2026-07-05']);
+
+        // Correct balance would be 10000 - 4000 = 6000.
+        DB::table('bills')->where('id', $bill->id)->update(['balance' => 9999]);
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+        $checks = collect($findings)->pluck('check')->all();
+
+        $this->assertContains('document_balance', $checks);
+        $finding = collect($findings)->firstWhere('check', 'document_balance');
+        $this->assertStringContainsString((string) $bill->id, $finding['detail']);
+        $this->assertStringContainsString('9999', $finding['detail']);
+        $this->assertStringContainsString('6000', $finding['detail']);
+    }
+
+    /**
+     * document_balance, sub-check (2): raw-tamper `amount_paid` directly,
+     * leaving `balance` and the real payments table untouched — isolates
+     * this check from sub-check (1) above.
+     */
+    public function test_document_balance_finding_when_bill_amount_paid_disagrees_with_payments(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        app(CompanyContext::class)->set($company);
+        $vendor = $this->vendor($company);
+        $this->apAccount($company);
+        $category = $this->categoryAccount($company);
+        $bank = $this->bankAccountModel($company);
+
+        $bill = $this->draftBill($company, $vendor);
+        $this->billLine($bill, $category, ['amount' => 10000, 'tax_rate_id' => null]);
+        $bill = $this->receiveBill($company, $bill);
+        $this->payBill($company, $bill, ['amount' => 4000, 'bank_account_id' => $bank->id, 'payment_date' => '2026-07-05']);
+
+        // Correct amount_paid would be 4000.
+        DB::table('bills')->where('id', $bill->id)->update(['amount_paid' => 4999]);
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+        $checks = collect($findings)->pluck('check')->all();
+
+        $this->assertContains('document_balance', $checks);
+        $finding = collect($findings)->firstWhere('check', 'document_balance');
+        $this->assertStringContainsString((string) $bill->id, $finding['detail']);
+        $this->assertStringContainsString('4999', $finding['detail']);
+        $this->assertStringContainsString('4000', $finding['detail']);
+    }
+
+    /**
+     * document_balance, sub-check (3): raw-tamper `status` so it disagrees
+     * with the bill's own (untouched, correct) `balance` — a received,
+     * fully-unpaid bill's balance equals its total (expected status
+     * Received), then status is force-set to 'paid'.
+     */
+    public function test_document_balance_finding_when_bill_status_disagrees_with_balance(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        app(CompanyContext::class)->set($company);
+        $vendor = $this->vendor($company);
+        $this->apAccount($company);
+        $category = $this->categoryAccount($company);
+
+        $bill = $this->draftBill($company, $vendor);
+        $this->billLine($bill, $category, ['amount' => 10000, 'tax_rate_id' => null]);
+        $bill = $this->receiveBill($company, $bill);
+
+        DB::table('bills')->where('id', $bill->id)->update(['status' => 'paid']);
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+        $checks = collect($findings)->pluck('check')->all();
+
+        $this->assertContains('document_balance', $checks);
+        $finding = collect($findings)->firstWhere('check', 'document_balance');
+        $this->assertStringContainsString('inconsistent', $finding['detail']);
+        $this->assertStringContainsString((string) $bill->id, $finding['detail']);
+    }
+
+    /**
+     * The false-positive reproduction, AP side (mirrors
+     * test_clean_when_a_contact_has_two_unpaid_opening_invoices_in_one_run):
+     * a vendor with TWO correctly-posted, still-unpaid opening bills from one
+     * run must come back CLEAN. This is the exact case the brief calls out —
+     * before the AP-side aggregate reconciliation, a naive per-bill
+     * attribution would drop one of the two.
+     */
+    public function test_clean_when_a_vendor_has_two_unpaid_opening_bills_in_one_run(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $this->setUpVendorWithTwoOpeningBills($company);
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+
+        $this->assertSame([], $findings);
+    }
+
+    /**
+     * Both of the vendor's two opening bills paid to Paid via real P7 posts —
+     * the vendor's aggregate opening AP nets to exactly zero. Mirrors
+     * test_clean_when_both_of_a_contacts_two_opening_invoices_are_paid_in_full.
+     */
+    public function test_clean_when_both_of_a_vendors_two_opening_bills_are_paid_in_full(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        [, , $bank, $bills] = $this->setUpVendorWithTwoOpeningBills($company);
+
+        foreach ($bills as $bill) {
+            $this->payBill($company, $bill, ['amount' => $bill->total, 'bank_account_id' => $bank->id, 'payment_date' => '2026-07-10']);
+        }
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+
+        $this->assertSame([], $findings);
+    }
+
+    /**
+     * A genuine business-side tamper (raw-update one of the vendor's two
+     * opening bills' `total`) on a multi-opening-bill vendor must still fire
+     * ap_reconciliation — no false-negative introduced by summing. Mirrors
+     * test_base_ar_reconciliation_fires_when_one_of_two_opening_invoices_base_total_is_tampered,
+     * with ONE AP-side asymmetry worth calling out: unlike an invoice's
+     * `base_total` (a column separate from `balance`/`total`), a bill's
+     * `total` feeds BOTH this aggregate check's expected side AND
+     * document_balance's per-bill balance check — so this tamper
+     * unavoidably also produces a document_balance finding alongside
+     * ap_reconciliation (bills have no document/base-currency split to
+     * isolate the two the way invoices do). Only ap_reconciliation is
+     * asserted here, matching the invoice-side test's own assertContains-only
+     * style.
+     */
+    public function test_ap_reconciliation_fires_when_one_of_two_opening_bills_total_is_tampered(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        [, , , $bills] = $this->setUpVendorWithTwoOpeningBills($company);
+
+        DB::table('bills')->where('id', $bills[0]->id)->update(['total' => $bills[0]->total + 500]);
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+        $checks = collect($findings)->pluck('check')->all();
+
+        $this->assertContains('ap_reconciliation', $checks);
+    }
+
+    /**
+     * A genuine tamper on the LEDGER side instead — raw-delete one of the
+     * vendor's two opening_balance_run AP credit lines, leaving both bills'
+     * own rows untouched. The aggregate ledger sum for the vendor now falls
+     * short of the aggregate expected sum. Mirrors
+     * test_base_ar_reconciliation_fires_when_one_contacts_opening_ar_ledger_line_is_raw_deleted
+     * — purely a ledger-side tamper, so (unlike the test above) this fires
+     * ap_reconciliation ONLY, cleanly isolated from document_balance.
+     */
+    public function test_ap_reconciliation_fires_when_one_vendors_opening_ap_ledger_line_is_raw_deleted(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        [, $apAccount] = $this->setUpVendorWithTwoOpeningBills($company);
+
+        $runEntry = JournalEntry::query()->where('source_type', 'opening_balance_run')->sole();
+        $apLines = $runEntry->lines()->where('account_id', $apAccount->id)->get();
+        $this->assertCount(2, $apLines);
+
+        DB::table('journal_lines')->where('id', $apLines->first()->id)->delete();
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+        $checks = collect($findings)->pluck('check')->all();
+
+        $this->assertContains('ap_reconciliation', $checks);
+    }
+
+    /**
+     * ap_reconciliation, normal (non-opening) bill: raw-delete a live
+     * payment's own AP ledger line, leaving the bill_payments row (and its
+     * `amount`) untouched. Business-level "expected" never moves, but the
+     * ledger's actual AP contribution for this bill now disagrees with it.
+     * Mirrors test_base_ar_reconciliation_finding_when_a_payments_ar_ledger_line_is_raw_deleted
+     * — this is also the "genuine tamper on the AP ledger vs bills" case the
+     * task brief calls out explicitly, and the tamper-half of "normal-bill
+     * AP per-contact reconciliation clean + tamper fires" (the clean half is
+     * already proven by the kitchen-sink test above and the Phase 4 T5
+     * clean-received-bill-with-payment test).
+     */
+    public function test_ap_reconciliation_finding_when_a_normal_bills_ap_ledger_line_is_raw_deleted(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        app(CompanyContext::class)->set($company);
+        $vendor = $this->vendor($company);
+        $apAccount = $this->apAccount($company);
+        $category = $this->categoryAccount($company);
+        $bank = $this->bankAccountModel($company);
+
+        $bill = $this->draftBill($company, $vendor);
+        $this->billLine($bill, $category, ['amount' => 10000, 'tax_rate_id' => null]);
+        $bill = $this->receiveBill($company, $bill);
+        $payment = $this->payBill($company, $bill, ['amount' => 4000, 'bank_account_id' => $bank->id, 'payment_date' => '2026-07-05']);
+
+        $paymentEntry = JournalEntry::query()
+            ->where('source_type', 'bill_payment')->where('source_id', $payment->id)->sole();
+        $apLine = $paymentEntry->lines->firstWhere('account_id', $apAccount->id);
+        $this->assertNotNull($apLine);
+
+        DB::table('journal_lines')->where('id', $apLine->id)->delete();
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+        $checks = collect($findings)->pluck('check')->all();
+
+        $this->assertContains('ap_reconciliation', $checks);
+        $finding = collect($findings)->firstWhere('check', 'ap_reconciliation');
+        $this->assertStringContainsString('ledger shows', $finding['detail']);
+    }
+
+    /**
+     * A vendor with BOTH a normal bill (received, paid) AND multiple opening
+     * bills (paid) — CLEAN, proving the two reconciliation paths (per-bill
+     * for normal, contact-aggregate for opening) stay disjoint and neither
+     * masks the other. Mirrors
+     * test_clean_when_a_contact_has_a_paid_normal_invoice_and_paid_opening_invoices.
+     */
+    public function test_clean_when_a_vendor_has_a_paid_normal_bill_and_paid_opening_bills(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        [$vendor, , $bank, $bills] = $this->setUpVendorWithTwoOpeningBills($company);
+
+        foreach ($bills as $bill) {
+            $this->payBill($company, $bill, ['amount' => $bill->total, 'bank_account_id' => $bank->id, 'payment_date' => '2026-07-05']);
+        }
+
+        $normalBill = $this->draftBill($company, $vendor);
+        $this->billLine($normalBill, $this->categoryAccount($company), ['amount' => 10000, 'tax_rate_id' => null]);
+        $normalBill = $this->receiveBill($company, $normalBill);
+        $this->payBill($company, $normalBill, ['amount' => 10000, 'bank_account_id' => $bank->id, 'payment_date' => '2026-07-06']);
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+
+        $this->assertSame([], $findings);
+    }
+
+    /**
+     * Multi-company isolation for the bill-side check (c), mirrors
+     * test_document_balance_and_base_ar_reconciliation_findings_are_isolated_to_the_tampered_company.
+     */
+    public function test_document_balance_and_ap_reconciliation_findings_are_isolated_to_the_tampered_company(): void
+    {
+        $companyA = Company::factory()->create();
+        $this->actingAsRole($companyA, Role::Owner);
+        app(CompanyContext::class)->set($companyA);
+        $vendorA = $this->vendor($companyA);
+        $this->apAccount($companyA);
+        $categoryA = $this->categoryAccount($companyA);
+
+        $billA = $this->draftBill($companyA, $vendorA);
+        $this->billLine($billA, $categoryA, ['amount' => 10000, 'tax_rate_id' => null]);
+        $billA = $this->receiveBill($companyA, $billA);
+        DB::table('bills')->where('id', $billA->id)->update(['balance' => 1]);
+
+        $companyB = Company::factory()->create();
+        $this->actingAsRole($companyB, Role::Owner);
+        app(CompanyContext::class)->set($companyB);
+        $vendorB = $this->vendor($companyB);
+        $this->apAccount($companyB);
+        $categoryB = $this->categoryAccount($companyB);
+
+        $billB = $this->draftBill($companyB, $vendorB);
+        $this->billLine($billB, $categoryB, ['amount' => 7500, 'tax_rate_id' => null]);
+        $this->receiveBill($companyB, $billB);
+
+        $findingsA = app(IntegrityChecker::class)->checkCompany($companyA);
+        $findingsB = app(IntegrityChecker::class)->checkCompany($companyB);
+
+        $this->assertContains('document_balance', collect($findingsA)->pluck('check')->all());
+        $this->assertSame([], $findingsB);
     }
 
     // ---------------------------------------------------------------

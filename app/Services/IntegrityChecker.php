@@ -3,9 +3,13 @@
 namespace App\Services;
 
 use App\Enums\AccountSubtype;
+use App\Enums\BillStatus;
 use App\Enums\InvoiceStatus;
 use App\Models\Account;
+use App\Models\Bill;
+use App\Models\BillPayment;
 use App\Models\Company;
+use App\Models\Expense;
 use App\Models\Invoice;
 use App\Models\InvoicePayment;
 use App\Models\JournalEntry;
@@ -41,7 +45,7 @@ class IntegrityChecker
      * any special-casing: the source row they point at is the original
      * document, which still exists.
      *
-     * @var array<string, class-string<ManualJournal|Transfer|OtherReceipt|OpeningBalanceRun|Invoice|InvoicePayment>>
+     * @var array<string, class-string<ManualJournal|Transfer|OtherReceipt|OpeningBalanceRun|Invoice|InvoicePayment|Expense|Bill|BillPayment>>
      */
     private const SOURCE_TABLES = [
         'manual_journal' => ManualJournal::class,
@@ -50,6 +54,20 @@ class IntegrityChecker
         'opening_balance_run' => OpeningBalanceRun::class,
         'invoice' => Invoice::class,
         'invoice_payment' => InvoicePayment::class,
+        // Phase 4 T3/T4: ExpenseService::record/BillService::receive post
+        // source_type 'expense'/'bill' (P4/P5/P6/P6t) — registered here from
+        // the moment they exist so a real posted expense/bill is never
+        // mistaken for an unrecognized source.
+        'expense' => Expense::class,
+        'bill' => Bill::class,
+        // Phase 4 T5: BillPaymentService::record posts source_type
+        // 'bill_payment' (P7) — registered here from the moment it exists so
+        // a real posted bill payment is never mistaken for an unrecognized
+        // source (see
+        // IntegrityCheckerTest::test_unknown_source_type_produces_unrecognized_source_finding's
+        // own docblock, which used 'bill_payment' as its stand-in until this
+        // task; it now uses a genuinely-unregistered literal instead).
+        'bill_payment' => BillPayment::class,
     ];
 
     /**
@@ -59,12 +77,41 @@ class IntegrityChecker
      * void invoice legitimately has a stale, non-reconciling `balance`/
      * `base_total` since those columns are simply never touched by
      * InvoiceService::void(), which only flips status/voided_at).
+     *
+     * Derived from InvoiceStatus::isPosted() rather than hardcoded (Phase 4
+     * T10 carry-in cleanup, tracked since P3-T12: PROJECT_MAP.md "Minor
+     * carried" list) — a status can no longer drift out of sync between the
+     * enum's own posted/draft distinction and what this checker treats as
+     * posted, since there is now only one place that decision is made.
+     *
+     * @return list<string>
      */
-    private const POSTED_INVOICE_STATUSES = [
-        InvoiceStatus::Sent->value,
-        InvoiceStatus::PartiallyPaid->value,
-        InvoiceStatus::Paid->value,
-    ];
+    private static function postedInvoiceStatuses(): array
+    {
+        return array_values(array_map(
+            fn (InvoiceStatus $status) => $status->value,
+            array_filter(InvoiceStatus::cases(), fn (InvoiceStatus $status) => $status->isPosted()),
+        ));
+    }
+
+    /**
+     * The bill-side mirror of postedInvoiceStatuses() above, same reasoning:
+     * derived from BillStatus::isPosted() (Received/PartiallyPaid/Paid) so a
+     * draft bill (nothing posted yet) and a void bill (its own P6/P6t entry
+     * already reversed to net zero, `balance`/`total` stale by design —
+     * BillService::void() only flips status/voided_at, mirroring
+     * InvoiceService::void()) are both correctly excluded from check (c)'s
+     * bill-side reconciliation, exactly like their invoice counterparts.
+     *
+     * @return list<string>
+     */
+    private static function postedBillStatuses(): array
+    {
+        return array_values(array_map(
+            fn (BillStatus $status) => $status->value,
+            array_filter(BillStatus::cases(), fn (BillStatus $status) => $status->isPosted()),
+        ));
+    }
 
     /** @return list<array{check:string, detail:string}> findings (empty = clean) */
     public function checkCompany(Company $company): array
@@ -139,6 +186,13 @@ class IntegrityChecker
                 // wrong.
                 $findings = array_merge($findings, $this->checkInvoiceBalances());
 
+                // Phase 4 T10: bill/bill_payment balance + AP reconciliation
+                // — the AP-side mirror of check (c) above. See
+                // checkBillBalances() for the full writeup, incl. why it
+                // does NOT need an invoice-side-style FX/settlement-rounding
+                // branch (bills are base-currency-only, spec §17 Phase 4).
+                $findings = array_merge($findings, $this->checkBillBalances());
+
                 return $findings;
             });
         });
@@ -169,7 +223,7 @@ class IntegrityChecker
      *    but both wrong (e.g. every payment's base_ar_relief tampered in
      *    lockstep with its ledger line) still gets caught.
      *
-     * Only POSTED invoices participate (see POSTED_INVOICE_STATUSES); a
+     * Only POSTED invoices participate (see postedInvoiceStatuses()); a
      * draft has nothing posted yet, and a void invoice's own entry has
      * already been reversed to net zero, so neither balance/base_total is
      * meaningful to check against the ledger.
@@ -181,7 +235,7 @@ class IntegrityChecker
         $findings = [];
 
         $invoices = Invoice::query()
-            ->whereIn('status', self::POSTED_INVOICE_STATUSES)
+            ->whereIn('status', self::postedInvoiceStatuses())
             ->get(['id', 'number', 'status', 'total', 'balance', 'base_total', 'contact_id', 'is_opening']);
 
         if ($invoices->isEmpty()) {
@@ -388,7 +442,7 @@ class IntegrityChecker
      * invoice_id in the checkInvoiceBalances() loop above, which this
      * method never reads from or writes findings about.
      *
-     * @param  Collection<int, Invoice>  $openingInvoices  already filtered to is_opening=true, POSTED_INVOICE_STATUSES
+     * @param  Collection<int, Invoice>  $openingInvoices  already filtered to is_opening=true, postedInvoiceStatuses()
      * @param  Collection<int, object>  $paymentTotals  invoice_id => {paid, base_relief}, non-void payments only
      * @param  array<int, int>  $actualBaseAr  invoice_id => net ledger AR (payment-attributable only, for opening invoices)
      * @return list<array{check:string, detail:string}>
@@ -444,5 +498,335 @@ class IntegrityChecker
     private function invoiceLabel(Invoice $invoice): string
     {
         return ($invoice->number ?? "#{$invoice->id}")." (id {$invoice->id})";
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 4 T10: bill / bill_payment coverage — the AP-side mirror of
+    // checkInvoiceBalances() and its two helpers above. Mirrors that
+    // section's structure deliberately (same method shapes, same finding
+    // flow) so the two sides stay easy to compare line-by-line; see each
+    // method's own docblock for where the AP side genuinely has to diverge
+    // (bills carry no FX in this phase) and why.
+    // ---------------------------------------------------------------
+
+    /**
+     * document_balance + ap_reconciliation for bills (spec §9/§6, Phase 4
+     * mirror of check (c)). Three independent assertions per bill, ALL
+     * tagged 'document_balance' (mirrors checkInvoiceBalances()'s own
+     * single-check-name-per-concern convention) since all three are the same
+     * "is this bill's own row internally consistent" concern, just checking
+     * three different columns against the same ground truth (the bill's
+     * non-void payments):
+     *
+     * 1. `balance` must equal `total - Σ(non-void bill_payments.amount)`.
+     * 2. `amount_paid` must equal `Σ(non-void bill_payments.amount)` — the
+     *    exact same Σ as (1), just compared against the OTHER column that's
+     *    supposed to track it (BillPaymentService::record/void keep both in
+     *    lockstep; this catches either one drifting independently).
+     * 3. `status` must agree with the bill's own (stored) `balance`:
+     *    Paid<=>balance 0, PartiallyPaid<=>0<balance<total, Received<=>
+     *    balance==total. Deliberately checked against the STORED balance
+     *    (not the recomputed expected balance from (1)) — this is "does the
+     *    bill's own status column agree with its own balance column",
+     *    independent of whether that balance is itself correct (that's
+     *    check (1)'s job); the two can therefore each fire on their own
+     *    tamper without one masking the other.
+     *
+     * `ap_reconciliation` (the AP-side sibling of base_ar_reconciliation) is
+     * split the same way check (c) splits for invoices: a per-bill
+     * ledger-vs-expected tie-out for every NORMAL (non-opening) bill
+     * (source-attributable via source_type='bill'/'bill_payment', source_id
+     * = this bill's own id — see actualLedgerApByBill()), and a
+     * CONTACT-level aggregate for is_opening bills (checkOpeningApReconciliation()
+     * below) — the exact fbbe763 lesson (opening AP debit/credit lines carry
+     * only contact_id, never bill_id, so a vendor with several opening bills
+     * in one run can't have that shared ledger line split back across them
+     * individually; both sides must be summed over the same contact-scoped
+     * set instead).
+     *
+     * Deliberately NO invoice-side-style "Paid => settle to exactly zero"
+     * branch here: that branch exists on the AR side purely to catch a
+     * corruption that tampers `base_ar_relief` (a value distinct from the
+     * ledger-posted `amount`) and its ledger line in lockstep, which the
+     * per-invoice ledger-vs-expected comparison alone can't see because
+     * is_opening invoices skip that comparison entirely. Bills have no such
+     * second value to tamper independently of the ledger — a
+     * BillPayment's `amount` IS the figure BillPaymentService posts to the
+     * ledger, with no separate base/relief column — so ANY tamper that
+     * moves the business-level expected side (payments.amount, bill.total)
+     * out of step with the ledger is already caught by the plain
+     * ledger-vs-expected comparison below, for every bill regardless of
+     * status, opening or not (opening via the contact aggregate). FX
+     * tolerance is likewise structurally irrelevant here, not just
+     * intentionally omitted: bills are base-currency-only in this phase
+     * (spec §6 Phase 4 brief — BillPaymentService posts no P7fx / plug leg
+     * at all), so there is no document/base-currency split for this method
+     * to reconcile in the first place, unlike checkInvoiceBalances()'s
+     * balance-vs-base_total split. Every comparison in this method and its
+     * two helpers below is therefore plain integer equality, with no
+     * rounding tolerance of any kind.
+     *
+     * @return list<array{check:string, detail:string}>
+     */
+    private function checkBillBalances(): array
+    {
+        $findings = [];
+
+        $bills = Bill::query()
+            ->whereIn('status', self::postedBillStatuses())
+            ->get(['id', 'reference', 'status', 'total', 'balance', 'amount_paid', 'contact_id', 'is_opening']);
+
+        if ($bills->isEmpty()) {
+            return $findings;
+        }
+
+        // Σ(amount) per bill, non-void payments only — mirrors
+        // checkInvoiceBalances()'s identical $paymentTotals query, minus the
+        // base_ar_relief leg (no such column on bill_payments).
+        $paymentTotals = BillPayment::query()
+            ->whereIn('bill_id', $bills->pluck('id'))
+            ->where('status', '!=', 'void')
+            ->selectRaw('bill_id, SUM(amount) AS paid')
+            ->groupBy('bill_id')
+            ->get()
+            ->keyBy('bill_id');
+
+        $actualAp = $this->actualLedgerApByBill();
+
+        foreach ($bills as $bill) {
+            $totals = $paymentTotals->get($bill->id);
+            $paidAmount = (int) ($totals->paid ?? 0);
+
+            $expectedBalance = $bill->total - $paidAmount;
+            if ($bill->balance !== $expectedBalance) {
+                $findings[] = [
+                    'check' => 'document_balance',
+                    'detail' => "Bill {$this->billLabel($bill)} balance {$bill->balance} does not equal total {$bill->total} minus non-void payments {$paidAmount} (expected {$expectedBalance})",
+                ];
+            }
+
+            if ($bill->amount_paid !== $paidAmount) {
+                $findings[] = [
+                    'check' => 'document_balance',
+                    'detail' => "Bill {$this->billLabel($bill)} amount_paid {$bill->amount_paid} does not equal non-void payments {$paidAmount}",
+                ];
+            }
+
+            $expectedStatus = $this->expectedBillStatus($bill->balance, $bill->total);
+            if ($bill->status !== $expectedStatus) {
+                $findings[] = [
+                    'check' => 'document_balance',
+                    'detail' => "Bill {$this->billLabel($bill)} status {$bill->status->value} inconsistent with balance {$bill->balance} of total {$bill->total} (expected {$expectedStatus->value})",
+                ];
+            }
+
+            if (! $bill->is_opening) {
+                // Per-bill ledger tie-out — valid ONLY for a normal bill,
+                // individually source-attributable (source_type='bill'/
+                // 'bill_payment', source_id=this bill's own id). An
+                // is_opening bill has no entry of its own to look up this
+                // way — see actualLedgerApByBill()'s docblock — reconciled
+                // in aggregate by checkOpeningApReconciliation() below
+                // instead, never here.
+                $ledgerAp = $actualAp[$bill->id] ?? 0;
+                if ($expectedBalance !== $ledgerAp) {
+                    $findings[] = [
+                        'check' => 'ap_reconciliation',
+                        'detail' => "Bill {$this->billLabel($bill)} AP expected {$expectedBalance} (total minus non-void payments) but the ledger shows {$ledgerAp}",
+                    ];
+                }
+            }
+        }
+
+        $findings = array_merge($findings, $this->checkOpeningApReconciliation(
+            $bills->where('is_opening', true), $paymentTotals, $actualAp
+        ));
+
+        return $findings;
+    }
+
+    /**
+     * The LEDGER-side of the AP tie-out for NORMAL (non-opening) bills, PLUS
+     * the payment-attributable contribution for opening bills. Exact AP-side
+     * mirror of actualLedgerBaseArByInvoice() — same two-grouped-query shape,
+     * same reversal-tolerance (a voided payment's primary Dr AP + its
+     * reversal Cr AP land in the same sum and net to zero automatically),
+     * same "opening bills never get an own-entry contribution here" rule
+     * (OpeningBalanceService::createOpeningBill() never posts a P6/P6t of
+     * its own — the AP was already posted once, by the opening run's own
+     * P8c line(s), keyed by contact_id, not bill_id).
+     *
+     * Sign convention is the ONE genuine arithmetic difference from the AR
+     * side: 1100 AR is an ASSET (debit-normal), so
+     * actualLedgerBaseArByInvoice() nets `debit - credit`. 2000 AP is a
+     * LIABILITY (credit-normal) — a bill's own P6/P6t entry CREDITS AP for
+     * the total owed, and a payment's P7 entry DEBITS it back down — so the
+     * outstanding-payable-as-a-positive-number convention this method must
+     * match (`$bill->total - $paidAmount`, always >= 0 for a valid bill)
+     * requires netting the OPPOSITE way: `credit - debit`.
+     *
+     * @return array<int, int> bill_id => net AP contributed by that bill's own entry (normal bills) + its payments (all bills)
+     */
+    private function actualLedgerApByBill(): array
+    {
+        $payableAccountIds = $this->payableAccountIds();
+
+        if ($payableAccountIds->isEmpty()) {
+            // No AP account exists at all on this company — every posted
+            // bill above will fail its own expected-vs-ledger comparison
+            // (expected is never 0 for a real bill), which is the correct
+            // failure signal; nothing to sum here.
+            return [];
+        }
+
+        // Own P6/P6t entry, keyed directly by source_id (= bill_id).
+        // Opening bills never appear here — see docblock above.
+        $byOwnEntry = JournalLine::query()
+            ->join('journal_entries', 'journal_entries.id', '=', 'journal_lines.journal_entry_id')
+            ->whereIn('journal_lines.account_id', $payableAccountIds)
+            ->where('journal_entries.source_type', 'bill')
+            ->selectRaw('journal_entries.source_id AS bill_id, SUM(journal_lines.credit) - SUM(journal_lines.debit) AS net')
+            ->groupBy('journal_entries.source_id')
+            ->pluck('net', 'bill_id');
+
+        // Payments' P7 entries, keyed by payment_id first (that's what
+        // source_id is on a bill_payment entry), then re-aggregated up to
+        // bill_id via the bill_payments table itself. Genuinely
+        // bill-attributable regardless of is_opening.
+        $byPaymentEntry = JournalLine::query()
+            ->join('journal_entries', 'journal_entries.id', '=', 'journal_lines.journal_entry_id')
+            ->whereIn('journal_lines.account_id', $payableAccountIds)
+            ->where('journal_entries.source_type', 'bill_payment')
+            ->selectRaw('journal_entries.source_id AS payment_id, SUM(journal_lines.credit) - SUM(journal_lines.debit) AS net')
+            ->groupBy('journal_entries.source_id')
+            ->pluck('net', 'payment_id');
+
+        $paymentBillIds = BillPayment::query()->pluck('bill_id', 'id');
+
+        $totals = [];
+        foreach ($byOwnEntry as $billId => $net) {
+            $totals[(int) $billId] = ($totals[(int) $billId] ?? 0) + (int) $net;
+        }
+        foreach ($byPaymentEntry as $paymentId => $net) {
+            $billId = $paymentBillIds->get($paymentId);
+            if ($billId === null) {
+                // A payment-sourced AP line whose bill_payments row is gone
+                // — orphan_entries (already registered for 'bill_payment'
+                // above) already reports this; skip it here rather than
+                // attributing it to nothing.
+                continue;
+            }
+            $totals[(int) $billId] = ($totals[(int) $billId] ?? 0) + (int) $net;
+        }
+
+        return $totals;
+    }
+
+    /**
+     * ap_reconciliation for OPENING bills, reconciled at the CONTACT level —
+     * exact AP-side mirror of checkOpeningArReconciliation() (the fbbe763
+     * fix this whole task is instructed to mirror): a vendor with SEVERAL
+     * opening bills in one run shares a single (possibly multi-line, if the
+     * run itself was re-applied) opening_balance_run AP contribution keyed
+     * only by contact_id, never bill_id — so both the expected and ledger
+     * sides are summed over the SAME set (all of a contact's
+     * currently-posted opening bills) rather than attempting to guess a
+     * per-bill split of a ledger line that structurally can't be split. This
+     * is what correctly handles N opening bills per vendor, INCLUDING the
+     * case this task's brief calls out explicitly: a vendor with TWO+
+     * opening bills from one run.
+     *
+     * - Expected side: Σ over the contact's opening bills of (total − Σ that
+     *   bill's own non-void payments' amount).
+     * - Ledger side: (Σ this contact's opening_balance_run AP credit lines —
+     *   reversal lines from a voided re-run carry the SAME contact_id, so
+     *   they net to zero automatically within this same sum) PLUS (Σ
+     *   $actualAp[bill_id] for each of the contact's opening bills — which,
+     *   for an opening bill, holds ONLY its payment-attributable net, since
+     *   actualLedgerApByBill() never gives one an "own entry" contribution).
+     *
+     * A mismatch produces ONE finding per contact (not per bill), naming
+     * every opening bill in the group — mirrors checkOpeningArReconciliation()'s
+     * identical one-finding-per-contact shape.
+     *
+     * @param  Collection<int, Bill>  $openingBills  already filtered to is_opening=true, postedBillStatuses()
+     * @param  Collection<int, object>  $paymentTotals  bill_id => {paid}, non-void payments only
+     * @param  array<int, int>  $actualAp  bill_id => net ledger AP (payment-attributable only, for opening bills)
+     * @return list<array{check:string, detail:string}>
+     */
+    private function checkOpeningApReconciliation(Collection $openingBills, Collection $paymentTotals, array $actualAp): array
+    {
+        if ($openingBills->isEmpty()) {
+            return [];
+        }
+
+        $findings = [];
+        $byContact = $openingBills->groupBy('contact_id');
+
+        $payableAccountIds = $this->payableAccountIds();
+        $runApByContact = $payableAccountIds->isEmpty() ? collect() : JournalLine::query()
+            ->join('journal_entries', 'journal_entries.id', '=', 'journal_lines.journal_entry_id')
+            ->whereIn('journal_lines.account_id', $payableAccountIds)
+            ->where('journal_entries.source_type', 'opening_balance_run')
+            ->whereIn('journal_lines.contact_id', $byContact->keys())
+            ->selectRaw('journal_lines.contact_id AS contact_id, SUM(journal_lines.credit) - SUM(journal_lines.debit) AS net')
+            ->groupBy('journal_lines.contact_id')
+            ->pluck('net', 'contact_id');
+
+        foreach ($byContact as $contactId => $contactBills) {
+            $expected = 0;
+            $ledger = (int) ($runApByContact->get($contactId) ?? 0);
+
+            foreach ($contactBills as $bill) {
+                $totals = $paymentTotals->get($bill->id);
+                $paidAmount = (int) ($totals->paid ?? 0);
+                $expected += $bill->total - $paidAmount;
+                $ledger += $actualAp[$bill->id] ?? 0;
+            }
+
+            if ($expected !== $ledger) {
+                $labels = $contactBills->map(fn (Bill $bill) => $this->billLabel($bill))->implode(', ');
+                $findings[] = [
+                    'check' => 'ap_reconciliation',
+                    'detail' => "Contact {$contactId}'s opening bills ({$labels}) AP expected {$expected} (\u{03a3} total minus non-void payments) but the ledger shows {$ledger}",
+                ];
+            }
+        }
+
+        return $findings;
+    }
+
+    /** Every payable-subtype account id for this company — shared scope for the ledger-side AP queries above. */
+    private function payableAccountIds(): Collection
+    {
+        return Account::query()->where('subtype', AccountSubtype::Payable->value)->pluck('id');
+    }
+
+    /**
+     * A bill's stored `status` reduced to what it SHOULD be given its OWN
+     * stored `balance` (not a recomputed expected balance — see
+     * checkBillBalances()'s docblock point (3) for why that distinction
+     * matters). Mirrors BillStatus's own three posted cases exactly
+     * (Received/PartiallyPaid/Paid); a `$balance` that is neither 0, the
+     * full `$total`, nor strictly between them (i.e. already corrupted
+     * outside the valid range) falls through to PartiallyPaid, which is
+     * simply "whichever of the three legitimate labels is closest" — the
+     * balance-vs-total document_balance check above is what actually flags
+     * that underlying corruption; this method only needs to produce SOME
+     * mismatch-detectable label, not classify every impossible balance
+     * perfectly.
+     */
+    private function expectedBillStatus(int $balance, int $total): BillStatus
+    {
+        return match (true) {
+            $balance === 0 => BillStatus::Paid,
+            $balance === $total => BillStatus::Received,
+            default => BillStatus::PartiallyPaid,
+        };
+    }
+
+    private function billLabel(Bill $bill): string
+    {
+        return ($bill->reference ?? "#{$bill->id}")." (id {$bill->id})";
     }
 }

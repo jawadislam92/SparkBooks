@@ -11,6 +11,7 @@ use App\Exceptions\Invoicing\InvoiceFxRateInvalid;
 use App\Exceptions\Invoicing\InvoiceHasLivePayments;
 use App\Exceptions\Invoicing\InvoiceHasNoLines;
 use App\Exceptions\Invoicing\InvoiceHasNoValue;
+use App\Exceptions\Invoicing\InvoiceIsOpening;
 use App\Exceptions\Invoicing\InvoiceNotDraft;
 use App\Exceptions\Invoicing\InvoiceNotEmailable;
 use App\Exceptions\Invoicing\InvoiceNotVoidable;
@@ -311,15 +312,24 @@ class InvoiceService
     /**
      * Status guard mirrors InvoiceStatus::canVoid() (sent/partially_paid/paid
      * only), with a friendlier "already voided" message for that specific
-     * case. The live-payments guard queries the LOCKED invoice's payments
-     * fresh (not a possibly-stale relation) so it can never miss a payment
-     * recorded moments earlier in a concurrent transaction that already
-     * committed and released the lock this method is holding.
+     * case. is_opening is checked BEFORE that canVoid() check (Phase 3
+     * carry-in, closed Phase 4 Task 6 — see InvoiceIsOpening's own docblock
+     * for why this guard didn't exist before now): an is_opening invoice
+     * carries no P1 entry of its own to reverse, so voiding it directly
+     * would 404 on the JournalEntry lookup below rather than surfacing a
+     * friendly, actionable message. The live-payments guard queries the
+     * LOCKED invoice's payments fresh (not a possibly-stale relation) so it
+     * can never miss a payment recorded moments earlier in a concurrent
+     * transaction that already committed and released the lock this method
+     * is holding.
      */
     private function guardVoid(Invoice $invoice): void
     {
         if ($invoice->status === InvoiceStatus::Void) {
             throw new InvoiceNotVoidable('This invoice has already been voided.');
+        }
+        if ($invoice->is_opening) {
+            throw new InvoiceIsOpening('This invoice was created by Opening Balances — re-run opening balances instead of voiding it directly.');
         }
         if (! $invoice->status->canVoid()) {
             throw new InvoiceNotVoidable('Only a sent, partially paid, or paid invoice can be voided.');
