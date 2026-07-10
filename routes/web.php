@@ -149,6 +149,13 @@ Route::middleware(['auth', 'verified', 'company', 'can:expenses.draft'])->group(
     Route::get('/expenses/{expense}/edit', [ExpenseController::class, 'edit'])->name('expenses.edit');
     Route::patch('/expenses/{expense}', [ExpenseController::class, 'update'])->name('expenses.update');
     Route::delete('/expenses/{expense}', [ExpenseController::class, 'destroy'])->name('expenses.destroy');
+
+    // Phase 4 Task 8 (spec §17.8): attachments are addable anytime — same
+    // broad, all-four-roles gate as the rest of this group — and download
+    // shares it too (anyone who can see the expense can pull its receipts).
+    // Delete is narrower (expenses.void, below).
+    Route::post('/expenses/{expense}/attachments', [ExpenseController::class, 'storeAttachment'])->name('expenses.attachments.store');
+    Route::get('/expenses/{expense}/attachments/{attachment}', [ExpenseController::class, 'downloadAttachment'])->name('expenses.attachments.download');
 });
 
 // expenses.record is a narrower gate than expenses.draft (Staff can draft but
@@ -160,8 +167,13 @@ Route::middleware(['auth', 'verified', 'company', 'can:expenses.record'])->group
 
 // expenses.void — Phase 4 Task 6, mirrors invoices.void's own narrower-than-
 // draft split (Owner/Admin/Accountant, not Staff — config/permissions.php §7.14).
+// Task 8 reuses this SAME ability for deleting an attachment (spec §17.8's
+// decision: deletes are Owner/Admin/Accountant only) rather than inventing a
+// new one — the tightest existing ability that already maps to that exact
+// role set.
 Route::middleware(['auth', 'verified', 'company', 'can:expenses.void'])->group(function () {
     Route::post('/expenses/{expense}/void', [ExpenseController::class, 'void'])->name('expenses.void');
+    Route::delete('/expenses/{expense}/attachments/{attachment}', [ExpenseController::class, 'destroyAttachment'])->name('expenses.attachments.destroy');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:bills.draft'])->group(function () {
@@ -171,6 +183,10 @@ Route::middleware(['auth', 'verified', 'company', 'can:bills.draft'])->group(fun
     Route::get('/bills/{bill}/edit', [BillController::class, 'edit'])->name('bills.edit');
     Route::patch('/bills/{bill}', [BillController::class, 'update'])->name('bills.update');
     Route::delete('/bills/{bill}', [BillController::class, 'destroy'])->name('bills.destroy');
+
+    // Phase 4 Task 8 — mirrors the expenses.attachments group above exactly.
+    Route::post('/bills/{bill}/attachments', [BillController::class, 'storeAttachment'])->name('bills.attachments.store');
+    Route::get('/bills/{bill}/attachments/{attachment}', [BillController::class, 'downloadAttachment'])->name('bills.attachments.download');
 });
 
 // bills.receive is a narrower gate than bills.draft (Staff can draft but not
@@ -192,9 +208,13 @@ Route::middleware(['auth', 'verified', 'company', 'can:payments.record'])->group
 // the bill itself (P9, spec §6) are two steps of the same accounting-correct
 // "void a bill" workflow (payments first) — mirrors invoices.void gating
 // both invoice + invoice payment void.
+// Task 8 reuses bills.void for deleting an attachment too — same reasoning
+// as the expenses.void group above (tightest existing Owner/Admin/Accountant
+// ability, spec §17.8).
 Route::middleware(['auth', 'verified', 'company', 'can:bills.void'])->group(function () {
     Route::post('/bills/{bill}/void', [BillController::class, 'void'])->name('bills.void');
     Route::post('/bills/{bill}/payments/{payment}/void', [BillController::class, 'voidPayment'])->name('bills.payments.void');
+    Route::delete('/bills/{bill}/attachments/{attachment}', [BillController::class, 'destroyAttachment'])->name('bills.attachments.destroy');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:items.manage'])->group(function () {

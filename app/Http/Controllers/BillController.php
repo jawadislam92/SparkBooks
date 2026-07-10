@@ -4,22 +4,26 @@ namespace App\Http\Controllers;
 
 use App\Enums\BillStatus;
 use App\Enums\ContactType;
+use App\Exceptions\AttachmentRejected;
 use App\Exceptions\Documents\BillPaymentException;
 use App\Exceptions\Documents\BillPaymentVoidException;
 use App\Exceptions\Documents\DocumentPostException;
 use App\Exceptions\Documents\DocumentVoidException;
 use App\Exceptions\IneligibleCategoryAccount;
 use App\Exceptions\Ledger\LedgerException;
+use App\Http\Requests\StoreAttachmentRequest;
 use App\Http\Requests\StoreBillPaymentRequest;
 use App\Http\Requests\StoreBillRequest;
 use App\Http\Requests\UpdateBillRequest;
 use App\Models\Account;
+use App\Models\Attachment;
 use App\Models\BankAccount;
 use App\Models\Bill;
 use App\Models\BillLine;
 use App\Models\BillPayment;
 use App\Models\Contact;
 use App\Models\TaxRate;
+use App\Services\AttachmentService;
 use App\Services\BillPaymentService;
 use App\Services\BillService;
 use App\Services\DocumentLineCalculator;
@@ -34,6 +38,7 @@ use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
 use Inertia\Response;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 /**
  * Draft-only bill CRUD (Phase 4 Task 2) — the AP-side mirror of
@@ -132,6 +137,7 @@ class BillController extends Controller
                 'lines',
                 'payments' => fn ($query) => $query->orderBy('payment_date')->orderBy('id'),
                 'payments.bankAccount:id,name',
+                'attachments' => fn ($query) => $query->orderByDesc('id'),
             ])
             ->findOrFail($bill);
 
@@ -331,6 +337,65 @@ class BillController extends Controller
     }
 
     /**
+     * Uploads a receipt/bill-scan attachment onto a bill (spec §17.8, Phase
+     * 4 Task 8) — gated by bills.draft, the SAME (broad, all-four-roles)
+     * ability as the rest of this route group: attachments are addable
+     * anytime, even once the bill has left draft status (vendor scans
+     * genuinely do arrive late) — a deliberate exception to the "only a
+     * draft is editable" rule the other actions above enforce, not an
+     * oversight. Mirrors ExpenseController::storeAttachment exactly (both
+     * controllers share AttachmentService, the actual hardening lives
+     * there). $bill is a plain route parameter, same reasoning as every
+     * other action here.
+     */
+    public function storeAttachment(StoreAttachmentRequest $request, string $bill, AttachmentService $service): RedirectResponse
+    {
+        $model = Bill::query()->findOrFail($bill);
+
+        try {
+            $service->store($model, $request->file('file'));
+        } catch (AttachmentRejected $e) {
+            throw ValidationException::withMessages(['file' => $e->getMessage()]);
+        }
+
+        return redirect()->route('bills.edit', $model->id);
+    }
+
+    /**
+     * Streams an attachment's original bytes back — the ONLY way one is
+     * ever read (spec §17.8: authenticated, tenant-scoped, gated route).
+     * Gated by bills.draft, same group as storeAttachment above. $attachment
+     * is resolved off the BILL's own relation (not Attachment::findOrFail
+     * directly), so an attachment belonging to a DIFFERENT bill — or an
+     * Expense's attachment reached via this route — 404s here too, not just
+     * a foreign company's. Mirrors voidPayment's nested scoped findOrFail
+     * exactly.
+     */
+    public function downloadAttachment(string $bill, string $attachment, AttachmentService $service): StreamedResponse
+    {
+        $model = Bill::query()->findOrFail($bill);
+        $attachmentModel = $model->attachments()->findOrFail($attachment);
+
+        return $service->download($attachmentModel);
+    }
+
+    /**
+     * Deletes an attachment — gated by bills.void (Owner/Admin/Accountant
+     * only, spec §17.8's decision), a narrower ability than the bills.draft
+     * upload/download gate above. $attachment resolved off the bill's own
+     * relation, same nested-scoped reasoning as downloadAttachment above.
+     */
+    public function destroyAttachment(string $bill, string $attachment, AttachmentService $service): RedirectResponse
+    {
+        $model = Bill::query()->findOrFail($bill);
+        $attachmentModel = $model->attachments()->findOrFail($attachment);
+
+        $service->delete($attachmentModel);
+
+        return redirect()->route('bills.edit', $model->id);
+    }
+
+    /**
      * Extracts and validates the X-Idempotency-Key header (a UUID) — mirrors
      * InvoiceController::requireIdempotencyKey. Both void()/voidPayment()
      * above need the identical guard.
@@ -494,7 +559,23 @@ class BillController extends Controller
             'balance' => $bill->balance,
             'lines' => $this->linesPayload($bill->lines),
             'payments' => $this->paymentsPayload($bill->payments),
+            'attachments' => $this->attachmentsPayload($bill->attachments),
         ];
+    }
+
+    /**
+     * @param  Collection<int, Attachment>  $attachments
+     * @return array<int, array<string, mixed>>
+     */
+    private function attachmentsPayload(Collection $attachments): array
+    {
+        return $attachments->map(fn (Attachment $attachment) => [
+            'id' => $attachment->id,
+            'original_name' => $attachment->original_name,
+            'mime' => $attachment->mime,
+            'size' => $attachment->size,
+            'created_at' => $attachment->created_at?->toIso8601String(),
+        ])->values()->all();
     }
 
     /**

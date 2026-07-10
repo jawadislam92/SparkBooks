@@ -2,6 +2,7 @@ import Button from '@/Components/ui/Button';
 import Field from '@/Components/ui/Field';
 import MoneyText from '@/Components/ui/MoneyText';
 import Sheet from '@/Components/ui/Sheet';
+import AttachmentSection, { AttachmentData } from '@/Components/documents/AttachmentSection';
 import DocumentLineEditor, {
     CategoryAccountOption,
     DocumentLineRow,
@@ -54,6 +55,7 @@ interface ExpenseData {
     tax_total: number;
     total: number;
     lines: ExpenseLineData[];
+    attachments: AttachmentData[];
 }
 
 interface EditPageProps extends PageProps {
@@ -443,6 +445,19 @@ export default function Edit({ expense, contacts, bankAccounts, categoryAccounts
                     </Field>
                 </Sheet>
             </form>
+
+            {isEditing && (
+                <Sheet className="mt-6">
+                    <AttachmentSection
+                        attachments={expense!.attachments}
+                        uploadUrl={route('expenses.attachments.store', expense!.id)}
+                        downloadUrl={(attachmentId) => route('expenses.attachments.download', [expense!.id, attachmentId])}
+                        destroyUrl={(attachmentId) => route('expenses.attachments.destroy', [expense!.id, attachmentId])}
+                        canUpload={can['expenses.draft']}
+                        canDelete={can['expenses.void']}
+                    />
+                </Sheet>
+            )}
 
             {confirmingDelete && (
                 <DeleteConfirmDialog

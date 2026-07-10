@@ -3,18 +3,22 @@
 namespace App\Http\Controllers;
 
 use App\Enums\ExpenseStatus;
+use App\Exceptions\AttachmentRejected;
 use App\Exceptions\Documents\DocumentPostException;
 use App\Exceptions\Documents\DocumentVoidException;
 use App\Exceptions\IneligibleCategoryAccount;
 use App\Exceptions\Ledger\LedgerException;
+use App\Http\Requests\StoreAttachmentRequest;
 use App\Http\Requests\StoreExpenseRequest;
 use App\Http\Requests\UpdateExpenseRequest;
 use App\Models\Account;
+use App\Models\Attachment;
 use App\Models\BankAccount;
 use App\Models\Contact;
 use App\Models\Expense;
 use App\Models\ExpenseLine;
 use App\Models\TaxRate;
+use App\Services\AttachmentService;
 use App\Services\DocumentLineCalculator;
 use App\Services\ExpenseService;
 use App\Support\AuditLogger;
@@ -28,6 +32,7 @@ use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
 use Inertia\Response;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 /**
  * Draft-only expense CRUD (Phase 4 Task 2) — the AP-side mirror of
@@ -108,7 +113,7 @@ class ExpenseController extends Controller
      */
     public function edit(string $expense): Response
     {
-        $model = Expense::query()->with('lines')->findOrFail($expense);
+        $model = Expense::query()->with(['lines', 'attachments' => fn ($query) => $query->orderByDesc('id')])->findOrFail($expense);
 
         return Inertia::render('Expenses/Edit', array_merge(
             ['expense' => $this->expenseEditPayload($model)],
@@ -254,6 +259,68 @@ class ExpenseController extends Controller
 
             throw ValidationException::withMessages(['status' => 'This expense has already been voided.']);
         }
+
+        return redirect()->route('expenses.edit', $model->id);
+    }
+
+    /**
+     * Uploads a receipt/bill-scan attachment onto an expense (spec §17.8,
+     * Phase 4 Task 8) — gated by expenses.draft, the SAME (broad, all-four-
+     * roles) ability as the rest of this route group: attachments are
+     * addable anytime, even once the expense has left draft status
+     * (receipts genuinely do arrive late) — a deliberate exception to the
+     * "only a draft is editable" rule the other actions above enforce, not
+     * an oversight. $expense is a plain route parameter, same
+     * SubstituteBindings-ordering reasoning as every other action here.
+     * StoreAttachmentRequest is the friendly-422 half of the hardening
+     * (size + content-sniff); AttachmentRejected is AttachmentService's own
+     * caller-independent backstop for the same two guards.
+     */
+    public function storeAttachment(StoreAttachmentRequest $request, string $expense, AttachmentService $service): RedirectResponse
+    {
+        $model = Expense::query()->findOrFail($expense);
+
+        try {
+            $service->store($model, $request->file('file'));
+        } catch (AttachmentRejected $e) {
+            throw ValidationException::withMessages(['file' => $e->getMessage()]);
+        }
+
+        return redirect()->route('expenses.edit', $model->id);
+    }
+
+    /**
+     * Streams an attachment's original bytes back — the ONLY way one is
+     * ever read (spec §17.8: authenticated, tenant-scoped, gated route).
+     * Gated by expenses.draft, same group as storeAttachment above (anyone
+     * who can see the expense can pull its receipts). $attachment is
+     * resolved off the EXPENSE's own relation (not Attachment::findOrFail
+     * directly), so an attachment belonging to a DIFFERENT expense — or a
+     * Bill's attachment reached via this route — 404s here too, not just a
+     * foreign company's. Mirrors BillController::voidPayment's nested
+     * scoped findOrFail exactly.
+     */
+    public function downloadAttachment(string $expense, string $attachment, AttachmentService $service): StreamedResponse
+    {
+        $model = Expense::query()->findOrFail($expense);
+        $attachmentModel = $model->attachments()->findOrFail($attachment);
+
+        return $service->download($attachmentModel);
+    }
+
+    /**
+     * Deletes an attachment — gated by expenses.void (Owner/Admin/
+     * Accountant only, spec §17.8's decision), a narrower ability than the
+     * expenses.draft upload/download gate above. $attachment resolved off
+     * the expense's own relation, same nested-scoped reasoning as
+     * downloadAttachment above.
+     */
+    public function destroyAttachment(string $expense, string $attachment, AttachmentService $service): RedirectResponse
+    {
+        $model = Expense::query()->findOrFail($expense);
+        $attachmentModel = $model->attachments()->findOrFail($attachment);
+
+        $service->delete($attachmentModel);
 
         return redirect()->route('expenses.edit', $model->id);
     }
@@ -410,6 +477,7 @@ class ExpenseController extends Controller
             'tax_total' => $expense->tax_total,
             'total' => $expense->total,
             'lines' => $this->linesPayload($expense->lines),
+            'attachments' => $this->attachmentsPayload($expense->attachments),
         ];
     }
 
@@ -426,6 +494,21 @@ class ExpenseController extends Controller
             'tax_rate_id' => $line->tax_rate_id,
             'amount' => $line->amount,
             'line_tax' => $line->line_tax,
+        ])->values()->all();
+    }
+
+    /**
+     * @param  Collection<int, Attachment>  $attachments
+     * @return array<int, array<string, mixed>>
+     */
+    private function attachmentsPayload(Collection $attachments): array
+    {
+        return $attachments->map(fn (Attachment $attachment) => [
+            'id' => $attachment->id,
+            'original_name' => $attachment->original_name,
+            'mime' => $attachment->mime,
+            'size' => $attachment->size,
+            'created_at' => $attachment->created_at?->toIso8601String(),
         ])->values()->all();
     }
 }

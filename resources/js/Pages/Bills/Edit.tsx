@@ -2,6 +2,7 @@ import Button from '@/Components/ui/Button';
 import Field from '@/Components/ui/Field';
 import MoneyText from '@/Components/ui/MoneyText';
 import Sheet from '@/Components/ui/Sheet';
+import AttachmentSection, { AttachmentData } from '@/Components/documents/AttachmentSection';
 import BillPaymentModal, { BillPaymentModalBankAccount } from '@/Components/documents/BillPaymentModal';
 import DocumentLineEditor, {
     CategoryAccountOption,
@@ -76,6 +77,7 @@ interface BillData {
     balance: number;
     lines: BillLineData[];
     payments: BillPaymentData[];
+    attachments: AttachmentData[];
 }
 
 interface EditPageProps extends PageProps {
@@ -600,6 +602,19 @@ export default function Edit({ bill, contacts, categoryAccounts, taxRates, bankA
                             </tbody>
                         </table>
                     )}
+                </Sheet>
+            )}
+
+            {isEditing && (
+                <Sheet className="mt-6">
+                    <AttachmentSection
+                        attachments={bill!.attachments}
+                        uploadUrl={route('bills.attachments.store', bill!.id)}
+                        downloadUrl={(attachmentId) => route('bills.attachments.download', [bill!.id, attachmentId])}
+                        destroyUrl={(attachmentId) => route('bills.attachments.destroy', [bill!.id, attachmentId])}
+                        canUpload={can['bills.draft']}
+                        canDelete={can['bills.void']}
+                    />
                 </Sheet>
             )}
 
