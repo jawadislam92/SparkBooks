@@ -2,7 +2,7 @@ import MoneyText from '@/Components/ui/MoneyText';
 import Sheet from '@/Components/ui/Sheet';
 import AppShell from '@/Layouts/AppShell';
 import { PageProps } from '@/types';
-import { Head, router, usePage } from '@inertiajs/react';
+import { Head, Link, router, usePage } from '@inertiajs/react';
 import { useState } from 'react';
 
 interface ProfitAndLossRow {
@@ -48,14 +48,23 @@ function toneClass(amount: number): string {
     return amount < 0 ? 'text-clay' : 'text-spark';
 }
 
+/** Drill-down target for every account row: General Ledger, scoped to this account and period. */
+function generalLedgerHref(accountId: number, from: string, to: string): string {
+    return `${route('reports.general-ledger')}?account=${accountId}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+}
+
 function SectionRows({
     section,
     currency,
     monthCount,
+    from,
+    to,
 }: {
     section: ProfitAndLossSection;
     currency: string;
     monthCount: number;
+    from: string;
+    to: string;
 }) {
     return (
         <>
@@ -64,7 +73,14 @@ function SectionRows({
                     <td className="py-2 pr-3 align-top font-mono text-xs text-ink-700">
                         {row.code}
                     </td>
-                    <td className="py-2 pr-3 align-top">{row.name}</td>
+                    <td className="py-2 pr-3 align-top">
+                        <Link
+                            href={generalLedgerHref(row.account_id, from, to)}
+                            className="text-spark underline decoration-dotted underline-offset-4 hover:no-underline"
+                        >
+                            {row.name}
+                        </Link>
+                    </td>
                     {row.months.map((amount, index) => (
                         <td key={index} className="py-2 pl-3 align-top">
                             <MoneyText minor={amount} currency={currency} size="sm" />
@@ -194,14 +210,14 @@ export default function ProfitAndLoss({ report, canExport }: ProfitAndLossPagePr
                                         Income
                                     </td>
                                 </tr>
-                                <SectionRows section={report.income} currency={currency} monthCount={monthCount} />
+                                <SectionRows section={report.income} currency={currency} monthCount={monthCount} from={from} to={to} />
 
                                 <tr>
                                     <td colSpan={monthCount + 3} className="pb-1 pt-4 font-display text-sm font-semibold text-ink">
                                         Expenses
                                     </td>
                                 </tr>
-                                <SectionRows section={report.expenses} currency={currency} monthCount={monthCount} />
+                                <SectionRows section={report.expenses} currency={currency} monthCount={monthCount} from={from} to={to} />
                             </tbody>
                             <tfoot>
                                 <tr className="border-t-2 border-rule">

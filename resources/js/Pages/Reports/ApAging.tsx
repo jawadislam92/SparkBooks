@@ -47,6 +47,20 @@ const CURRENT_NOTE =
     'Not yet due as of the report date. Bills with no due date are treated as current.';
 
 /**
+ * Drill-down target for a contact row: General Ledger, scoped to the AP
+ * control account and this one contact, through the as-of date. `from` is
+ * left unset -- GeneralLedgerController falls back to its own default
+ * (current fiscal year to date), same as Balance Sheet's drill-down.
+ */
+function generalLedgerHref(controlAccount: AgingControlAccount | null, contactId: number, asOf: string): string {
+    if (controlAccount === null) {
+        return route('reports.general-ledger');
+    }
+
+    return `${route('reports.general-ledger')}?account=${controlAccount.account_id}&contact=${contactId}&to=${encodeURIComponent(asOf)}`;
+}
+
+/**
  * A/P Aging (spec §7.11): outstanding vendor balances bucketed by how many
  * days past each bill's own due date the report date falls — the exact AP
  * mirror of Reports/ArAging.tsx (see AgingReport's class docblock for the
@@ -145,7 +159,7 @@ export default function ApAging({ report, canExport }: ApAgingPageProps) {
                                         <tr key={row.contact_id} className="border-b border-rule text-ink last:border-b-0">
                                             <td className="py-2 pr-3 align-top">
                                                 <Link
-                                                    href={route('contacts.show', row.contact_id)}
+                                                    href={generalLedgerHref(report.control_account, row.contact_id, report.as_of)}
                                                     className="text-spark underline decoration-dotted underline-offset-4 hover:no-underline"
                                                 >
                                                     {row.name}

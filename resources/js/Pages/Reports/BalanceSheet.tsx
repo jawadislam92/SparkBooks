@@ -2,7 +2,7 @@ import MoneyText from '@/Components/ui/MoneyText';
 import Sheet from '@/Components/ui/Sheet';
 import AppShell from '@/Layouts/AppShell';
 import { PageProps } from '@/types';
-import { Head, router, usePage } from '@inertiajs/react';
+import { Head, Link, router, usePage } from '@inertiajs/react';
 import { useState } from 'react';
 
 interface BalanceSheetRow {
@@ -54,13 +54,31 @@ const INPUT_CLASSES =
 const RETAINED_EARNINGS_NOTE =
     'Retained Earnings here folds every completed fiscal year’s net income into account 3200’s posted balance, and shows the current fiscal year’s earnings on its own line below. The Trial Balance shows 3200 at its raw posted balance instead, alongside the still-open income and expense accounts — so the two reports will show different Retained Earnings figures by design.';
 
-function SectionRows({ rows, currency }: { rows: BalanceSheetRow[]; currency: string }) {
+/**
+ * Drill-down target for every account row: General Ledger, scoped to this
+ * account through the as-of date. `from` is left unset -- the Balance Sheet
+ * has no period start of its own, so GeneralLedgerController falls back to
+ * its own default (current fiscal year to date), mirroring how Balance
+ * Sheet's own Retained Earnings math treats the current fiscal year.
+ */
+function generalLedgerHref(accountId: number, asOf: string): string {
+    return `${route('reports.general-ledger')}?account=${accountId}&to=${encodeURIComponent(asOf)}`;
+}
+
+function SectionRows({ rows, currency, asOf }: { rows: BalanceSheetRow[]; currency: string; asOf: string }) {
     return (
         <>
             {rows.map((row) => (
                 <tr key={row.account_id} className="border-b border-rule text-ink last:border-b-0">
                     <td className="py-2 pr-3 align-top font-mono text-xs text-ink-700">{row.code}</td>
-                    <td className="py-2 pr-3 align-top">{row.name}</td>
+                    <td className="py-2 pr-3 align-top">
+                        <Link
+                            href={generalLedgerHref(row.account_id, asOf)}
+                            className="text-spark underline decoration-dotted underline-offset-4 hover:no-underline"
+                        >
+                            {row.name}
+                        </Link>
+                    </td>
                     <td className="py-2 pl-3 align-top">
                         <MoneyText minor={row.amount} currency={currency} size="sm" />
                     </td>
@@ -164,7 +182,7 @@ export default function BalanceSheet({ report, canExport }: BalanceSheetPageProp
                             <h3 className="pb-2 font-display text-sm font-semibold text-ink">Assets</h3>
                             <table className="w-full border-collapse text-left text-sm">
                                 <tbody>
-                                    <SectionRows rows={report.assets.rows} currency={currency} />
+                                    <SectionRows rows={report.assets.rows} currency={currency} asOf={asOf} />
                                 </tbody>
                                 <tfoot>
                                     <SectionTotal label="Total Assets" amount={report.assets.total} currency={currency} />
@@ -176,7 +194,7 @@ export default function BalanceSheet({ report, canExport }: BalanceSheetPageProp
                             <h3 className="pb-2 font-display text-sm font-semibold text-ink">Liabilities</h3>
                             <table className="w-full border-collapse text-left text-sm">
                                 <tbody>
-                                    <SectionRows rows={report.liabilities.rows} currency={currency} />
+                                    <SectionRows rows={report.liabilities.rows} currency={currency} asOf={asOf} />
                                 </tbody>
                                 <tfoot>
                                     <SectionTotal label="Total Liabilities" amount={report.liabilities.total} currency={currency} />
@@ -188,7 +206,7 @@ export default function BalanceSheet({ report, canExport }: BalanceSheetPageProp
                             <h3 className="pb-2 font-display text-sm font-semibold text-ink">Equity</h3>
                             <table className="w-full border-collapse text-left text-sm">
                                 <tbody>
-                                    <SectionRows rows={report.equity.rows} currency={currency} />
+                                    <SectionRows rows={report.equity.rows} currency={currency} asOf={asOf} />
                                     <tr className="border-b border-rule text-ink">
                                         <td className="py-2 pr-3 align-top" colSpan={2}>
                                             <span
