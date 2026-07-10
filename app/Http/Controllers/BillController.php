@@ -5,7 +5,9 @@ namespace App\Http\Controllers;
 use App\Enums\BillStatus;
 use App\Enums\ContactType;
 use App\Exceptions\Documents\BillPaymentException;
+use App\Exceptions\Documents\BillPaymentVoidException;
 use App\Exceptions\Documents\DocumentPostException;
+use App\Exceptions\Documents\DocumentVoidException;
 use App\Exceptions\IneligibleCategoryAccount;
 use App\Exceptions\Ledger\LedgerException;
 use App\Http\Requests\StoreBillPaymentRequest;
@@ -24,6 +26,7 @@ use App\Services\DocumentLineCalculator;
 use App\Support\AuditLogger;
 use App\Support\CategoryAccountGuard;
 use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -39,8 +42,9 @@ use Inertia\Response;
  * edited here always has status=draft. Only a draft bill is editable/
  * deletable — BillLine::booted() enforces the same rule at the model layer
  * as a defense-in-depth backstop below the checks in update()/destroy()
- * here. "Receive" (posting P6/P6t, Task 4) and "pay" (posting P7, Task 5)
- * live in this same controller too — void is a later Phase 4 task.
+ * here. "Receive" (posting P6/P6t, Task 4), "pay" (posting P7, Task 5), and
+ * "void"/"void a payment" (posting rule P9 reversals, Task 6) all live in
+ * this same controller too.
  *
  * Unlike Expense: `contact_id` is REQUIRED and must be a vendor/both contact
  * (spec §7.8 — a bill always names a vendor); there is no `bank_account_id`
@@ -255,6 +259,109 @@ class BillController extends Controller
         $audit->log('bill.draft_deleted', $model, before: $before);
 
         return redirect()->route('bills.index');
+    }
+
+    /**
+     * Voids a received/partially-paid/paid bill — posting rule P9 (spec §6):
+     * a mirror reversal of the bill's own P6/P6t entry, via BillService::void.
+     * $bill is a plain route parameter (not implicit binding), same
+     * reasoning as edit()/update()/destroy()/receive() above.
+     *
+     * Three failure shapes surface as a 422 on the generic `status` field,
+     * mirroring InvoiceController::void: DocumentVoidException (this
+     * service's own domain guards — not voidable, live payments remain,
+     * is_opening), a LedgerException (e.g. a locked period on today's
+     * reversal date), and — as defense in depth for a genuine concurrent
+     * double-void race, mirroring InvoiceController::void's identical
+     * backstop — a UniqueConstraintViolationException on the journal_entries
+     * source-unique index.
+     */
+    public function void(Request $request, string $bill, BillService $service): RedirectResponse
+    {
+        $model = Bill::query()->findOrFail($bill);
+        $idempotencyKey = $this->requireIdempotencyKey($request);
+
+        try {
+            $service->void($idempotencyKey, $model);
+        } catch (DocumentVoidException|LedgerException $e) {
+            throw ValidationException::withMessages(['status' => $e->getMessage()]);
+        } catch (UniqueConstraintViolationException $e) {
+            if (! $this->isDuplicateReversal($e)) {
+                throw $e;
+            }
+
+            throw ValidationException::withMessages(['status' => 'This bill has already been voided.']);
+        }
+
+        return redirect()->route('bills.edit', $model->id);
+    }
+
+    /**
+     * Reverses a single posted bill payment — posting rule P7's mirror, via
+     * BillPaymentService::void. $payment is resolved off the bill's own
+     * relation (not BillPayment::findOrFail directly) so a payment that
+     * belongs to a DIFFERENT bill in the same company still 404s here, not
+     * just a payment in a different company — mirrors
+     * InvoiceController::voidPayment exactly.
+     *
+     * Same three-way failure classification as void() above: BillPaymentVoidException
+     * (already reversed), LedgerException (locked period), and the same
+     * narrow UniqueConstraintViolationException backstop.
+     */
+    public function voidPayment(Request $request, string $bill, string $payment, BillPaymentService $service): RedirectResponse
+    {
+        $model = Bill::query()->findOrFail($bill);
+        $paymentModel = $model->payments()->findOrFail($payment);
+
+        $idempotencyKey = $this->requireIdempotencyKey($request);
+
+        try {
+            $service->void($idempotencyKey, $paymentModel);
+        } catch (BillPaymentVoidException|LedgerException $e) {
+            throw ValidationException::withMessages(['status' => $e->getMessage()]);
+        } catch (UniqueConstraintViolationException $e) {
+            if (! $this->isDuplicateReversal($e)) {
+                throw $e;
+            }
+
+            throw ValidationException::withMessages(['status' => 'This payment has already been reversed.']);
+        }
+
+        return redirect()->route('bills.edit', $model->id);
+    }
+
+    /**
+     * Extracts and validates the X-Idempotency-Key header (a UUID) — mirrors
+     * InvoiceController::requireIdempotencyKey. Both void()/voidPayment()
+     * above need the identical guard.
+     */
+    private function requireIdempotencyKey(Request $request): string
+    {
+        $idempotencyKey = $request->header('X-Idempotency-Key');
+        if (! is_string($idempotencyKey) || ! Str::isUuid($idempotencyKey)) {
+            throw ValidationException::withMessages([
+                'idempotency_key' => 'A valid X-Idempotency-Key header (UUID) is required.',
+            ]);
+        }
+
+        return $idempotencyKey;
+    }
+
+    /**
+     * Whether the violated unique index is the journal_entries source-unique
+     * index (one primary + one reversal max per source) — mirrors
+     * InvoiceController::isDuplicateReversal. Prefers the driver's populated
+     * index name, falling back to a message substring for drivers/
+     * situations where ->index isn't set (MySQL always includes the
+     * violated key name in the duplicate-entry message).
+     */
+    private function isDuplicateReversal(UniqueConstraintViolationException $e): bool
+    {
+        if ($e->index !== null) {
+            return $e->index === 'journal_entries_source_unique';
+        }
+
+        return str_contains($e->getMessage(), 'journal_entries_source_unique');
     }
 
     /**

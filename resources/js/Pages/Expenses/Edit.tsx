@@ -99,6 +99,46 @@ function DeleteConfirmDialog({ onCancel, onConfirm, processing }: DeleteConfirmD
     );
 }
 
+interface VoidConfirmDialogProps {
+    onCancel: () => void;
+    onConfirm: () => void;
+    processing: boolean;
+}
+
+/**
+ * Minimal void confirmation (Phase 4 Task 6) — Task 9 polishes this into the
+ * full accounting-correct flow (mirrors Components/invoices/VoidDialog).
+ * Posted entries are immutable; voiding reverses the P4/P5 entry rather than
+ * editing it, so this is worth a confirm step exactly like deleting a draft.
+ */
+function VoidConfirmDialog({ onCancel, onConfirm, processing }: VoidConfirmDialogProps) {
+    return (
+        <Dialog open onClose={onCancel} className="relative z-50">
+            <DialogBackdrop className="fixed inset-0 bg-ink/30" />
+            <div className="fixed inset-0 flex items-center justify-center p-4">
+                <DialogPanel className="w-full max-w-sm rounded-sheet bg-paper-raised p-6 shadow-sheet">
+                    <DialogTitle className="font-display text-lg font-semibold text-ink">
+                        Void this expense?
+                    </DialogTitle>
+                    <p className="mt-2 text-sm text-ink-700">
+                        This posts a reversing entry that undoes the expense on the books. The
+                        expense stays visible, marked Void, but this cannot be undone — to record
+                        it again you&apos;ll need a new expense.
+                    </p>
+                    <div className="mt-5 flex justify-end gap-2">
+                        <Button type="button" variant="quiet" onClick={onCancel}>
+                            Cancel
+                        </Button>
+                        <Button type="button" variant="danger" onClick={onConfirm} disabled={processing}>
+                            {processing ? 'Voiding…' : 'Void expense'}
+                        </Button>
+                    </div>
+                </DialogPanel>
+            </div>
+        </Dialog>
+    );
+}
+
 interface ExpenseFormData {
     contact_id: string;
     expense_date: string;
@@ -115,6 +155,9 @@ export default function Edit({ expense, contacts, bankAccounts, categoryAccounts
     const [confirmingDelete, setConfirmingDelete] = useState(false);
     const [deleting, setDeleting] = useState(false);
     const [recording, setRecording] = useState(false);
+    const [confirmingVoid, setConfirmingVoid] = useState(false);
+    const [voiding, setVoiding] = useState(false);
+    const isRecorded = expense !== null && expense.status === 'recorded';
 
     // Minimal wiring ahead of the full Show page (Task 9): mirrors how
     // Invoices/Edit carried its own Send action before Invoices/Show existed
@@ -187,6 +230,27 @@ export default function Edit({ expense, contacts, bankAccounts, categoryAccounts
         });
     }
 
+    // Posts ExpenseController::void with a fresh idempotency key per click —
+    // mirrors recordExpense()'s own shape.
+    function confirmVoid() {
+        if (!expense) {
+            return;
+        }
+        setVoiding(true);
+        router.post(
+            route('expenses.void', expense.id),
+            {},
+            {
+                headers: { 'X-Idempotency-Key': crypto.randomUUID() },
+                preserveScroll: true,
+                onFinish: () => {
+                    setVoiding(false);
+                    setConfirmingVoid(false);
+                },
+            },
+        );
+    }
+
     const pageTitle = isEditing ? 'Expense' : 'New expense';
 
     return (
@@ -238,6 +302,14 @@ export default function Edit({ expense, contacts, bankAccounts, categoryAccounts
                                     </Button>
                                 )}
                             </div>
+                        ) : isRecorded && can['expenses.void'] ? (
+                            <Button
+                                type="button"
+                                variant="danger"
+                                onClick={() => setConfirmingVoid(true)}
+                            >
+                                Void expense
+                            </Button>
                         ) : undefined
                     }
                 >
@@ -375,6 +447,14 @@ export default function Edit({ expense, contacts, bankAccounts, categoryAccounts
                     onCancel={() => setConfirmingDelete(false)}
                     onConfirm={confirmDelete}
                     processing={deleting}
+                />
+            )}
+
+            {confirmingVoid && (
+                <VoidConfirmDialog
+                    onCancel={() => setConfirmingVoid(false)}
+                    onConfirm={confirmVoid}
+                    processing={voiding}
                 />
             )}
         </AppShell>

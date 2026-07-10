@@ -275,6 +275,44 @@ class InvoiceVoidTest extends TestCase
     }
 
     // ---------------------------------------------------------------
+    // is_opening: friendly domain error, not a 404 (Phase 3 carry-in,
+    // closed Phase 4 Task 6 — mirrors BillVoidTest's identical bill-side
+    // coverage; see InvoiceIsOpening's own docblock).
+    // ---------------------------------------------------------------
+
+    public function test_voiding_an_is_opening_invoice_returns_a_friendly_opening_balances_error(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $contact = $this->customer($company);
+        $this->chart($company);
+
+        $invoice = Invoice::factory()->create([
+            'company_id' => $company->id,
+            'contact_id' => $contact->id,
+            'status' => InvoiceStatus::Sent->value,
+            'currency_code' => 'PKR',
+            'fx_rate' => 1,
+            'total' => 50000,
+            'balance' => 50000,
+            'base_total' => 50000,
+            'is_opening' => true,
+            'sent_at' => now(),
+        ]);
+
+        $response = $this->voidInvoiceHttp($invoice, ['memo' => 'Attempt']);
+
+        $response->assertSessionHasErrors('status');
+        $message = session('errors')->first('status');
+        $this->assertStringContainsString('Opening Balances', $message);
+
+        $invoice->refresh();
+        $this->assertSame(InvoiceStatus::Sent, $invoice->status);
+        $this->assertNull($invoice->voided_at);
+        $this->assertLedgerBalances();
+    }
+
+    // ---------------------------------------------------------------
     // Refused while a live payment exists
     // ---------------------------------------------------------------
 

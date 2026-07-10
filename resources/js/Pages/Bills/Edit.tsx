@@ -120,6 +120,56 @@ function DeleteConfirmDialog({ onCancel, onConfirm, processing }: DeleteConfirmD
     );
 }
 
+interface VoidConfirmDialogProps {
+    title: string;
+    description: string;
+    confirmLabel: string;
+    processingLabel: string;
+    onCancel: () => void;
+    onConfirm: () => void;
+    processing: boolean;
+}
+
+/**
+ * Minimal void confirmation (Phase 4 Task 6), shared by both "void the whole
+ * bill" and "reverse a single payment" — Task 9 polishes this into the full
+ * accounting-correct flow (mirrors Components/invoices/VoidDialog, which
+ * lists live payments inline; here the payments-first rule is enforced
+ * server-side and surfaces as the error banner instead — see BillService::
+ * void's BillHasLivePayments guard).
+ */
+function VoidConfirmDialog({
+    title,
+    description,
+    confirmLabel,
+    processingLabel,
+    onCancel,
+    onConfirm,
+    processing,
+}: VoidConfirmDialogProps) {
+    return (
+        <Dialog open onClose={onCancel} className="relative z-50">
+            <DialogBackdrop className="fixed inset-0 bg-ink/30" />
+            <div className="fixed inset-0 flex items-center justify-center p-4">
+                <DialogPanel className="w-full max-w-sm rounded-sheet bg-paper-raised p-6 shadow-sheet">
+                    <DialogTitle className="font-display text-lg font-semibold text-ink">
+                        {title}
+                    </DialogTitle>
+                    <p className="mt-2 text-sm text-ink-700">{description}</p>
+                    <div className="mt-5 flex justify-end gap-2">
+                        <Button type="button" variant="quiet" onClick={onCancel}>
+                            Cancel
+                        </Button>
+                        <Button type="button" variant="danger" onClick={onConfirm} disabled={processing}>
+                            {processing ? processingLabel : confirmLabel}
+                        </Button>
+                    </div>
+                </DialogPanel>
+            </div>
+        </Dialog>
+    );
+}
+
 interface BillFormData {
     contact_id: string;
     reference: string;
@@ -139,6 +189,14 @@ export default function Edit({ bill, contacts, categoryAccounts, taxRates, bankA
     const [deleting, setDeleting] = useState(false);
     const [receiving, setReceiving] = useState(false);
     const [paymentModalOpen, setPaymentModalOpen] = useState(false);
+    const isVoidable =
+        bill !== null && (bill.status === 'received' || bill.status === 'partially_paid' || bill.status === 'paid');
+    const [confirmingVoid, setConfirmingVoid] = useState(false);
+    const [voiding, setVoiding] = useState(false);
+    // Which payment (by id) is mid-confirm for "reverse this payment" — null
+    // when no payment-void confirmation is open.
+    const [confirmingVoidPaymentId, setConfirmingVoidPaymentId] = useState<number | null>(null);
+    const [voidingPayment, setVoidingPayment] = useState(false);
 
     // Minimal wiring ahead of the full Show page (Task 9): mirrors how
     // Invoices/Edit carried its own Send action before Invoices/Show existed
@@ -213,6 +271,51 @@ export default function Edit({ bill, contacts, categoryAccounts, taxRates, bankA
         });
     }
 
+    // Posts BillController::void with a fresh idempotency key per click —
+    // mirrors receiveBill()'s own shape. BillService::void refuses (with a
+    // friendly error banner) while any payment is still posted — the
+    // payments-first rule, spec §6 — so voiding a paid bill means reversing
+    // each payment below first.
+    function confirmVoid() {
+        if (!bill) {
+            return;
+        }
+        setVoiding(true);
+        router.post(
+            route('bills.void', bill.id),
+            {},
+            {
+                headers: { 'X-Idempotency-Key': crypto.randomUUID() },
+                preserveScroll: true,
+                onFinish: () => {
+                    setVoiding(false);
+                    setConfirmingVoid(false);
+                },
+            },
+        );
+    }
+
+    // Posts BillController::voidPayment for one payment — mirrors
+    // confirmVoid()'s own shape.
+    function confirmVoidPayment(paymentId: number) {
+        if (!bill) {
+            return;
+        }
+        setVoidingPayment(true);
+        router.post(
+            route('bills.payments.void', { bill: bill.id, payment: paymentId }),
+            {},
+            {
+                headers: { 'X-Idempotency-Key': crypto.randomUUID() },
+                preserveScroll: true,
+                onFinish: () => {
+                    setVoidingPayment(false);
+                    setConfirmingVoidPaymentId(null);
+                },
+            },
+        );
+    }
+
     const pageTitle = isEditing ? (bill!.reference ?? 'Bill') : 'New bill';
 
     return (
@@ -264,11 +367,24 @@ export default function Edit({ bill, contacts, categoryAccounts, taxRates, bankA
                                     </Button>
                                 )}
                             </div>
-                        ) : canReceivePayment && can['payments.record'] ? (
-                            <Button type="button" onClick={() => setPaymentModalOpen(true)}>
-                                Record payment
-                            </Button>
-                        ) : undefined
+                        ) : (
+                            <div className="flex items-center gap-2">
+                                {isVoidable && can['bills.void'] && (
+                                    <Button
+                                        type="button"
+                                        variant="danger"
+                                        onClick={() => setConfirmingVoid(true)}
+                                    >
+                                        Void bill
+                                    </Button>
+                                )}
+                                {canReceivePayment && can['payments.record'] && (
+                                    <Button type="button" onClick={() => setPaymentModalOpen(true)}>
+                                        Record payment
+                                    </Button>
+                                )}
+                            </div>
+                        )
                     }
                 >
                     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -425,7 +541,8 @@ export default function Edit({ bill, contacts, categoryAccounts, taxRates, bankA
                                     <th scope="col" className="py-2 pr-3 font-medium">Date</th>
                                     <th scope="col" className="py-2 pr-3 font-medium">Account</th>
                                     <th scope="col" className="py-2 pr-3 font-medium">Status</th>
-                                    <th scope="col" className="py-2 pl-3 text-right font-medium">Amount</th>
+                                    <th scope="col" className="py-2 pr-3 text-right font-medium">Amount</th>
+                                    {can['bills.void'] && <th scope="col" className="py-2 pl-3" />}
                                 </tr>
                             </thead>
                             <tbody>
@@ -448,9 +565,22 @@ export default function Edit({ bill, contacts, categoryAccounts, taxRates, bankA
                                                 </span>
                                             )}
                                         </td>
-                                        <td className="py-3 pl-3 align-top text-right">
+                                        <td className="py-3 pr-3 align-top text-right">
                                             <MoneyText minor={payment.amount} currency={currency} size="sm" />
                                         </td>
+                                        {can['bills.void'] && (
+                                            <td className="py-3 pl-3 align-top text-right">
+                                                {payment.status !== 'void' && (
+                                                    <Button
+                                                        type="button"
+                                                        variant="quiet"
+                                                        onClick={() => setConfirmingVoidPaymentId(payment.id)}
+                                                    >
+                                                        Reverse
+                                                    </Button>
+                                                )}
+                                            </td>
+                                        )}
                                     </tr>
                                 ))}
                             </tbody>
@@ -464,6 +594,30 @@ export default function Edit({ bill, contacts, categoryAccounts, taxRates, bankA
                     onCancel={() => setConfirmingDelete(false)}
                     onConfirm={confirmDelete}
                     processing={deleting}
+                />
+            )}
+
+            {confirmingVoid && (
+                <VoidConfirmDialog
+                    title="Void this bill?"
+                    description="This posts a reversing entry that clears the vendor's outstanding balance on the books. The bill stays visible, marked Void, but this cannot be undone — to receive it again you'll need a new bill. If any payment is still posted, voiding is refused until you reverse it below first."
+                    confirmLabel="Void bill"
+                    processingLabel="Voiding…"
+                    onCancel={() => setConfirmingVoid(false)}
+                    onConfirm={confirmVoid}
+                    processing={voiding}
+                />
+            )}
+
+            {confirmingVoidPaymentId !== null && (
+                <VoidConfirmDialog
+                    title="Reverse this payment?"
+                    description="This posts a reversing entry that undoes the payment and reopens the bill's balance by that amount. This cannot be undone."
+                    confirmLabel="Reverse payment"
+                    processingLabel="Reversing…"
+                    onCancel={() => setConfirmingVoidPaymentId(null)}
+                    onConfirm={() => confirmVoidPayment(confirmingVoidPaymentId)}
+                    processing={voidingPayment}
                 />
             )}
 

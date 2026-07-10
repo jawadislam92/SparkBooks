@@ -5,7 +5,9 @@ namespace App\Services;
 use App\Domain\Ledger\EntryDraft;
 use App\Domain\Ledger\LineDraft;
 use App\Enums\BillStatus;
+use App\Enums\EntryRole;
 use App\Exceptions\Documents\BillNotPayable;
+use App\Exceptions\Documents\BillPaymentAlreadyVoided;
 use App\Exceptions\Documents\BillPaymentBankAccountIneligible;
 use App\Exceptions\Documents\BillPaymentExceedsBalance;
 use App\Exceptions\Documents\InvalidBillPaymentAmount;
@@ -13,6 +15,7 @@ use App\Models\Account;
 use App\Models\BankAccount;
 use App\Models\Bill;
 use App\Models\BillPayment;
+use App\Models\JournalEntry;
 use App\Support\AuditLogger;
 use App\Support\IdempotencyService;
 use Carbon\CarbonImmutable;
@@ -38,10 +41,13 @@ use Illuminate\Support\Facades\DB;
  * Shape mirrors InvoicePaymentService::recordPayment/InvoiceService::send/
  * BillService::receive: IdempotencyService::execute -> DB::transaction ->
  * locked read -> guards -> BillPayment row -> LedgerService::post -> bill
- * row update -> AuditLogger. Void (posting-rule reversal, the payment-side
- * counterpart of BillService's eventual void()) is Task 6, not built here —
- * bill_payments.status already carries a 'posted'|'void' enum (Task 1) so
- * that later work has somewhere to land.
+ * row update -> AuditLogger.
+ *
+ * void() (Phase 4 Task 6) is the payment-side counterpart of BillService's
+ * own void() — reverses this payment's own P7 entry and recomputes the
+ * bill's amount_paid/balance/status back toward received/partially_paid,
+ * mirroring InvoicePaymentService::voidPayment exactly (see its own
+ * docblock for the full "why this order" reasoning).
  */
 class BillPaymentService
 {
@@ -110,6 +116,91 @@ class BillPaymentService
                 ]);
 
                 return ['id' => $payment->id];
+            });
+        });
+
+        return BillPayment::query()->findOrFail($result['id']);
+    }
+
+    /**
+     * Reverses a posted payment: posting rule P9's payment-side counterpart
+     * (spec §6) — reverses the payment's own P7 entry (Cr AP WITH the bill's
+     * contact_id / Dr bank, the mirror of Dr AP / Cr bank), marks the
+     * payment 'void', and recomputes the bill back toward
+     * received/partially_paid (never voiding the bill itself — that's a
+     * separate, conscious action via BillService::void, which in turn
+     * REFUSES while any payment here is still 'posted' — payments-first,
+     * spec §6). Mirrors InvoicePaymentService::voidPayment exactly.
+     *
+     * The reversal is always dated TODAY (mirrors
+     * InvoicePaymentService::voidPayment, which likewise takes no date
+     * parameter), so it always lands in an open period even if the original
+     * payment's period has since been locked.
+     *
+     * Shape mirrors record(): IdempotencyService::execute -> DB::transaction
+     * -> locked read -> guard -> LedgerService::reverse -> document
+     * mutation -> AuditLogger. The BILL row is locked (not just the
+     * payment) because amount_paid/balance/status on the bill are
+     * recomputed in the same transaction, and locking the bill is what
+     * already serializes every payment-mutating action against it
+     * (record() does the same) — a concurrent second void() (or a
+     * concurrent record()) blocks here until this transaction commits.
+     * Lock order (bill THEN payment) mirrors
+     * InvoicePaymentService::voidPayment's own (invoice THEN payment).
+     */
+    public function void(string $idempotencyKey, BillPayment $payment): BillPayment
+    {
+        $result = $this->idempotency->execute($idempotencyKey, 'bill_payment.voided', function () use ($payment) {
+            return DB::transaction(function () use ($payment) {
+                $bill = Bill::query()->where('id', $payment->bill_id)->lockForUpdate()->firstOrFail();
+
+                // Re-read the payment fresh under lock — must see the
+                // CURRENT status, not whatever the controller resolved
+                // moments ago (and on an idempotency replay this closure
+                // doesn't run at all, so there's no stale-row risk there
+                // either).
+                $locked = BillPayment::query()->where('id', $payment->id)->lockForUpdate()->firstOrFail();
+
+                if ($locked->status !== 'posted') {
+                    throw new BillPaymentAlreadyVoided('This payment has already been reversed.');
+                }
+
+                $entry = JournalEntry::query()
+                    ->where('source_type', 'bill_payment')
+                    ->where('source_id', $locked->id)
+                    ->where('entry_role', EntryRole::Primary->value)
+                    ->firstOrFail();
+
+                $memo = $bill->reference !== null
+                    ? "Reversed payment for bill {$bill->reference}"
+                    : "Reversed payment for bill #{$bill->id}";
+
+                $reversal = $this->ledger->reverse($entry, CarbonImmutable::today(), $memo);
+
+                // No voided_at column on bill_payments (Task 1 schema) —
+                // status alone carries this, unlike Bill/Expense which both
+                // have one.
+                $locked->forceFill(['status' => 'void'])->save();
+
+                $newAmountPaid = $bill->amount_paid - $locked->amount;
+                $newBalance = $bill->total - $newAmountPaid;
+
+                // Back toward received/partially_paid, never paid — a bill
+                // with a reversed payment is by definition no longer fully
+                // paid. Mirrors InvoicePaymentService::voidPayment's
+                // identical reasoning for Invoice/InvoiceStatus::Sent.
+                $bill->forceFill([
+                    'amount_paid' => $newAmountPaid,
+                    'balance' => $newBalance,
+                    'status' => ($newAmountPaid === 0 ? BillStatus::Received : BillStatus::PartiallyPaid)->value,
+                ])->save();
+
+                $this->audit->log('bill_payment.voided', $locked, after: [
+                    'bill_id' => $bill->id,
+                    'reversal_entry_id' => $reversal->id,
+                ]);
+
+                return ['id' => $locked->id];
             });
         });
 

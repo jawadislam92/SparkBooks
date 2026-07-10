@@ -158,6 +158,12 @@ Route::middleware(['auth', 'verified', 'company', 'can:expenses.record'])->group
     Route::post('/expenses/{expense}/record', [ExpenseController::class, 'record'])->name('expenses.record');
 });
 
+// expenses.void — Phase 4 Task 6, mirrors invoices.void's own narrower-than-
+// draft split (Owner/Admin/Accountant, not Staff — config/permissions.php §7.14).
+Route::middleware(['auth', 'verified', 'company', 'can:expenses.void'])->group(function () {
+    Route::post('/expenses/{expense}/void', [ExpenseController::class, 'void'])->name('expenses.void');
+});
+
 Route::middleware(['auth', 'verified', 'company', 'can:bills.draft'])->group(function () {
     Route::get('/bills', [BillController::class, 'index'])->name('bills.index');
     Route::get('/bills/new', [BillController::class, 'create'])->name('bills.new');
@@ -179,6 +185,16 @@ Route::middleware(['auth', 'verified', 'company', 'can:bills.receive'])->group(f
 // across both AR and AP, not a separate bills-specific gate.
 Route::middleware(['auth', 'verified', 'company', 'can:payments.record'])->group(function () {
     Route::post('/bills/{bill}/payments', [BillController::class, 'recordPayment'])->name('bills.payments.record');
+});
+
+// bills.void gates BOTH void actions (Owner/Admin/Accountant, not Staff —
+// config/permissions.php §7.14): voiding a payment (P7 reversal) and voiding
+// the bill itself (P9, spec §6) are two steps of the same accounting-correct
+// "void a bill" workflow (payments first) — mirrors invoices.void gating
+// both invoice + invoice payment void.
+Route::middleware(['auth', 'verified', 'company', 'can:bills.void'])->group(function () {
+    Route::post('/bills/{bill}/void', [BillController::class, 'void'])->name('bills.void');
+    Route::post('/bills/{bill}/payments/{payment}/void', [BillController::class, 'voidPayment'])->name('bills.payments.void');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:items.manage'])->group(function () {

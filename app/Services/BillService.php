@@ -5,14 +5,19 @@ namespace App\Services;
 use App\Domain\Ledger\EntryDraft;
 use App\Domain\Ledger\LineDraft;
 use App\Enums\BillStatus;
+use App\Enums\EntryRole;
 use App\Exceptions\Documents\BillContactNotEligible;
 use App\Exceptions\Documents\BillDueDateRequired;
+use App\Exceptions\Documents\BillHasLivePayments;
+use App\Exceptions\Documents\BillIsOpening;
 use App\Exceptions\Documents\DocumentHasNoLines;
 use App\Exceptions\Documents\DocumentHasNoValue;
 use App\Exceptions\Documents\DocumentNotDraft;
+use App\Exceptions\Documents\DocumentNotVoidable;
 use App\Models\Account;
 use App\Models\Bill;
 use App\Models\BillLine;
+use App\Models\JournalEntry;
 use App\Models\TaxRate;
 use App\Support\AuditLogger;
 use App\Support\CategoryAccountGuard;
@@ -204,5 +209,105 @@ class BillService
         $lines[] = new LineDraft(accountId: $apAccount->id, debit: 0, credit: $computed['total'], contactId: $bill->contact_id);
 
         return $lines;
+    }
+
+    /**
+     * Voids a received/partially-paid/paid bill: posting rule P9 (spec §6) —
+     * a mirror reversal of the bill's own P6/P6t entry (Dr AP WITH the
+     * vendor's contact_id / Cr category / Cr tax), via LedgerService::reverse.
+     * The AP-side mirror of InvoiceService::void (Phase 3 T5). Accounting-
+     * correct ordering (spec §6, same as invoices): payments must already be
+     * voided one by one via BillPaymentService::void BEFORE the bill itself
+     * can be voided — this method deliberately does NOT auto-reverse them;
+     * it REFUSES outright while any live (non-void) payment remains, so the
+     * user consciously reverses each one first.
+     *
+     * The reversal is always dated TODAY (mirrors InvoiceService::void's own
+     * controller-supplied default, but hardcoded here since BillService::void
+     * takes no date/memo parameters — spec-simpler than the invoice side,
+     * mirrors ExpenseService::void/BillPaymentService::void), so it always
+     * lands in an open period even if the original entry's period has since
+     * been locked.
+     *
+     * Shape mirrors receive(): IdempotencyService::execute -> DB::transaction
+     * -> locked read -> guards -> LedgerService::reverse -> document
+     * mutation -> AuditLogger.
+     */
+    public function void(string $idempotencyKey, Bill $bill): Bill
+    {
+        $result = $this->idempotency->execute($idempotencyKey, 'bill.voided', function () use ($bill) {
+            return DB::transaction(function () use ($bill) {
+                // Row-lock + re-read FRESH state, same reasoning as
+                // InvoiceService::void's own locked read: this MUST see the
+                // CURRENT status/payments, not whatever the controller
+                // resolved moments before this closure runs. Locking here is
+                // also what serializes a concurrent BillPaymentService::void
+                // against the same bill (that method locks the bill row
+                // too) and a concurrent second void() call.
+                $locked = Bill::query()->where('id', $bill->id)->lockForUpdate()->firstOrFail();
+
+                $this->guardVoid($locked);
+
+                $entry = JournalEntry::query()
+                    ->where('source_type', 'bill')
+                    ->where('source_id', $locked->id)
+                    ->where('entry_role', EntryRole::Primary->value)
+                    ->firstOrFail();
+
+                $memo = $locked->reference !== null ? "Void: Bill {$locked->reference}" : "Void: Bill #{$locked->id}";
+
+                $reversal = $this->ledger->reverse($entry, CarbonImmutable::today(), $memo);
+
+                $locked->forceFill([
+                    'status' => BillStatus::Void->value,
+                    'voided_at' => now(),
+                ])->save();
+
+                $this->audit->log('bill.voided', $locked, after: ['reversal_entry_id' => $reversal->id]);
+
+                return ['id' => $locked->id];
+            });
+        });
+
+        return Bill::query()->findOrFail($result['id']);
+    }
+
+    /**
+     * Status guard mirrors BillStatus::canVoid() (received/partially_paid/
+     * paid only), with a friendlier "already voided" message for that
+     * specific case (draft falls through to the generic message — deleting a
+     * draft bill is the correct action there, not voiding). is_opening is
+     * checked BEFORE the live-payments guard: an is_opening bill (Phase 4
+     * Task 7, not yet built — this guard exists now because Task 7 depends
+     * on it) carries no P6/P6t entry of its own to reverse, so voiding it
+     * directly would 404 on the JournalEntry lookup below rather than
+     * surfacing a friendly, actionable message — mirrors
+     * Invoicing\InvoiceIsOpening (folded into InvoiceService::void this same
+     * task as a Phase 3 carry-in). The live-payments guard queries the
+     * LOCKED bill's payments fresh (not a possibly-stale relation) so it can
+     * never miss a payment recorded moments earlier in a concurrent
+     * transaction that already committed and released the lock this method
+     * is holding.
+     */
+    private function guardVoid(Bill $bill): void
+    {
+        if ($bill->status === BillStatus::Void) {
+            throw new DocumentNotVoidable('This bill has already been voided.');
+        }
+        if ($bill->is_opening) {
+            throw new BillIsOpening('This bill was created by Opening Balances — re-run opening balances instead of voiding it directly.');
+        }
+        if (! $bill->status->canVoid()) {
+            throw new DocumentNotVoidable('Only a received, partially paid, or paid bill can be voided.');
+        }
+
+        $livePayments = $bill->payments()->where('status', '!=', 'void')->pluck('id');
+        if ($livePayments->isNotEmpty()) {
+            $count = $livePayments->count();
+            $ids = $livePayments->implode(', ');
+            throw new BillHasLivePayments(
+                "This bill has {$count} live payment(s) that must be reversed first (payment ID(s): {$ids})."
+            );
+        }
     }
 }

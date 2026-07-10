@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Enums\ExpenseStatus;
 use App\Exceptions\Documents\DocumentPostException;
+use App\Exceptions\Documents\DocumentVoidException;
 use App\Exceptions\IneligibleCategoryAccount;
 use App\Exceptions\Ledger\LedgerException;
 use App\Http\Requests\StoreExpenseRequest;
@@ -19,6 +20,7 @@ use App\Services\ExpenseService;
 use App\Support\AuditLogger;
 use App\Support\CategoryAccountGuard;
 use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -210,6 +212,68 @@ class ExpenseController extends Controller
         $audit->log('expense.draft_deleted', $model, before: $before);
 
         return redirect()->route('expenses.index');
+    }
+
+    /**
+     * Voids a recorded expense — posting rule P9 (spec §6): a mirror
+     * reversal of the expense's own P4/P5 entry, via ExpenseService::void.
+     * $expense is a plain route parameter (not implicit binding), same
+     * reasoning as edit()/update()/destroy()/record() above.
+     *
+     * Three failure shapes surface as a 422 on the generic `status` field,
+     * mirroring InvoiceController::void: DocumentVoidException (this
+     * service's own domain guards — not voidable, already voided), a
+     * LedgerException (e.g. a locked period on today's reversal date), and —
+     * as defense in depth for a genuine concurrent double-void race,
+     * mirroring InvoiceController::void's identical backstop — a
+     * UniqueConstraintViolationException on the journal_entries
+     * source-unique index (in practice unreachable in a single-process
+     * request because the service's own lockForUpdate()+status-guard
+     * already serializes this, but kept as a backstop rather than trusting
+     * that guard alone).
+     */
+    public function void(Request $request, string $expense, ExpenseService $service): RedirectResponse
+    {
+        $model = Expense::query()->findOrFail($expense);
+
+        $idempotencyKey = $request->header('X-Idempotency-Key');
+        if (! is_string($idempotencyKey) || ! Str::isUuid($idempotencyKey)) {
+            throw ValidationException::withMessages([
+                'idempotency_key' => 'A valid X-Idempotency-Key header (UUID) is required.',
+            ]);
+        }
+
+        try {
+            $service->void($idempotencyKey, $model);
+        } catch (DocumentVoidException|LedgerException $e) {
+            throw ValidationException::withMessages(['status' => $e->getMessage()]);
+        } catch (UniqueConstraintViolationException $e) {
+            if (! $this->isDuplicateReversal($e)) {
+                throw $e;
+            }
+
+            throw ValidationException::withMessages(['status' => 'This expense has already been voided.']);
+        }
+
+        return redirect()->route('expenses.edit', $model->id);
+    }
+
+    /**
+     * Whether the violated unique index is the journal_entries source-unique
+     * index (one primary + one reversal max per source) — mirrors
+     * InvoiceController::isDuplicateReversal/ManualJournalController::
+     * isDuplicateReversal. Prefers the driver's populated index name,
+     * falling back to a message substring for drivers/situations where
+     * ->index isn't set (MySQL always includes the violated key name in the
+     * duplicate-entry message).
+     */
+    private function isDuplicateReversal(UniqueConstraintViolationException $e): bool
+    {
+        if ($e->index !== null) {
+            return $e->index === 'journal_entries_source_unique';
+        }
+
+        return str_contains($e->getMessage(), 'journal_entries_source_unique');
     }
 
     /**

@@ -4,15 +4,18 @@ namespace App\Services;
 
 use App\Domain\Ledger\EntryDraft;
 use App\Domain\Ledger\LineDraft;
+use App\Enums\EntryRole;
 use App\Enums\ExpenseStatus;
 use App\Exceptions\Documents\DocumentHasNoLines;
 use App\Exceptions\Documents\DocumentHasNoValue;
 use App\Exceptions\Documents\DocumentNotDraft;
+use App\Exceptions\Documents\DocumentNotVoidable;
 use App\Exceptions\Documents\ExpenseBankAccountRequired;
 use App\Models\Account;
 use App\Models\BankAccount;
 use App\Models\Expense;
 use App\Models\ExpenseLine;
+use App\Models\JournalEntry;
 use App\Models\TaxRate;
 use App\Support\AuditLogger;
 use App\Support\CategoryAccountGuard;
@@ -121,6 +124,89 @@ class ExpenseService
         }
         if ($expense->lines->isEmpty()) {
             throw new DocumentHasNoLines('An expense must have at least one line before it can be recorded.');
+        }
+    }
+
+    /**
+     * Voids a recorded expense: posting rule P9 (spec §6) — a mirror
+     * reversal of the expense's own P4/P5 entry (Cr category / Cr 2100 Tax
+     * Payable / Dr the paid-from bank account), via LedgerService::reverse.
+     * The AP-side (money-out) mirror of InvoiceService::void (Phase 3 T5),
+     * simplified — an expense has no live-payments concept (it's a single
+     * cash-out event, not a document that accrues separate payments the way
+     * a Bill does) and no is_opening concept either (Phase 4 T7's opening
+     * payables land on Bill, not Expense), so this guard is just "posted,
+     * and not already void."
+     *
+     * The reversal is always dated TODAY (mirrors
+     * InvoicePaymentService::voidPayment, which likewise takes no date
+     * parameter) — never the original expense_date — so it always lands in
+     * an open period even if the original entry's period has since been
+     * locked (spec §4 rule 4: a reversal must always be postable). If TODAY
+     * itself is locked, LedgerService rejects it with LockedPeriod, exactly
+     * as it would any other entry dated into a locked period.
+     *
+     * Shape mirrors record(): IdempotencyService::execute -> DB::transaction
+     * -> lockForUpdate re-fetch -> guard -> LedgerService::reverse -> status
+     * flip -> AuditLogger. The unique-constraint backstop for a genuine
+     * concurrent double-void race lives in the CONTROLLER (mirrors
+     * InvoiceController::void/ManualJournalController::reverse), not here —
+     * this service's own lockForUpdate()+status-guard already serializes it
+     * in the common case.
+     */
+    public function void(string $idempotencyKey, Expense $expense): Expense
+    {
+        $result = $this->idempotency->execute($idempotencyKey, 'expense.voided', function () use ($expense) {
+            return DB::transaction(function () use ($expense) {
+                // Row-lock + re-read FRESH state: $expense may have been
+                // resolved by the controller moments before this closure
+                // runs (and on an idempotency replay this closure doesn't
+                // execute at all), so the guard below MUST see the CURRENT
+                // status. Mirrors InvoiceService::void's own locked read.
+                $locked = Expense::query()->where('id', $expense->id)->lockForUpdate()->firstOrFail();
+
+                $this->guardVoid($locked);
+
+                $entry = JournalEntry::query()
+                    ->where('source_type', 'expense')
+                    ->where('source_id', $locked->id)
+                    ->where('entry_role', EntryRole::Primary->value)
+                    ->firstOrFail();
+
+                $reversal = $this->ledger->reverse(
+                    $entry,
+                    CarbonImmutable::today(),
+                    "Void: Expense #{$locked->id}"
+                );
+
+                $locked->forceFill([
+                    'status' => ExpenseStatus::Void->value,
+                    'voided_at' => now(),
+                ])->save();
+
+                $this->audit->log('expense.voided', $locked, after: ['reversal_entry_id' => $reversal->id]);
+
+                return ['id' => $locked->id];
+            });
+        });
+
+        return Expense::query()->findOrFail($result['id']);
+    }
+
+    /**
+     * Status guard mirrors ExpenseStatus::canVoid() (Recorded only), with a
+     * friendlier "already voided" message for that specific case — Draft
+     * falls through to the generic message (deleting a draft is the correct
+     * action there, not voiding — ExpenseController::destroy already covers
+     * it).
+     */
+    private function guardVoid(Expense $expense): void
+    {
+        if ($expense->status === ExpenseStatus::Void) {
+            throw new DocumentNotVoidable('This expense has already been voided.');
+        }
+        if (! $expense->status->canVoid()) {
+            throw new DocumentNotVoidable('Only a recorded expense can be voided.');
         }
     }
 
