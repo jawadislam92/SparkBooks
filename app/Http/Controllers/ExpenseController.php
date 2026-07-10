@@ -197,7 +197,7 @@ class ExpenseController extends Controller
         return redirect()->route('expenses.edit', $model->id);
     }
 
-    public function destroy(string $expense, AuditLogger $audit): RedirectResponse
+    public function destroy(string $expense, AuditLogger $audit, AttachmentService $attachments): RedirectResponse
     {
         $model = Expense::query()->findOrFail($expense);
 
@@ -209,8 +209,15 @@ class ExpenseController extends Controller
 
         $before = $model->only(self::AUDITED_FIELDS);
 
-        DB::transaction(function () use ($model) {
+        DB::transaction(function () use ($model, $attachments) {
             $model->lines()->get()->each(fn (ExpenseLine $line) => $line->delete());
+            // Attachments cascade too (Task 8): rows now, disk files once
+            // this transaction commits — otherwise deleting a draft that
+            // had a receipt would orphan the Attachment row AND leak the
+            // private file. The single expense.draft_deleted audit row
+            // below covers the cascade; deleteAllFor deliberately writes
+            // no per-receipt audit rows (see its docblock).
+            $attachments->deleteAllFor($model);
             $model->delete();
         });
 

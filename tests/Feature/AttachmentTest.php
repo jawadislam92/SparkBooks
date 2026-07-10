@@ -693,4 +693,62 @@ class AttachmentTest extends TestCase
         $deleteAudit = ActivityLog::query()->where('action', 'attachment.deleted')->sole();
         $this->assertSame($attachment->id, $deleteAudit->subject_id);
     }
+
+    // ---------------------------------------------------------------
+    // 13. Draft delete cascades attachments — no orphan rows, no leaked
+    // files. Deleting a draft that had a receipt uploaded must remove the
+    // Attachment rows AND the private disk files, alongside the lines the
+    // destroy() methods already cascaded (reviewer finding, this task).
+    // ---------------------------------------------------------------
+
+    public function test_expense_deleting_a_draft_cascades_its_attachments_rows_and_files(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+
+        $this->assertDraftDeleteCascadesAttachments($this->draftExpense($company));
+    }
+
+    public function test_bill_deleting_a_draft_cascades_its_attachments_rows_and_files(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $contact = $this->vendor($company);
+
+        $this->assertDraftDeleteCascadesAttachments($this->draftBill($company, $contact));
+    }
+
+    private function assertDraftDeleteCascadesAttachments(Expense|Bill $model): void
+    {
+        // Two attachments, to prove the cascade isn't accidentally
+        // first-row-only.
+        $first = $this->createAttachment($model, 'receipt one.pdf');
+        $second = $this->createAttachment($model, 'receipt two.pdf');
+        Storage::disk('local')->assertExists($first->disk_path);
+        Storage::disk('local')->assertExists($second->disk_path);
+
+        $deleteRoute = $model instanceof Expense
+            ? route('expenses.destroy', $model->id)
+            : route('bills.destroy', $model->id);
+        $indexRoute = $model instanceof Expense ? route('expenses.index') : route('bills.index');
+
+        $this->delete($deleteRoute)->assertRedirect($indexRoute);
+
+        // The draft itself is gone...
+        $parentQuery = $model instanceof Expense ? Expense::query() : Bill::query();
+        $this->assertSame(0, $parentQuery->count());
+
+        // ...and so are BOTH attachment rows and BOTH private disk files —
+        // no orphan row with a dangling attachable_id, no leaked bytes.
+        $this->assertSame(0, Attachment::query()->count());
+        Storage::disk('local')->assertMissing($first->disk_path);
+        Storage::disk('local')->assertMissing($second->disk_path);
+
+        // One draft_deleted audit row covers the cascade — deliberately no
+        // per-receipt attachment.deleted rows from this path (see
+        // AttachmentService::deleteAllFor's docblock).
+        $expectedAction = $model instanceof Expense ? 'expense.draft_deleted' : 'bill.draft_deleted';
+        $this->assertSame(1, ActivityLog::query()->where('action', $expectedAction)->count());
+        $this->assertSame(0, ActivityLog::query()->where('action', 'attachment.deleted')->count());
+    }
 }

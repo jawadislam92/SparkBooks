@@ -12,6 +12,7 @@ use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use LogicException;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 use Throwable;
 
@@ -111,6 +112,39 @@ class AttachmentService
         });
 
         Storage::disk('local')->delete($diskPath);
+    }
+
+    /**
+     * Cascade-cleanup for a document being deleted (draft delete): removes
+     * every attachment row now, and the underlying files once the CALLER's
+     * transaction commits — must therefore be called from INSIDE that
+     * transaction (throws otherwise, same guard shape as LedgerService::
+     * post), so a rollback of the document delete can never have already
+     * destroyed the bytes. Without this, deleting a draft that had a
+     * receipt would orphan the Attachment row (dangling attachable_id) AND
+     * leak the private file on disk forever.
+     *
+     * Deliberately NO per-attachment audit rows here, unlike delete(): the
+     * caller's own single 'expense.draft_deleted'/'bill.draft_deleted' row
+     * already records the destruction of the whole draft, and a row per
+     * receipt would just be noise — mirrors how the document's line rows
+     * cascade silently in the same destroy() methods.
+     */
+    public function deleteAllFor(Expense|Bill $attachable): void
+    {
+        if (DB::transactionLevel() === 0) {
+            throw new LogicException('AttachmentService::deleteAllFor must run inside the caller\'s transaction.');
+        }
+
+        $attachments = $attachable->attachments()->get();
+        if ($attachments->isEmpty()) {
+            return;
+        }
+
+        $paths = $attachments->pluck('disk_path')->all();
+        $attachments->each(fn (Attachment $attachment) => $attachment->delete());
+
+        DB::afterCommit(fn () => Storage::disk('local')->delete($paths));
     }
 
     /**

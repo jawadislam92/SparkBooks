@@ -245,7 +245,7 @@ class BillController extends Controller
         return redirect()->route('bills.edit', $model->id);
     }
 
-    public function destroy(string $bill, AuditLogger $audit): RedirectResponse
+    public function destroy(string $bill, AuditLogger $audit, AttachmentService $attachments): RedirectResponse
     {
         $model = Bill::query()->findOrFail($bill);
 
@@ -257,8 +257,14 @@ class BillController extends Controller
 
         $before = $model->only(self::AUDITED_FIELDS);
 
-        DB::transaction(function () use ($model) {
+        DB::transaction(function () use ($model, $attachments) {
             $model->lines()->get()->each(fn (BillLine $line) => $line->delete());
+            // Attachments cascade too (Task 8): rows now, disk files once
+            // this transaction commits — mirrors ExpenseController::destroy.
+            // The single bill.draft_deleted audit row below covers the
+            // cascade; deleteAllFor deliberately writes no per-receipt
+            // audit rows (see its docblock).
+            $attachments->deleteAllFor($model);
             $model->delete();
         });
 
