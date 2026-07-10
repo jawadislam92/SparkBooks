@@ -64,7 +64,26 @@ function formatDisplayDate(isoDate: string): string {
     });
 }
 
-function AccountSection({ account, currency }: { account: GeneralLedgerAccount; currency: string }) {
+/**
+ * When `showBalance` is false (a contact drill-down is active), the
+ * opening/closing balance rows AND the running-balance column are hidden.
+ * Those figures are the WHOLE account's balance netted through only this
+ * contact's lines -- neither the contact's balance nor the account's real
+ * balance (closing == cumulativeAsOf(to) only holds when no contact filter
+ * is applied; see GeneralLedgerReport's class docblock). Showing them under
+ * a contact filter would invite an accountant who clicked a customer name
+ * to misread the closing figure as that customer's balance, so the filtered
+ * view is deliberately reduced to an honest per-contact line list.
+ */
+function AccountSection({
+    account,
+    currency,
+    showBalance,
+}: {
+    account: GeneralLedgerAccount;
+    currency: string;
+    showBalance: boolean;
+}) {
     return (
         <section>
             <h3 className="pb-2 font-display text-sm font-semibold text-ink">
@@ -80,16 +99,20 @@ function AccountSection({ account, currency }: { account: GeneralLedgerAccount; 
                             <th scope="col" className="py-2 pr-3 font-medium">Contact</th>
                             <th scope="col" className="py-2 pl-3 text-right font-medium">Debit</th>
                             <th scope="col" className="py-2 pl-3 text-right font-medium">Credit</th>
-                            <th scope="col" className="py-2 pl-3 text-right font-medium">Balance</th>
+                            {showBalance && (
+                                <th scope="col" className="py-2 pl-3 text-right font-medium">Balance</th>
+                            )}
                         </tr>
                     </thead>
                     <tbody>
-                        <tr className="border-b border-rule text-ink-700">
-                            <td className="py-2 pr-3 italic" colSpan={6}>Opening balance</td>
-                            <td className="py-2 pl-3">
-                                <MoneyText minor={account.opening_balance} currency={currency} size="sm" />
-                            </td>
-                        </tr>
+                        {showBalance && (
+                            <tr className="border-b border-rule text-ink-700">
+                                <td className="py-2 pr-3 italic" colSpan={6}>Opening balance</td>
+                                <td className="py-2 pl-3">
+                                    <MoneyText minor={account.opening_balance} currency={currency} size="sm" />
+                                </td>
+                            </tr>
+                        )}
                         {account.lines.map((line) => (
                             <tr key={line.id} className="border-b border-rule text-ink last:border-b-0">
                                 <td className="py-2 pr-3 align-top">{formatDisplayDate(line.entry_date)}</td>
@@ -110,20 +133,24 @@ function AccountSection({ account, currency }: { account: GeneralLedgerAccount; 
                                 <td className="py-2 pl-3 align-top">
                                     <MoneyText minor={line.credit} currency={currency} size="sm" />
                                 </td>
-                                <td className="py-2 pl-3 align-top">
-                                    <MoneyText minor={line.running_balance} currency={currency} size="sm" />
-                                </td>
+                                {showBalance && (
+                                    <td className="py-2 pl-3 align-top">
+                                        <MoneyText minor={line.running_balance} currency={currency} size="sm" />
+                                    </td>
+                                )}
                             </tr>
                         ))}
                     </tbody>
-                    <tfoot>
-                        <tr className="border-t-2 border-rule font-semibold text-ink">
-                            <td className="py-2 pr-3" colSpan={6}>Closing balance</td>
-                            <td className="py-2 pl-3">
-                                <MoneyText minor={account.closing_balance} currency={currency} size="sm" />
-                            </td>
-                        </tr>
-                    </tfoot>
+                    {showBalance && (
+                        <tfoot>
+                            <tr className="border-t-2 border-rule font-semibold text-ink">
+                                <td className="py-2 pr-3" colSpan={6}>Closing balance</td>
+                                <td className="py-2 pl-3">
+                                    <MoneyText minor={account.closing_balance} currency={currency} size="sm" />
+                                </td>
+                            </tr>
+                        </tfoot>
+                    )}
                 </table>
             </div>
         </section>
@@ -251,12 +278,14 @@ export default function GeneralLedger({ report, accounts, contactName, canExport
                 {contactId !== null && (
                     <div className="mb-4 flex items-center justify-between gap-4 rounded-md bg-paper px-3 py-2 text-sm text-ink print:hidden">
                         <span>
-                            Filtered to {contactName ?? `contact #${contactId}`} only.
+                            Showing only {contactName ?? `contact #${contactId}`}&rsquo;s lines. Opening,
+                            running, and closing balances are hidden because they reflect the whole account,
+                            not this contact.
                         </span>
                         <button
                             type="button"
                             onClick={() => reload({}, false)}
-                            className="font-medium text-lagoon underline decoration-dotted underline-offset-4 hover:no-underline"
+                            className="shrink-0 font-medium text-lagoon underline decoration-dotted underline-offset-4 hover:no-underline"
                         >
                             Clear filter
                         </button>
@@ -268,7 +297,12 @@ export default function GeneralLedger({ report, accounts, contactName, canExport
                 ) : (
                     <div className="flex flex-col gap-8">
                         {report.accounts.map((accountRow) => (
-                            <AccountSection key={accountRow.account_id} account={accountRow} currency={currency} />
+                            <AccountSection
+                                key={accountRow.account_id}
+                                account={accountRow}
+                                currency={currency}
+                                showBalance={contactId === null}
+                            />
                         ))}
                     </div>
                 )}

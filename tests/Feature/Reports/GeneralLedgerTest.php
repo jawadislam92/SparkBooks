@@ -6,10 +6,12 @@ use App\Domain\Ledger\EntryDraft;
 use App\Domain\Ledger\LineDraft;
 use App\Enums\AccountSubtype;
 use App\Enums\AccountType;
+use App\Enums\ContactType;
 use App\Enums\Role;
 use App\Models\Account;
 use App\Models\ActivityLog;
 use App\Models\Company;
+use App\Models\Contact;
 use App\Models\User;
 use App\Services\LedgerService;
 use App\Support\CompanyContext;
@@ -59,17 +61,27 @@ class GeneralLedgerTest extends TestCase
         ], $overrides));
     }
 
-    private function postEntry(Account $debitAccount, Account $creditAccount, int $amount, string $date, int $sourceId, string $memo = 'Test entry'): void
+    private function receivableAccount(Company $company, array $overrides = []): Account
     {
-        DB::transaction(function () use ($debitAccount, $creditAccount, $amount, $date, $sourceId, $memo) {
+        return Account::factory()->create(array_merge([
+            'company_id' => $company->id,
+            'code' => '1100',
+            'type' => AccountType::Asset->value,
+            'subtype' => AccountSubtype::Receivable->value,
+        ], $overrides));
+    }
+
+    private function postEntry(Account $debitAccount, Account $creditAccount, int $amount, string $date, int $sourceId, string $memo = 'Test entry', ?int $contactId = null, string $sourceType = 'manual_journal'): void
+    {
+        DB::transaction(function () use ($debitAccount, $creditAccount, $amount, $date, $sourceId, $memo, $contactId, $sourceType) {
             app(LedgerService::class)->post(new EntryDraft(
                 entryDate: CarbonImmutable::parse($date),
                 memo: $memo,
-                sourceType: 'manual_journal',
+                sourceType: $sourceType,
                 sourceId: $sourceId,
                 lines: [
-                    new LineDraft(accountId: $debitAccount->id, debit: $amount, credit: 0),
-                    new LineDraft(accountId: $creditAccount->id, debit: 0, credit: $amount),
+                    new LineDraft(accountId: $debitAccount->id, debit: $amount, credit: 0, contactId: $contactId),
+                    new LineDraft(accountId: $creditAccount->id, debit: 0, credit: $amount, contactId: $contactId),
                 ],
             ));
         });
@@ -150,6 +162,44 @@ class GeneralLedgerTest extends TestCase
             ->has('report.from')
             ->has('report.to')
         );
+    }
+
+    /**
+     * The contact drill-down (reached via the AR/AP aging customer link):
+     * report.contact_id must arrive in the payload — it is the ONLY flag the
+     * React page keys the "hide the misleading opening/closing balance"
+     * conditional off (showBalance = contactId === null), and contactName is
+     * resolved for the "showing only X's lines" banner. Lines are narrowed to
+     * that one contact.
+     */
+    public function test_contact_drill_down_sets_contact_id_and_name_and_narrows_lines(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        app(CompanyContext::class)->set($company);
+        $receivable = $this->receivableAccount($company);
+        $income = $this->incomeAccount($company);
+        $customerA = Contact::factory()->create(['company_id' => $company->id, 'type' => ContactType::Customer->value, 'name' => 'Acme Co']);
+        $customerB = Contact::factory()->create(['company_id' => $company->id, 'type' => ContactType::Customer->value]);
+
+        $this->postEntry($receivable, $income, 10000, '2026-07-05', 1, 'Invoice A', $customerA->id, 'invoice');
+        $this->postEntry($receivable, $income, 5000, '2026-07-06', 2, 'Invoice B', $customerB->id, 'invoice');
+
+        $response = $this->get('/reports/general-ledger?'.http_build_query([
+            'account' => $receivable->id,
+            'contact' => $customerA->id,
+            'from' => '2026-07-01',
+            'to' => '2026-07-31',
+        ]));
+
+        $response->assertOk();
+        $response->assertInertia(function (AssertableInertia $page) use ($receivable, $customerA) {
+            $page->where('report.account_id', $receivable->id);
+            $page->where('report.contact_id', $customerA->id);
+            $page->where('contactName', 'Acme Co');
+            $page->has('report.accounts.0.lines', 1);
+            $page->where('report.accounts.0.lines.0.contact_id', $customerA->id);
+        });
     }
 
     // ---------------------------------------------------------------
@@ -248,6 +298,51 @@ class GeneralLedgerTest extends TestCase
         $closingRow = $rows[3];
         $this->assertSame('Closing balance', $closingRow[4]);
         $this->assertSame('1500.50', $closingRow[8]);
+    }
+
+    /**
+     * Under a contact filter the CSV mirrors the screen: no Balance column,
+     * no Opening/Closing rows -- those figures are the whole account's
+     * balance netted through only this contact's lines, so they'd be misread
+     * as the contact's own balance. The filtered export is an honest
+     * per-contact line list, nothing more.
+     */
+    public function test_contact_filtered_csv_omits_balance_column_and_opening_closing_rows(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        app(CompanyContext::class)->set($company);
+        $receivable = $this->receivableAccount($company);
+        $income = $this->incomeAccount($company);
+        $customerA = Contact::factory()->create(['company_id' => $company->id, 'type' => ContactType::Customer->value, 'name' => 'Acme Co']);
+        $customerB = Contact::factory()->create(['company_id' => $company->id, 'type' => ContactType::Customer->value]);
+
+        $this->postEntry($receivable, $income, 10000, '2026-07-05', 1, 'Invoice A', $customerA->id, 'invoice');
+        $this->postEntry($receivable, $income, 5000, '2026-07-06', 2, 'Invoice B', $customerB->id, 'invoice');
+
+        $response = $this->get('/reports/general-ledger/export.csv?'.http_build_query([
+            'account' => $receivable->id,
+            'contact' => $customerA->id,
+            'from' => '2026-07-01',
+            'to' => '2026-07-31',
+        ]));
+
+        $response->assertOk();
+        $csv = $response->streamedContent();
+        $lines = array_values(array_filter(preg_split('/\r\n|\r|\n/', $csv)));
+        $rows = array_map('str_getcsv', $lines);
+
+        // Header has no Balance column.
+        $this->assertSame(['Code', 'Name', 'Date', 'Entry', 'Source', 'Contact', 'Debit', 'Credit'], $rows[0]);
+        // No opening/closing balance rows anywhere.
+        $sources = array_map(fn (array $row): string => $row[4] ?? '', $rows);
+        $this->assertNotContains('Opening balance', $sources);
+        $this->assertNotContains('Closing balance', $sources);
+        // Only customer A's single line survives.
+        $this->assertCount(2, $rows); // header + one line
+        $this->assertSame('Acme Co', $rows[1][5]);
+        $this->assertSame('100.00', $rows[1][6]);
+        $this->assertCount(8, $rows[1]); // no 9th (Balance) cell
     }
 
     public function test_csv_has_correct_content_type_and_attachment_disposition(): void

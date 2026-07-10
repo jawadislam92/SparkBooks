@@ -47,11 +47,19 @@ class GeneralLedgerController extends Controller
      * decimal strings via Money::minorToDecimalString (integer math only,
      * never number_format()/float division), mirroring
      * TrialBalanceController/ProfitAndLossController exactly.
+     *
+     * MIRRORS THE SCREEN under a contact filter: when a contact drill-down is
+     * active, the Balance column and the Opening/Closing rows are dropped —
+     * those figures are the whole account's balance netted through only this
+     * contact's lines, so they'd be misread as the contact's own balance
+     * (see GeneralLedgerReport's class docblock / GeneralLedger.tsx). The
+     * filtered export is an honest per-contact line list, nothing more.
      */
     public function exportCsv(Request $request, GeneralLedgerReport $report, CompanyContext $context, AuditLogger $audit): StreamedResponse
     {
         [$from, $to, $accountId, $contactId] = $this->resolveParams($request, $context);
         $data = $report->build($from, $to, $accountId, $contactId);
+        $showBalance = $contactId === null;
 
         $audit->log('report.exported', after: [
             'report' => 'general_ledger',
@@ -60,19 +68,25 @@ class GeneralLedgerController extends Controller
             'account_id' => $data['account_id'],
         ]);
 
-        return response()->streamDownload(function () use ($data) {
+        return response()->streamDownload(function () use ($data, $showBalance) {
             $handle = fopen('php://output', 'w');
 
-            fputcsv($handle, ['Code', 'Name', 'Date', 'Entry', 'Source', 'Contact', 'Debit', 'Credit', 'Balance']);
+            $header = ['Code', 'Name', 'Date', 'Entry', 'Source', 'Contact', 'Debit', 'Credit'];
+            if ($showBalance) {
+                $header[] = 'Balance';
+            }
+            fputcsv($handle, $header);
 
             foreach ($data['accounts'] as $account) {
-                fputcsv($handle, [
-                    $account['code'], $account['name'], '', '', 'Opening balance', '', '', '',
-                    Money::minorToDecimalString($account['opening_balance']),
-                ]);
+                if ($showBalance) {
+                    fputcsv($handle, [
+                        $account['code'], $account['name'], '', '', 'Opening balance', '', '', '',
+                        Money::minorToDecimalString($account['opening_balance']),
+                    ]);
+                }
 
                 foreach ($account['lines'] as $line) {
-                    fputcsv($handle, [
+                    $row = [
                         $account['code'],
                         $account['name'],
                         $line['entry_date'],
@@ -81,14 +95,19 @@ class GeneralLedgerController extends Controller
                         $line['contact_name'] ?? '',
                         Money::minorToDecimalString($line['debit']),
                         Money::minorToDecimalString($line['credit']),
-                        Money::minorToDecimalString($line['running_balance']),
-                    ]);
+                    ];
+                    if ($showBalance) {
+                        $row[] = Money::minorToDecimalString($line['running_balance']);
+                    }
+                    fputcsv($handle, $row);
                 }
 
-                fputcsv($handle, [
-                    $account['code'], $account['name'], '', '', 'Closing balance', '', '', '',
-                    Money::minorToDecimalString($account['closing_balance']),
-                ]);
+                if ($showBalance) {
+                    fputcsv($handle, [
+                        $account['code'], $account['name'], '', '', 'Closing balance', '', '', '',
+                        Money::minorToDecimalString($account['closing_balance']),
+                    ]);
+                }
             }
 
             fclose($handle);
