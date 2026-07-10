@@ -86,11 +86,21 @@ class ProfitAndLossReport
     }
 
     /**
-     * Builds one section (Income or Expenses): every account of $type with
-     * non-zero range movement, ordered by code, presented in "positive is
-     * normal" sign. An account whose range amount nets to exactly zero —
-     * never touched, or touched and fully reversed within the range — is
-     * skipped entirely, mirroring TrialBalanceReport's own skip rule.
+     * Builds one section (Income or Expenses): every account of $type,
+     * ordered by code, presented in "positive is normal" sign.
+     *
+     * DISPLAY skip vs. TOTAL accumulation are deliberately separated. An
+     * account whose FULL-RANGE amount nets to exactly zero is skipped from
+     * the row LIST (mirrors TrialBalanceReport's skip rule — a
+     * never-touched, or touched-and-fully-reversed-within-the-range account
+     * doesn't earn a row). But its per-month amounts are ALWAYS accumulated
+     * into $totalByMonth first, because a zero FULL-RANGE net can still hide
+     * real activity spread across individual months — e.g. income posted in
+     * January and voided in February nets to 0 over Jan–Feb, yet January's
+     * column must still show the real income and February's the reversal.
+     * Accumulating before the row-skip keeps Σ(total_by_month) == range
+     * total (0 in that example) while never zeroing a month that had
+     * activity.
      *
      * @param  array<int, array{account_id: int, debit: int, credit: int, net: int}>  $rangeMovement
      * @param  list<array<int, array{account_id: int, debit: int, credit: int, net: int}>>  $monthlyMovements
@@ -110,16 +120,20 @@ class ProfitAndLossReport
             $net = $rangeMovement[$account->id]['net'] ?? 0;
             $amount = $isDebitNormal ? $net : -$net;
 
-            if ($amount === 0) {
-                continue;
-            }
-
             $months = [];
             for ($i = 0; $i < $monthCount; $i++) {
                 $monthNet = $monthlyMovements[$i][$account->id]['net'] ?? 0;
                 $monthAmount = $isDebitNormal ? $monthNet : -$monthNet;
                 $months[] = $monthAmount;
+                // ALWAYS accumulate the monthly total, even for a
+                // zero-full-range account — see method docblock.
                 $totalByMonth[$i] += $monthAmount;
+            }
+
+            // Skip only the DISPLAY row for a zero-full-range account; its
+            // monthly totals are already accumulated above.
+            if ($amount === 0) {
+                continue;
             }
 
             $rows[] = [

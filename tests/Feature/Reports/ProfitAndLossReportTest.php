@@ -287,6 +287,40 @@ class ProfitAndLossReportTest extends TestCase
         $this->assertSame([7000, 20000, -2000], $report['net_profit_by_month']);
     }
 
+    public function test_cross_month_post_then_void_still_shows_each_months_real_activity(): void
+    {
+        // Regression: a zero-FULL-RANGE-net account must not zero out the
+        // months it actually had activity in. Income posted in January and
+        // voided in February nets to 0 over Jan–Feb, but January's column
+        // must still show the real income and February's the reversal.
+        $company = Company::factory()->create();
+        app(CompanyContext::class)->set($company);
+        $bank = $this->bankAccount($company);
+        $income = $this->incomeAccount($company);
+
+        $januaryInvoice = $this->postEntry($bank, $income, 100000, '2026-01-15', 1, 'invoice', 'Invoice INV-0100');
+        DB::transaction(fn () => app(LedgerService::class)->reverse($januaryInvoice, CarbonImmutable::parse('2026-02-10'), 'Void invoice'));
+
+        $report = app(ProfitAndLossReport::class)->build(
+            CarbonImmutable::parse('2026-01-01'),
+            CarbonImmutable::parse('2026-02-28'),
+        );
+
+        // Full-range nets to zero -> no display row, zero range total.
+        $this->assertSame(0, $report['income']['total']);
+        $this->assertSame([], $report['income']['rows']);
+
+        // ...but the monthly totals must NOT be zeroed: January shows the real
+        // income, February shows the reversal.
+        $this->assertSame([100000, -100000], $report['income']['total_by_month']);
+        // And they still tie out to the (zero) range total.
+        $this->assertSame($report['income']['total'], array_sum($report['income']['total_by_month']));
+
+        // Net profit by month reflects the same, and sums to the range net.
+        $this->assertSame([100000, -100000], $report['net_profit_by_month']);
+        $this->assertSame($report['net_profit'], array_sum($report['net_profit_by_month']));
+    }
+
     public function test_monthly_split_clips_partial_first_and_last_months(): void
     {
         $company = Company::factory()->create();
