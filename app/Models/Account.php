@@ -4,16 +4,30 @@ namespace App\Models;
 
 use App\Enums\AccountSubtype;
 use App\Enums\AccountType;
+use App\Exceptions\Accounts\AccountHasActiveChildren;
 use App\Models\Concerns\BelongsToCompany;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use LogicException;
 
 class Account extends Model
 {
     use BelongsToCompany, HasFactory;
 
-    protected $fillable = ['code', 'name', 'type', 'subtype', 'is_system', 'is_archived', 'description'];
+    /**
+     * `parent_id`/`is_postable` are fillable (AccountService sets them via
+     * ordinary create()/update() calls, the same convention `is_system` uses
+     * — protection for structural columns lives in the `booted()` hooks
+     * below, not in omitting them from $fillable). `depth`/`path` are
+     * deliberately NEVER fillable: they are pure derivations of `parent_id`,
+     * recomputed automatically by the `created` hook below for every new
+     * account regardless of caller (ChartOfAccountsSeeder, AccountController,
+     * AccountFactory, AccountService) — so they can never drift out of sync
+     * with parent_id by construction.
+     */
+    protected $fillable = ['code', 'name', 'type', 'subtype', 'is_system', 'is_archived', 'description', 'parent_id', 'is_postable'];
 
     protected function casts(): array
     {
@@ -22,12 +36,59 @@ class Account extends Model
             'subtype' => AccountSubtype::class,
             'is_system' => 'boolean',
             'is_archived' => 'boolean',
+            'is_postable' => 'boolean',
+            'depth' => 'integer',
         ];
     }
 
     public function isControlAccount(): bool
     {
         return in_array($this->subtype, [AccountSubtype::Receivable, AccountSubtype::Payable], true);
+    }
+
+    /** Explicit flag — never derived from "has children". See AccountService::makeParent(). */
+    public function isPostable(): bool
+    {
+        return (bool) $this->is_postable;
+    }
+
+    public function parent(): BelongsTo
+    {
+        return $this->belongsTo(self::class, 'parent_id');
+    }
+
+    /** Direct children only (one level down) — see descendants() for the whole subtree. */
+    public function children(): HasMany
+    {
+        return $this->hasMany(self::class, 'parent_id');
+    }
+
+    /**
+     * Every descendant at any depth (children, grandchildren, ...), NOT
+     * including this account itself — matched via the materialized `path`
+     * (indexed), so this is a single prefix-scan query regardless of subtree
+     * depth or size, never a recursive N+1 walk.
+     */
+    public function descendants()
+    {
+        return static::query()
+            ->where('path', 'like', $this->path.'%')
+            ->where('id', '!=', $this->id);
+    }
+
+    /**
+     * Rollup helper for reports (TrialBalanceReport/BalanceSheetReport/
+     * ProfitAndLossReport/GeneralLedgerReport): every descendant account id,
+     * including this account's own id — the exact set a report needs to sum
+     * over to get this account's subtotal (parents never carry direct
+     * postings themselves, so including a non-leaf id in the sum is always
+     * safe: its own contribution is always 0).
+     *
+     * @return list<int>
+     */
+    public function subtreeAccountIds(): array
+    {
+        return [$this->id, ...$this->descendants()->pluck('id')->all()];
     }
 
     protected static function booted(): void
@@ -41,6 +102,47 @@ class Account extends Model
                 && $account->isDirty(['is_system', 'code', 'type', 'subtype'])) {
                 throw new LogicException('System accounts cannot change is_system, code, type, or subtype.');
             }
+
+            // Archiving is blocked while ANY non-archived child exists (leaf
+            // or another parent) — an archived header account whose children
+            // are still active would orphan them from the "active" view of
+            // the Chart of Accounts. Only checked when is_archived is
+            // actually being flipped TO true, so renaming/re-describing an
+            // already-archived account, or unarchiving, is never affected.
+            if ($account->isDirty('is_archived') && $account->is_archived
+                && $account->children()->where('is_archived', false)->exists()) {
+                throw new AccountHasActiveChildren("Account {$account->code} has active sub-accounts and cannot be archived while they remain active.");
+            }
+
+            // Reparenting an EXISTING account must cascade path/depth to
+            // every descendant in the same transaction (spec: "moving a
+            // subtree updates path+depth for ALL descendants in one txn") —
+            // a plain ->update(['parent_id' => ...]) cannot do that cascade,
+            // so it is blocked outright. The only sanctioned path is
+            // AccountService::moveSubtree(), which performs the reparent via
+            // a raw DB::table() write (deliberately bypassing this guard,
+            // the same "raw query for a structural bulk change" convention
+            // already used elsewhere in this codebase), then fixes up every
+            // descendant's path/depth in the same transaction.
+            if ($account->isDirty('parent_id')) {
+                throw new LogicException('Account parent cannot be changed directly — use AccountService::moveSubtree().');
+            }
+        });
+
+        // Every new account's depth/path is a pure derivation of parent_id,
+        // recomputed here unconditionally so it can never drift out of sync
+        // regardless of which caller created the row (ChartOfAccountsSeeder,
+        // AccountController::store, AccountFactory, AccountService::
+        // createChild/makeParent all funnel through this one place). A
+        // second, quiet UPDATE is unavoidable — the child's own id (the last
+        // path segment) only exists after the INSERT.
+        static::created(function (Account $account) {
+            $parent = $account->parent_id !== null ? static::query()->find($account->parent_id) : null;
+
+            $account->forceFill([
+                'depth' => $parent !== null ? $parent->depth + 1 : 0,
+                'path' => ($parent?->path ?? '/').$account->id.'/',
+            ])->saveQuietly();
         });
 
         static::deleting(function () {

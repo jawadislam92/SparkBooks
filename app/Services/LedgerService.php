@@ -9,6 +9,7 @@ use App\Exceptions\Ledger\ArchivedAccount;
 use App\Exceptions\Ledger\ControlAccountViolation;
 use App\Exceptions\Ledger\EmptyEntry;
 use App\Exceptions\Ledger\LockedPeriod;
+use App\Exceptions\Ledger\NonPostableAccount;
 use App\Exceptions\Ledger\UnbalancedEntry;
 use App\Models\Account;
 use App\Models\JournalEntry;
@@ -93,6 +94,20 @@ class LedgerService
             // entries, so an account archived AFTER an entry posts must not trap it forever.
             if ($account->is_archived && $draft->role === EntryRole::Primary) {
                 throw new ArchivedAccount("Account {$account->code} is archived and cannot be used on a new entry.");
+            }
+            // Leaf-only posting, enforcement #1 of 3 (Phase 7 Task 1 — see
+            // NonPostableAccount's docblock for #2/#3). Checked for BOTH
+            // Primary and Reversal entries, unlike the archived-account guard
+            // above: a reversal must always be POSTABLE to the exact same
+            // account its original entry used, and an account can only ever
+            // become non-postable via AccountService::makeParent(), which
+            // itself moves that account's existing lines to a new leaf
+            // first — so a reversal of a pre-promotion entry would already
+            // be reversing lines that no longer sit on the now-parent
+            // account, making this check unreachable for reversals in
+            // practice, not a hole deliberately left ajar for them.
+            if (! $account->isPostable()) {
+                throw new NonPostableAccount("Account {$account->code} is not postable — it has sub-accounts and only leaf accounts may be posted to.");
             }
             if ($account->isControlAccount()) {
                 if ($line->contactId === null) {

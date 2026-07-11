@@ -11,6 +11,7 @@ use App\Models\Account;
 use App\Models\Company;
 use App\Models\Contact;
 use App\Models\JournalEntry;
+use App\Services\AccountService;
 use App\Services\LedgerService;
 use App\Services\Reports\GeneralLedgerReport;
 use App\Services\Reports\LedgerBalances;
@@ -487,5 +488,42 @@ class GeneralLedgerReportTest extends TestCase
         $this->assertSame(42, $line['source_id']);
         $this->assertSame('Invoice #42', $line['source_label']);
         $this->assertSame('Invoice INV-0042', $line['memo']);
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 7 Task 1: sub-account rollup
+    // ---------------------------------------------------------------
+
+    public function test_parent_with_two_posting_children_shows_each_leaf_and_a_rolled_up_subtotal(): void
+    {
+        $company = Company::factory()->create();
+        app(CompanyContext::class)->set($company);
+        $bank = $this->bankAccount($company);
+        $parent = $this->expenseAccount($company, ['code' => '5400', 'name' => 'Software']);
+        $service = app(AccountService::class);
+        $childA = $service->createChild($parent, ['code' => '5401', 'name' => 'Design Tools', 'subtype' => AccountSubtype::OperatingExpense]);
+        $childB = $service->createChild($parent->fresh(), ['code' => '5402', 'name' => 'Dev Tools', 'subtype' => AccountSubtype::OperatingExpense]);
+
+        $this->postEntry($childA, $bank, 3000, '2026-07-01', 1);
+        $this->postEntry($childB, $bank, 7000, '2026-07-02', 2);
+
+        $report = app(GeneralLedgerReport::class)->build(
+            CarbonImmutable::parse('2026-07-01'),
+            CarbonImmutable::parse('2026-07-31'),
+        );
+
+        $byId = collect($report['accounts'])->keyBy('account_id');
+
+        $this->assertSame(3000, $byId[$childA->id]['closing_balance']);
+        $this->assertFalse($byId[$childA->id]['is_subtotal']);
+        $this->assertCount(1, $byId[$childA->id]['lines']);
+
+        $this->assertSame(7000, $byId[$childB->id]['closing_balance']);
+
+        $parentRow = $byId[$parent->id];
+        $this->assertTrue($parentRow['is_subtotal']);
+        $this->assertSame(0, $parentRow['opening_balance']);
+        $this->assertSame(10000, $parentRow['closing_balance']);
+        $this->assertSame([], $parentRow['lines']);
     }
 }

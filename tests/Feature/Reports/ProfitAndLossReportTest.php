@@ -9,6 +9,7 @@ use App\Enums\AccountType;
 use App\Models\Account;
 use App\Models\Company;
 use App\Models\JournalEntry;
+use App\Services\AccountService;
 use App\Services\LedgerService;
 use App\Services\Reports\ProfitAndLossReport;
 use App\Support\CompanyContext;
@@ -498,5 +499,43 @@ class ProfitAndLossReportTest extends TestCase
         $this->assertNotContains($bank->id, $expenseIds);
         $this->assertNotContains($liability->id, $incomeIds);
         $this->assertNotContains($liability->id, $expenseIds);
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 7 Task 1: sub-account rollup
+    // ---------------------------------------------------------------
+
+    public function test_expense_parent_with_two_posting_children_shows_each_leaf_and_a_correct_subtotal(): void
+    {
+        $company = Company::factory()->create();
+        app(CompanyContext::class)->set($company);
+        $bank = $this->bankAccount($company);
+        $parent = $this->expenseAccount($company, ['code' => '5400', 'name' => 'Software']);
+        $service = app(AccountService::class);
+        $childA = $service->createChild($parent, ['code' => '5401', 'name' => 'Design Tools', 'subtype' => AccountSubtype::OperatingExpense]);
+        $childB = $service->createChild($parent->fresh(), ['code' => '5402', 'name' => 'Dev Tools', 'subtype' => AccountSubtype::OperatingExpense]);
+
+        $this->postEntry($childA, $bank, 3000, '2026-07-01', 1);
+        $this->postEntry($childB, $bank, 7000, '2026-07-02', 2);
+
+        $report = app(ProfitAndLossReport::class)->build(
+            CarbonImmutable::parse('2026-07-01'),
+            CarbonImmutable::parse('2026-07-31'),
+        );
+
+        $byId = collect($report['expenses']['rows'])->keyBy('account_id');
+        $this->assertSame(3000, $byId[$childA->id]['amount']);
+        $this->assertFalse($byId[$childA->id]['is_subtotal']);
+        $this->assertSame(7000, $byId[$childB->id]['amount']);
+
+        $parentRow = $byId[$parent->id];
+        $this->assertSame(10000, $parentRow['amount']);
+        $this->assertTrue($parentRow['is_subtotal']);
+        $this->assertSame([10000], $parentRow['months']);
+
+        // Display-only subtotal — must not double the section total.
+        $this->assertSame(10000, $report['expenses']['total']);
+        $this->assertSame([10000], $report['expenses']['total_by_month']);
+        $this->assertSame(-10000, $report['net_profit']);
     }
 }

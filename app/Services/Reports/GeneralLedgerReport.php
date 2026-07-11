@@ -57,7 +57,7 @@ use Illuminate\Support\Collection;
  */
 class GeneralLedgerReport
 {
-    public function __construct(private LedgerBalances $ledger) {}
+    public function __construct(private LedgerBalances $ledger, private AccountRollup $rollup) {}
 
     /**
      * @return array{
@@ -95,19 +95,45 @@ class GeneralLedgerReport
         $from = $from->startOfDay();
         $to = $to->startOfDay();
 
-        $accountsQuery = Account::query()->orderBy('code');
-        if ($accountId !== null) {
-            $accountsQuery->where('id', $accountId);
-        }
-        $candidateAccounts = $accountsQuery->get();
+        // Rollup machinery always runs over EVERY company account, never
+        // filtered by $accountId — a directly-selected PARENT's subtotal
+        // still needs its whole subtree's figures even though only that one
+        // account ends up in the OUTPUT list below.
+        $allAccounts = Account::query()->get();
+        $ordered = $this->rollup->order($allAccounts);
 
-        // One aggregated query for every candidate account's opening balance
-        // — mirrors TrialBalanceReport/BalanceSheetReport's "one query, join
-        // in PHP" shape rather than querying per-account in a loop.
-        $openingNet = $this->ledger->cumulativeAsOf(
-            $from->subDay(),
-            $accountId !== null ? [$accountId] : null,
-        );
+        $candidateAccounts = $accountId !== null
+            ? $allAccounts->filter(fn (Account $account) => $account->id === $accountId)->values()->all()
+            : $ordered;
+
+        // One aggregated query for every account's opening balance — mirrors
+        // TrialBalanceReport/BalanceSheetReport's "one query, join in PHP"
+        // shape rather than querying per-account in a loop.
+        $openingNet = $this->ledger->cumulativeAsOf($from->subDay());
+
+        // PARENT (header) rollup rows never carry lines of their own
+        // (leaf-only posting, enforced by LedgerService/IntegrityChecker),
+        // so their closing_balance can't be folded through a line list the
+        // way a leaf's is — it is instead Σ their descendant leaves' whole-
+        // ledger closing net, from a second cumulativeAsOf($to) query. This
+        // mirrors opening_balance's own existing convention (every row's
+        // opening_balance is already whole-account and contact-filter-
+        // agnostic, regardless of $contactId) — a PARENT's closing_balance
+        // is contact-filter-agnostic the same way; only a LEAF's own
+        // (folded) closing_balance below still respects $contactId.
+        $closingNetForRollup = $this->ledger->cumulativeAsOf($to);
+
+        $rawOpening = [];
+        $rawClosingForRollup = [];
+        foreach ($allAccounts as $account) {
+            $isDebitNormal = $account->type->isDebitNormal();
+            $openingRaw = $openingNet[$account->id]['net'] ?? 0;
+            $closingRaw = $closingNetForRollup[$account->id]['net'] ?? 0;
+            $rawOpening[$account->id] = $isDebitNormal ? $openingRaw : -$openingRaw;
+            $rawClosingForRollup[$account->id] = $isDebitNormal ? $closingRaw : -$closingRaw;
+        }
+        $rolledOpening = $this->rollup->rollup($ordered, $rawOpening);
+        $rolledClosing = $this->rollup->rollup($ordered, $rawClosingForRollup);
 
         $lines = $this->fetchLines($from, $to, $accountId, $contactId);
         $contactNames = $this->contactNames($lines);
@@ -115,44 +141,61 @@ class GeneralLedgerReport
 
         $accountsOut = [];
         foreach ($candidateAccounts as $account) {
-            $accountLines = $linesByAccount->get($account->id) ?? collect();
-            $openingRaw = $openingNet[$account->id]['net'] ?? 0;
+            $isLeaf = $account->isPostable();
 
-            // In "all accounts" mode, skip an account that's never been
-            // touched at all (mirrors TrialBalanceReport's skip rule). A
-            // directly-selected account ($accountId !== null) is ALWAYS
-            // included, even with zero balance and zero lines -- the
-            // "empty account" case the brief calls out explicitly.
-            if ($accountId === null && $openingRaw === 0 && $accountLines->isEmpty()) {
-                continue;
-            }
+            if ($isLeaf) {
+                $accountLines = $linesByAccount->get($account->id) ?? collect();
+                $openingRaw = $openingNet[$account->id]['net'] ?? 0;
 
-            $isDebitNormal = $account->type->isDebitNormal();
-            $opening = $isDebitNormal ? $openingRaw : -$openingRaw;
+                // In "all accounts" mode, skip an account that's never been
+                // touched at all (mirrors TrialBalanceReport's skip rule). A
+                // directly-selected account ($accountId !== null) is ALWAYS
+                // included, even with zero balance and zero lines -- the
+                // "empty account" case the brief calls out explicitly.
+                if ($accountId === null && $openingRaw === 0 && $accountLines->isEmpty()) {
+                    continue;
+                }
 
-            $running = $opening;
-            $lineRows = [];
-            foreach ($accountLines as $line) {
-                $running += $isDebitNormal ? ($line->debit - $line->credit) : ($line->credit - $line->debit);
-                $entry = $line->journalEntry;
+                $isDebitNormal = $account->type->isDebitNormal();
+                $opening = $isDebitNormal ? $openingRaw : -$openingRaw;
 
-                $lineRows[] = [
-                    'id' => $line->id,
-                    'entry_id' => $entry->id,
-                    'entry_date' => $entry->entry_date->toDateString(),
-                    'entry_role' => $entry->entry_role->value,
-                    'source_type' => $entry->source_type,
-                    'source_id' => $entry->source_id,
-                    'source_label' => $this->sourceLabel($entry->source_type, $entry->source_id),
-                    'memo' => $line->memo ?? $entry->memo,
-                    'contact_id' => $line->contact_id,
-                    'contact_name' => $line->contact_id !== null
-                        ? ($contactNames->get($line->contact_id) ?? "Contact #{$line->contact_id}")
-                        : null,
-                    'debit' => $line->debit,
-                    'credit' => $line->credit,
-                    'running_balance' => $running,
-                ];
+                $running = $opening;
+                $lineRows = [];
+                foreach ($accountLines as $line) {
+                    $running += $isDebitNormal ? ($line->debit - $line->credit) : ($line->credit - $line->debit);
+                    $entry = $line->journalEntry;
+
+                    $lineRows[] = [
+                        'id' => $line->id,
+                        'entry_id' => $entry->id,
+                        'entry_date' => $entry->entry_date->toDateString(),
+                        'entry_role' => $entry->entry_role->value,
+                        'source_type' => $entry->source_type,
+                        'source_id' => $entry->source_id,
+                        'source_label' => $this->sourceLabel($entry->source_type, $entry->source_id),
+                        'memo' => $line->memo ?? $entry->memo,
+                        'contact_id' => $line->contact_id,
+                        'contact_name' => $line->contact_id !== null
+                            ? ($contactNames->get($line->contact_id) ?? "Contact #{$line->contact_id}")
+                            : null,
+                        'debit' => $line->debit,
+                        'credit' => $line->credit,
+                        'running_balance' => $running,
+                    ];
+                }
+
+                $closing = $running;
+            } else {
+                $opening = $rolledOpening[$account->id] ?? 0;
+                $closing = $rolledClosing[$account->id] ?? 0;
+                $lineRows = [];
+
+                // Mirrors the leaf skip rule above: an untouched header (no
+                // brought-forward balance, nothing posted under it through
+                // $to) is skipped in "all accounts" mode.
+                if ($accountId === null && $opening === 0 && $closing === 0) {
+                    continue;
+                }
             }
 
             $accountsOut[] = [
@@ -162,7 +205,9 @@ class GeneralLedgerReport
                 'type' => $account->type->value,
                 'opening_balance' => $opening,
                 'lines' => $lineRows,
-                'closing_balance' => $running,
+                'closing_balance' => $closing,
+                'depth' => $account->depth,
+                'is_subtotal' => ! $isLeaf,
             ];
         }
 

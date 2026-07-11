@@ -23,6 +23,11 @@ class ChartOfAccountsSeeder
                 'type' => $account['subtype']->type()->value,
                 'subtype' => $account['subtype']->value,
                 'is_system' => $account['is_system'],
+                // Explicit, same reasoning as AccountController::store — see
+                // its own comment for why this can't be left to the DB
+                // column default alone.
+                'parent_id' => null,
+                'is_postable' => true,
             ]);
         }
     }

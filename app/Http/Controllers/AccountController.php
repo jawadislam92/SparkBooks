@@ -3,14 +3,18 @@
 namespace App\Http\Controllers;
 
 use App\Enums\AccountSubtype;
+use App\Exceptions\Accounts\AccountException;
 use App\Http\Requests\StoreAccountRequest;
 use App\Http\Requests\UpdateAccountRequest;
 use App\Models\Account;
 use App\Models\JournalLine;
 use App\Services\AccountBalances;
+use App\Services\AccountService;
+use App\Services\Reports\AccountRollup;
 use App\Support\AuditLogger;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Pagination\LengthAwarePaginator;
+use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
 use Inertia\Response;
 
@@ -34,18 +38,32 @@ class AccountController extends Controller
         'operating_expense' => 'Expense',
     ];
 
-    public function index(AccountBalances $balances): Response
+    /**
+     * Rows are depth-first ordered (AccountRollup — a parent immediately
+     * followed by its descendants) rather than a flat `orderBy('code')`, so
+     * the tree can be rendered directly from array order + `depth`/
+     * `parent_id`. A parent (header) account's `balance` is the ROLLUP of
+     * every descendant leaf's balance (it never carries a direct posting of
+     * its own); a company with no sub-accounts degenerates to the exact same
+     * flat, code-ordered list this page always showed.
+     */
+    public function index(AccountBalances $balances, AccountRollup $rollup): Response
     {
         $balancesByAccount = $balances->asOf();
 
-        $accounts = Account::query()
-            ->orderBy('code')
-            ->get()
-            ->map(fn (Account $account) => $this->accountPayload($account, $balancesByAccount[$account->id] ?? 0))
+        $accounts = Account::query()->orderBy('code')->get();
+        $ordered = $rollup->order($accounts);
+        $rolledBalances = $rollup->rollup($ordered, $balancesByAccount);
+
+        $payload = collect($ordered)
+            ->map(fn (Account $account) => $this->accountPayload(
+                $account,
+                $account->isPostable() ? ($balancesByAccount[$account->id] ?? 0) : ($rolledBalances[$account->id] ?? 0)
+            ))
             ->values();
 
         return Inertia::render('Accounts/Index', [
-            'accounts' => $accounts,
+            'accounts' => $payload,
         ]);
     }
 
@@ -62,9 +80,46 @@ class AccountController extends Controller
             // Never read from the request — see StoreAccountRequest doc-comment.
             'is_system' => false,
             'description' => $data['description'] ?? null,
+            // Explicit, not relied on as a DB column default: a fresh
+            // top-level account created here always starts as a postable
+            // leaf, and the in-memory model instance returned below needs
+            // this attribute actually SET (not merely defaulted at the DB
+            // layer) so anything reading $account->is_postable/isPostable()
+            // in the same request sees the correct value without a reload.
+            'parent_id' => null,
+            'is_postable' => true,
         ]);
 
         $audit->log('account.created', $account, after: $account->only(['code', 'name', 'type', 'subtype', 'description']));
+
+        return redirect()->route('accounts.index');
+    }
+
+    /**
+     * Phase 7 Task 1 (sub-accounts): "Add sub-account" — reuses
+     * StoreAccountRequest's shape validation (code/name/subtype/description
+     * are identical requirements either way), then delegates the actual
+     * creation to AccountService::createChild(), which owns every structural
+     * invariant (root-type match, depth cap, auto-promoting $parent if it's
+     * still a plain postable leaf) and its own audit logging. Domain
+     * rejections surface as a friendly field error, same convention
+     * ManualJournalController uses for LedgerException.
+     */
+    public function storeChild(StoreAccountRequest $request, string $account, AccountService $service): RedirectResponse
+    {
+        $parent = Account::query()->findOrFail($account);
+        $data = $request->validated();
+
+        try {
+            $service->createChild($parent, [
+                'code' => $data['code'],
+                'name' => $data['name'],
+                'subtype' => $data['subtype'],
+                'description' => $data['description'] ?? null,
+            ]);
+        } catch (AccountException $e) {
+            throw ValidationException::withMessages(['subtype' => $e->getMessage()]);
+        }
 
         return redirect()->route('accounts.index');
     }
@@ -104,10 +159,23 @@ class AccountController extends Controller
         return redirect()->route('accounts.index');
     }
 
+    /**
+     * Phase 7 Task 1: a parent (header) account with any active (non-
+     * archived) child throws AccountHasActiveChildren (Account::booted()'s
+     * updating guard) — caught here and surfaced as a friendly field error
+     * the same way ExpenseController/BillController convert a rejected
+     * status transition, rather than letting a raw 500 reach the user.
+     */
     public function archive(string $account, AuditLogger $audit): RedirectResponse
     {
         $model = Account::query()->findOrFail($account);
-        $model->update(['is_archived' => true]);
+
+        try {
+            $model->update(['is_archived' => true]);
+        } catch (AccountException $e) {
+            throw ValidationException::withMessages(['is_archived' => $e->getMessage()]);
+        }
+
         $audit->log('account.archived', $model);
 
         return redirect()->route('accounts.index');
@@ -171,8 +239,16 @@ class AccountController extends Controller
             ['path' => request()->url(), 'query' => request()->query()],
         );
 
+        $balancesByAccount = $balances->asOf();
+        $balance = $model->isPostable()
+            ? ($balancesByAccount[$model->id] ?? 0)
+            // Parent (header) account: rolled up from every descendant leaf
+            // (subtreeAccountIds() includes $model's own id, which always
+            // contributes 0 — parents never carry a direct posting).
+            : array_sum(array_map(fn (int $id) => $balancesByAccount[$id] ?? 0, $model->subtreeAccountIds()));
+
         return Inertia::render('Accounts/Show', [
-            'account' => $this->accountPayload($model, $balances->asOf()[$model->id] ?? 0),
+            'account' => $this->accountPayload($model, $balance),
             'ledger' => $ledger,
         ]);
     }
@@ -191,6 +267,9 @@ class AccountController extends Controller
             'is_archived' => $account->is_archived,
             'description' => $account->description,
             'balance' => $balance,
+            'parent_id' => $account->parent_id,
+            'is_postable' => $account->isPostable(),
+            'depth' => $account->depth,
         ];
     }
 }

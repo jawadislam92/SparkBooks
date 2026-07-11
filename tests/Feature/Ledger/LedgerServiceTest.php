@@ -12,6 +12,7 @@ use App\Exceptions\Ledger\ControlAccountViolation;
 use App\Exceptions\Ledger\EmptyEntry;
 use App\Exceptions\Ledger\ImmutableLedger;
 use App\Exceptions\Ledger\LockedPeriod;
+use App\Exceptions\Ledger\NonPostableAccount;
 use App\Exceptions\Ledger\UnbalancedEntry;
 use App\Models\Account;
 use App\Models\Company;
@@ -353,6 +354,64 @@ class LedgerServiceTest extends TestCase
         }
 
         $this->assertSame(0, JournalEntry::query()->count());
+        $this->assertLedgerBalances();
+    }
+
+    // ---------------------------------------------------------------
+    // Sub-accounts: leaf-only posting, enforcement #1 of 3 (Phase 7 Task 1)
+    // ---------------------------------------------------------------
+
+    public function test_primary_entry_touching_non_postable_account_throws_non_postable_account(): void
+    {
+        $company = Company::factory()->create();
+        app(CompanyContext::class)->set($company);
+        $parent = $this->bankAccount(['is_postable' => false]);
+        $income = $this->incomeAccount();
+
+        $draft = new EntryDraft(
+            entryDate: CarbonImmutable::parse('2026-07-01'),
+            memo: 'Posting to a parent account',
+            sourceType: 'manual_journal',
+            sourceId: 24,
+            lines: [
+                new LineDraft(accountId: $parent->id, debit: 10000, credit: 0),
+                new LineDraft(accountId: $income->id, debit: 0, credit: 10000),
+            ],
+        );
+
+        try {
+            DB::transaction(fn () => app(LedgerService::class)->post($draft));
+            $this->fail('Expected NonPostableAccount to be thrown.');
+        } catch (NonPostableAccount $e) {
+            $this->assertStringContainsString($parent->code, $e->getMessage());
+        }
+
+        $this->assertSame(0, JournalEntry::query()->count());
+        $this->assertLedgerBalances();
+    }
+
+    public function test_postable_leaf_account_posts_normally(): void
+    {
+        $company = Company::factory()->create();
+        app(CompanyContext::class)->set($company);
+        $bank = $this->bankAccount(['is_postable' => true]);
+        $income = $this->incomeAccount();
+
+        $draft = new EntryDraft(
+            entryDate: CarbonImmutable::parse('2026-07-01'),
+            memo: 'Postable leaf',
+            sourceType: 'manual_journal',
+            sourceId: 25,
+            lines: [
+                new LineDraft(accountId: $bank->id, debit: 10000, credit: 0),
+                new LineDraft(accountId: $income->id, debit: 0, credit: 10000),
+            ],
+        );
+
+        $entry = DB::transaction(fn () => app(LedgerService::class)->post($draft));
+
+        $this->assertSame(1, JournalEntry::query()->count());
+        $this->assertNotNull($entry->id);
         $this->assertLedgerBalances();
     }
 

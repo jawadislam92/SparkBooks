@@ -154,6 +154,24 @@ class IntegrityChecker
                     $findings[] = ['check' => 'control_contact', 'detail' => "{$missing} control-account line(s) missing contact"];
                 }
 
+                // (g) leaf-only posting backstop (Phase 7 Task 1, sub-accounts
+                // — enforcement #2 of 3, see App\Exceptions\Ledger\
+                // NonPostableAccount's docblock for the other two): no
+                // journal_line may point at a non-postable (parent/header)
+                // account. LedgerService::validate already refuses this at
+                // write time, so the only way this finding ever fires is a
+                // line that bypassed that gate entirely — a raw SQL write, or
+                // an account promoted (AccountService::makeParent) AFTER a
+                // line already posted to it via some path that predates the
+                // promotion. Either way this must fail loud, never silently
+                // pass, mirroring every other IntegrityChecker rule.
+                $nonPostableHits = JournalLine::query()
+                    ->whereIn('account_id', Account::query()->where('is_postable', false)->pluck('id'))
+                    ->count();
+                if ($nonPostableHits > 0) {
+                    $findings[] = ['check' => 'non_postable_posting', 'detail' => "{$nonPostableHits} journal_line(s) posted to a non-postable (parent) account"];
+                }
+
                 // (e) every ledger entry's source document must still exist.
                 // Source-type-aware: for each source_type actually present on
                 // this company's entries, look it up against the table

@@ -24,6 +24,10 @@ interface AccountRow {
     is_archived: boolean;
     description: string | null;
     balance: number;
+    /** Phase 7 Task 1 (sub-accounts): hierarchy fields. `parent_id` is null for a top-level account. */
+    parent_id: number | null;
+    is_postable: boolean;
+    depth: number;
 }
 
 interface IndexPageProps extends PageProps {
@@ -56,6 +60,9 @@ const TYPE_LABELS: Record<string, string> = {
 
 const TYPE_ORDER = ['asset', 'liability', 'equity', 'income', 'expense'];
 
+/** Indent per hierarchy level — a sub-account's row nudges right of its parent's. */
+const INDENT_REM_PER_DEPTH = 1.25;
+
 const INPUT_CLASSES =
     'h-10 rounded-md border border-rule bg-paper-raised px-3 text-sm text-ink transition duration-[120ms] ease-out motion-reduce:transition-none focus:outline-none focus:ring-2 focus:ring-spark';
 
@@ -79,6 +86,35 @@ function LockIcon() {
     );
 }
 
+/** Marks a row as a header (parent/rollup) account — distinct from a plain postable leaf. */
+function HeaderTag() {
+    return (
+        <span
+            title="Header account — its balance is the total of its sub-accounts"
+            className="ml-2 inline-flex items-center rounded-full bg-spark-50 px-2 py-0.5 text-xs font-medium text-spark-600"
+        >
+            Header
+        </span>
+    );
+}
+
+function ChevronIcon({ expanded }: { expanded: boolean }) {
+    return (
+        <svg
+            aria-hidden="true"
+            viewBox="0 0 20 20"
+            fill="currentColor"
+            className={`h-3.5 w-3.5 shrink-0 transition-transform duration-[120ms] ease-out motion-reduce:transition-none ${expanded ? 'rotate-90' : ''}`}
+        >
+            <path
+                fillRule="evenodd"
+                d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z"
+                clipRule="evenodd"
+            />
+        </svg>
+    );
+}
+
 interface AccountFormData {
     code: string;
     name: string;
@@ -90,7 +126,7 @@ function AccountFormDialog({
     account,
     onClose,
 }: {
-    /** Present => editing; absent => creating a new account. */
+    /** Present => editing; absent => creating a new top-level account. */
     account: AccountRow | null;
     onClose: () => void;
 }) {
@@ -224,6 +260,132 @@ function AccountFormDialog({
     );
 }
 
+interface SubAccountFormData {
+    code: string;
+    name: string;
+    subtype: string;
+    description: string;
+}
+
+/** "Add sub-account": creates a leaf under `parent`, restricted to `parent`'s own root type. */
+function SubAccountFormDialog({
+    parent,
+    onClose,
+}: {
+    parent: AccountRow;
+    onClose: () => void;
+}) {
+    const eligibleSubtypes = SUBTYPE_CATALOG.filter((s) => s.type === parent.type);
+
+    const form = useForm<SubAccountFormData>({
+        code: '',
+        name: '',
+        subtype: eligibleSubtypes[0]?.value ?? '',
+        description: '',
+    });
+    const errors = form.errors as Record<string, string | undefined>;
+
+    const submit: FormEventHandler = (event) => {
+        event.preventDefault();
+        form.post(route('accounts.children.store', parent.id), {
+            preserveScroll: true,
+            onSuccess: onClose,
+        });
+    };
+
+    return (
+        <Dialog open onClose={onClose} className="relative z-50">
+            <DialogBackdrop className="fixed inset-0 bg-ink/30" />
+            <div className="fixed inset-0 flex items-center justify-center p-4">
+                <DialogPanel className="w-full max-w-md rounded-sheet bg-paper-raised p-6 shadow-sheet">
+                    <DialogTitle className="font-display text-lg font-semibold text-ink">
+                        Add sub-account under {parent.name}
+                    </DialogTitle>
+
+                    <form onSubmit={submit} className="mt-4 flex flex-col gap-4">
+                        <Field label="Code" htmlFor="sub-account-code" error={errors.code}>
+                            <input
+                                id="sub-account-code"
+                                type="text"
+                                inputMode="numeric"
+                                value={form.data.code}
+                                onChange={(event) => form.setData('code', event.target.value)}
+                                placeholder="1234"
+                                maxLength={4}
+                                className={`${INPUT_CLASSES} font-mono`}
+                            />
+                        </Field>
+
+                        <Field label="Name" htmlFor="sub-account-name" error={errors.name}>
+                            <input
+                                id="sub-account-name"
+                                type="text"
+                                value={form.data.name}
+                                onChange={(event) => form.setData('name', event.target.value)}
+                                className={INPUT_CLASSES}
+                            />
+                        </Field>
+
+                        <Field label="Type" htmlFor="sub-account-subtype" error={errors.subtype}>
+                            <select
+                                id="sub-account-subtype"
+                                value={form.data.subtype}
+                                onChange={(event) => form.setData('subtype', event.target.value)}
+                                className={INPUT_CLASSES}
+                            >
+                                {eligibleSubtypes.map((subtype) => (
+                                    <option key={subtype.value} value={subtype.value}>
+                                        {subtype.label}
+                                    </option>
+                                ))}
+                            </select>
+                        </Field>
+
+                        <Field
+                            label="Description"
+                            htmlFor="sub-account-description"
+                            error={errors.description}
+                        >
+                            <textarea
+                                id="sub-account-description"
+                                value={form.data.description}
+                                onChange={(event) =>
+                                    form.setData('description', event.target.value)
+                                }
+                                rows={2}
+                                className={`${INPUT_CLASSES} h-auto resize-none py-2`}
+                            />
+                        </Field>
+
+                        {parent.is_postable ? (
+                            <p className="text-xs text-ink-700">
+                                {parent.name} will become a header account once this is added
+                                {parent.balance !== 0
+                                    ? ` — its existing activity moves to an auto-created "${parent.name} — Other" sub-account, so nothing about its balance changes.`
+                                    : '.'}
+                            </p>
+                        ) : (
+                            <p className="text-xs text-ink-700">
+                                {parent.name} is already a header account — this adds another
+                                sub-account alongside its existing ones.
+                            </p>
+                        )}
+
+                        <div className="mt-2 flex justify-end gap-2">
+                            <Button type="button" variant="quiet" onClick={onClose}>
+                                Cancel
+                            </Button>
+                            <Button type="submit" disabled={form.processing}>
+                                {form.processing ? 'Adding…' : 'Add sub-account'}
+                            </Button>
+                        </div>
+                    </form>
+                </DialogPanel>
+            </div>
+        </Dialog>
+    );
+}
+
 function ArchivedTag() {
     return (
         <span className="ml-2 inline-block rounded-full bg-paper px-2 py-0.5 text-xs font-medium text-ink-700">
@@ -236,17 +398,40 @@ function AccountTypeSheet({
     type,
     accounts,
     currency,
+    hasChildren,
+    collapsedIds,
+    onToggleCollapse,
     onEdit,
     onToggleArchive,
+    onAddSubAccount,
 }: {
     type: string;
+    /** Every account of this type, depth-first ordered (parent immediately before its descendants). */
     accounts: AccountRow[];
     currency: string;
+    hasChildren: (accountId: number) => boolean;
+    collapsedIds: Set<number>;
+    onToggleCollapse: (accountId: number) => void;
     onEdit: (account: AccountRow) => void;
     onToggleArchive: (account: AccountRow) => void;
+    onAddSubAccount: (account: AccountRow) => void;
 }) {
     if (accounts.length === 0) {
         return null;
+    }
+
+    const byId = new Map(accounts.map((account) => [account.id, account]));
+
+    /** Hidden when any ancestor is collapsed — walks the parent_id chain within this type's own list. */
+    function isVisible(account: AccountRow): boolean {
+        let parentId = account.parent_id;
+        while (parentId !== null) {
+            if (collapsedIds.has(parentId)) {
+                return false;
+            }
+            parentId = byId.get(parentId)?.parent_id ?? null;
+        }
+        return true;
     }
 
     return (
@@ -272,65 +457,110 @@ function AccountTypeSheet({
                     </tr>
                 </thead>
                 <tbody>
-                    {accounts.map((account) => (
-                        <tr
-                            key={account.id}
-                            tabIndex={0}
-                            role="button"
-                            onClick={() => router.visit(route('accounts.show', account.id))}
-                            onKeyDown={(event) => {
-                                if (event.key === 'Enter' || event.key === ' ') {
-                                    event.preventDefault();
-                                    router.visit(route('accounts.show', account.id));
+                    {accounts.filter(isVisible).map((account) => {
+                        const expandable = hasChildren(account.id);
+                        const expanded = !collapsedIds.has(account.id);
+
+                        return (
+                            <tr
+                                key={account.id}
+                                tabIndex={0}
+                                role="button"
+                                onClick={() => router.visit(route('accounts.show', account.id))}
+                                onKeyDown={(event) => {
+                                    if (event.key === 'Enter' || event.key === ' ') {
+                                        event.preventDefault();
+                                        router.visit(route('accounts.show', account.id));
+                                    }
+                                }}
+                                className={
+                                    `cursor-pointer border-b border-rule text-ink transition duration-[120ms] ease-out motion-reduce:transition-none hover:bg-paper focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-spark last:border-b-0 ` +
+                                    (account.is_archived ? 'opacity-50 ' : '') +
+                                    (!account.is_postable ? 'bg-paper/60' : '')
                                 }
-                            }}
-                            className={
-                                `cursor-pointer border-b border-rule text-ink transition duration-[120ms] ease-out motion-reduce:transition-none hover:bg-paper focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-spark last:border-b-0 ` +
-                                (account.is_archived ? 'opacity-50' : '')
-                            }
-                        >
-                            <td className="py-3 pr-3 align-top font-mono">{account.code}</td>
-                            <td className="py-3 pr-3 align-top">
-                                <span className="inline-flex items-center gap-1.5">
-                                    {account.name}
-                                    {account.is_system && <LockIcon />}
-                                    {account.is_archived && <ArchivedTag />}
-                                </span>
-                            </td>
-                            <td className="py-3 pr-3 align-top text-ink-700">
-                                {account.subtype_label}
-                            </td>
-                            <td className="py-3 pr-3 align-top">
-                                <MoneyText minor={account.balance} currency={currency} size="sm" />
-                            </td>
-                            <td className="py-3 pl-3 align-top text-right">
-                                <div className="flex justify-end gap-1">
-                                    <Button
-                                        type="button"
-                                        variant="quiet"
-                                        size="sm"
-                                        onClick={(event) => {
-                                            event.stopPropagation();
-                                            onEdit(account);
+                            >
+                                <td className="py-3 pr-3 align-top font-mono">{account.code}</td>
+                                <td className="py-3 pr-3 align-top">
+                                    <div
+                                        className="flex items-center gap-1"
+                                        style={{
+                                            paddingLeft: `${account.depth * INDENT_REM_PER_DEPTH}rem`,
                                         }}
                                     >
-                                        Edit
-                                    </Button>
-                                    <Button
-                                        type="button"
-                                        variant="quiet"
-                                        size="sm"
-                                        onClick={(event) => {
-                                            event.stopPropagation();
-                                            onToggleArchive(account);
-                                        }}
-                                    >
-                                        {account.is_archived ? 'Unarchive' : 'Archive'}
-                                    </Button>
-                                </div>
-                            </td>
-                        </tr>
-                    ))}
+                                        {expandable ? (
+                                            <button
+                                                type="button"
+                                                aria-label={expanded ? 'Collapse' : 'Expand'}
+                                                onClick={(event) => {
+                                                    event.stopPropagation();
+                                                    onToggleCollapse(account.id);
+                                                }}
+                                                className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-ink-700 hover:bg-paper"
+                                            >
+                                                <ChevronIcon expanded={expanded} />
+                                            </button>
+                                        ) : (
+                                            <span className="inline-block h-5 w-5 shrink-0" />
+                                        )}
+                                        <span
+                                            className={
+                                                'inline-flex flex-wrap items-center gap-1.5 ' +
+                                                (!account.is_postable ? 'font-semibold' : '')
+                                            }
+                                        >
+                                            {account.name}
+                                            {account.is_system && <LockIcon />}
+                                            {!account.is_postable && <HeaderTag />}
+                                            {account.is_archived && <ArchivedTag />}
+                                        </span>
+                                    </div>
+                                </td>
+                                <td className="py-3 pr-3 align-top text-ink-700">
+                                    {account.subtype_label}
+                                </td>
+                                <td className="py-3 pr-3 align-top">
+                                    <MoneyText minor={account.balance} currency={currency} size="sm" />
+                                </td>
+                                <td className="py-3 pl-3 align-top text-right">
+                                    <div className="flex justify-end gap-1">
+                                        <Button
+                                            type="button"
+                                            variant="quiet"
+                                            size="sm"
+                                            onClick={(event) => {
+                                                event.stopPropagation();
+                                                onAddSubAccount(account);
+                                            }}
+                                        >
+                                            Add sub-account
+                                        </Button>
+                                        <Button
+                                            type="button"
+                                            variant="quiet"
+                                            size="sm"
+                                            onClick={(event) => {
+                                                event.stopPropagation();
+                                                onEdit(account);
+                                            }}
+                                        >
+                                            Edit
+                                        </Button>
+                                        <Button
+                                            type="button"
+                                            variant="quiet"
+                                            size="sm"
+                                            onClick={(event) => {
+                                                event.stopPropagation();
+                                                onToggleArchive(account);
+                                            }}
+                                        >
+                                            {account.is_archived ? 'Unarchive' : 'Archive'}
+                                        </Button>
+                                    </div>
+                                </td>
+                            </tr>
+                        );
+                    })}
                 </tbody>
             </table>
         </Sheet>
@@ -338,11 +568,14 @@ function AccountTypeSheet({
 }
 
 export default function Index({ accounts }: IndexPageProps) {
-    const { currentCompany } = usePage<PageProps>().props;
+    const { currentCompany, errors: pageErrors } = usePage<PageProps>().props;
+    const errors = (pageErrors ?? {}) as Record<string, string | undefined>;
     const currency = currentCompany?.base_currency ?? 'USD';
     const [showArchived, setShowArchived] = useState(false);
     const [editingAccount, setEditingAccount] = useState<AccountRow | null>(null);
+    const [addingChildTo, setAddingChildTo] = useState<AccountRow | null>(null);
     const [creating, setCreating] = useState(false);
+    const [collapsedIds, setCollapsedIds] = useState<Set<number>>(new Set());
 
     const visibleAccounts = useMemo(
         () => (showArchived ? accounts : accounts.filter((a) => !a.is_archived)),
@@ -359,6 +592,29 @@ export default function Index({ accounts }: IndexPageProps) {
         return byType;
     }, [visibleAccounts]);
 
+    /** Every account id that has at least one (currently visible) child — drives whether a row gets an expand/collapse chevron. */
+    const parentIdsWithVisibleChildren = useMemo(() => {
+        const set = new Set<number>();
+        for (const account of visibleAccounts) {
+            if (account.parent_id !== null) {
+                set.add(account.parent_id);
+            }
+        }
+        return set;
+    }, [visibleAccounts]);
+
+    function toggleCollapse(accountId: number) {
+        setCollapsedIds((previous) => {
+            const next = new Set(previous);
+            if (next.has(accountId)) {
+                next.delete(accountId);
+            } else {
+                next.add(accountId);
+            }
+            return next;
+        });
+    }
+
     function toggleArchive(account: AccountRow) {
         const routeName = account.is_archived ? 'accounts.unarchive' : 'accounts.archive';
         router.post(route(routeName, account.id), {}, { preserveScroll: true });
@@ -367,6 +623,12 @@ export default function Index({ accounts }: IndexPageProps) {
     return (
         <AppShell title="Chart of accounts">
             <Head title="Chart of accounts" />
+
+            {errors.is_archived && (
+                <div role="alert" className="mb-4 rounded-md bg-clay-50 px-4 py-3 text-sm text-clay">
+                    {errors.is_archived}
+                </div>
+            )}
 
             <div className="mb-4 flex items-center justify-between">
                 <label className="flex items-center gap-2 text-sm text-ink-700">
@@ -390,8 +652,12 @@ export default function Index({ accounts }: IndexPageProps) {
                         type={type}
                         accounts={grouped.get(type) ?? []}
                         currency={currency}
+                        hasChildren={(accountId) => parentIdsWithVisibleChildren.has(accountId)}
+                        collapsedIds={collapsedIds}
+                        onToggleCollapse={toggleCollapse}
                         onEdit={setEditingAccount}
                         onToggleArchive={toggleArchive}
+                        onAddSubAccount={setAddingChildTo}
                     />
                 ))}
             </div>
@@ -403,6 +669,12 @@ export default function Index({ accounts }: IndexPageProps) {
                 <AccountFormDialog
                     account={editingAccount}
                     onClose={() => setEditingAccount(null)}
+                />
+            )}
+            {addingChildTo && (
+                <SubAccountFormDialog
+                    parent={addingChildTo}
+                    onClose={() => setAddingChildTo(null)}
                 />
             )}
         </AppShell>

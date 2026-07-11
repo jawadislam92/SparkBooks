@@ -140,6 +140,7 @@ Route::middleware(['auth', 'verified', 'company', 'can:audit.view'])->group(func
 Route::middleware(['auth', 'verified', 'company', 'can:accounts.manage'])->group(function () {
     Route::get('/accounts', [AccountController::class, 'index'])->name('accounts.index');
     Route::post('/accounts', [AccountController::class, 'store'])->name('accounts.store');
+    Route::post('/accounts/{account}/children', [AccountController::class, 'storeChild'])->name('accounts.children.store');
     Route::patch('/accounts/{account}', [AccountController::class, 'update'])->name('accounts.update');
     Route::post('/accounts/{account}/archive', [AccountController::class, 'archive'])->name('accounts.archive');
     Route::post('/accounts/{account}/unarchive', [AccountController::class, 'unarchive'])->name('accounts.unarchive');

@@ -11,6 +11,7 @@ use App\Models\Account;
 use App\Models\ActivityLog;
 use App\Models\Company;
 use App\Models\User;
+use App\Services\AccountService;
 use App\Services\LedgerService;
 use App\Services\Reports\TrialBalanceReport;
 use App\Support\CompanyContext;
@@ -309,6 +310,65 @@ class TrialBalanceTest extends TestCase
         $this->assertContains($expense->id, $ids);
         $this->assertContains($income->id, $ids);
         $this->assertSame($report['total_debit'], $report['total_credit']);
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 7 Task 1: sub-account rollup
+    // ---------------------------------------------------------------
+
+    public function test_parent_with_two_posting_children_shows_each_leaf_and_a_correct_subtotal(): void
+    {
+        $company = Company::factory()->create();
+        app(CompanyContext::class)->set($company);
+        $bank = $this->bankAccount($company);
+        $parent = $this->expenseAccount($company, ['code' => '5400', 'name' => 'Software']);
+        $service = app(AccountService::class);
+        $childA = $service->createChild($parent, ['code' => '5401', 'name' => 'Design Tools', 'subtype' => AccountSubtype::OperatingExpense]);
+        $childB = $service->createChild($parent->fresh(), ['code' => '5402', 'name' => 'Dev Tools', 'subtype' => AccountSubtype::OperatingExpense]);
+
+        $this->postEntry($childA, $bank, 3000, '2026-07-01', 1);
+        $this->postEntry($childB, $bank, 7000, '2026-07-02', 2);
+
+        $report = app(TrialBalanceReport::class)->build(CarbonImmutable::parse('2026-07-31'));
+        $byId = collect($report['rows'])->keyBy('account_id');
+
+        $this->assertSame(3000, $byId[$childA->id]['debit']);
+        $this->assertFalse($byId[$childA->id]['is_subtotal']);
+        $this->assertSame(1, $byId[$childA->id]['depth']);
+
+        $this->assertSame(7000, $byId[$childB->id]['debit']);
+        $this->assertFalse($byId[$childB->id]['is_subtotal']);
+
+        $parentRow = $byId[$parent->id];
+        $this->assertSame(10000, $parentRow['debit']);
+        $this->assertSame(0, $parentRow['credit']);
+        $this->assertTrue($parentRow['is_subtotal']);
+        $this->assertSame(0, $parentRow['depth']);
+
+        // Parent subtotal rows are display-only — they must not inflate the
+        // grand total (each leaf is already counted once).
+        $this->assertSame(10000, $report['total_debit']);
+        $this->assertSame(10000, $report['total_credit']);
+        $this->assertLedgerBalances();
+    }
+
+    public function test_rows_are_depth_first_ordered_parent_immediately_before_its_children(): void
+    {
+        $company = Company::factory()->create();
+        app(CompanyContext::class)->set($company);
+        $bank = $this->bankAccount($company);
+        $parent = $this->expenseAccount($company, ['code' => '5400', 'name' => 'Software']);
+        $service = app(AccountService::class);
+        $child = $service->createChild($parent, ['code' => '5401', 'name' => 'Design Tools', 'subtype' => AccountSubtype::OperatingExpense]);
+        $this->postEntry($child, $bank, 1000, '2026-07-01', 1);
+
+        $report = app(TrialBalanceReport::class)->build(CarbonImmutable::parse('2026-07-31'));
+        $codes = collect($report['rows'])->pluck('code')->all();
+
+        $parentIndex = array_search('5400', $codes, true);
+        $childIndex = array_search('5401', $codes, true);
+        $this->assertNotFalse($parentIndex);
+        $this->assertSame($parentIndex + 1, $childIndex);
     }
 
     // ---------------------------------------------------------------
