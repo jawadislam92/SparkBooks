@@ -2,7 +2,9 @@
 
 namespace App\Console\Commands;
 
+use App\Support\AlertNotifier;
 use App\Support\BackupRetentionPolicy;
+use App\Support\Heartbeat;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Process;
@@ -20,8 +22,13 @@ use ZipArchive;
  * alongside ledger:verify.
  *
  * Every failure path returns self::FAILURE with a logged, printed error —
- * Task 7 hangs its alerting off this command's exit code, so a silent
- * partial success here would be a silent alerting gap there.
+ * Task 7 hangs its alerting off this command's exit code: handle() itself is
+ * a thin wrapper around runBackup() that pings the backup heartbeat on
+ * success (App\Support\Heartbeat, config-gated, no-op without an env URL) or
+ * dispatches an alert on failure (App\Support\AlertNotifier, config-gated
+ * email + optional Slack) — one call site for each, regardless of which
+ * internal step failed, keyed off $lastFailureReason set at each failure
+ * point below.
  */
 class BackupDatabase extends Command
 {
@@ -29,13 +36,33 @@ class BackupDatabase extends Command
 
     protected $description = 'Dump the database + attachments to a timestamped archive, copy off-host when configured, and prune retention (spec §11)';
 
-    public function handle(): int
+    /** Set at whichever failure point runBackup() returns FAILURE from, so handle() can alert with a meaningful body. */
+    private ?string $lastFailureReason = null;
+
+    public function handle(Heartbeat $heartbeat, AlertNotifier $alertNotifier): int
+    {
+        $result = $this->runBackup();
+
+        if ($result === self::SUCCESS) {
+            $heartbeat->ping('backup');
+        } else {
+            $alertNotifier->alert(
+                'SparkBooks backup failed',
+                $this->lastFailureReason ?? 'sparkbooks:backup exited non-zero. Check application logs for details.'
+            );
+        }
+
+        return $result;
+    }
+
+    private function runBackup(): int
     {
         $localPath = rtrim((string) config('backup.local_path'), '/\\');
 
         if (! is_dir($localPath) && ! @mkdir($localPath, 0755, true) && ! is_dir($localPath)) {
             $this->error("Could not create the backups directory: {$localPath}");
             Log::error("sparkbooks:backup: could not create backups directory [{$localPath}].");
+            $this->lastFailureReason = "Could not create the backups directory: {$localPath}";
 
             return self::FAILURE;
         }
@@ -54,6 +81,7 @@ class BackupDatabase extends Command
         } catch (Throwable $e) {
             $this->error("Failed to build the backup archive: {$e->getMessage()}");
             Log::error('sparkbooks:backup: failed to build archive', ['error' => $e->getMessage()]);
+            $this->lastFailureReason = "Failed to build the backup archive: {$e->getMessage()}";
 
             return self::FAILURE;
         } finally {
@@ -86,6 +114,7 @@ class BackupDatabase extends Command
         if (! in_array($driver, ['mysql', 'mariadb'], true)) {
             $this->error("sparkbooks:backup only supports mysql/mariadb connections (current default connection [{$connectionName}] uses driver [{$driver}]).");
             Log::error("sparkbooks:backup: unsupported database driver [{$driver}] for connection [{$connectionName}].");
+            $this->lastFailureReason = "sparkbooks:backup only supports mysql/mariadb connections (current default connection [{$connectionName}] uses driver [{$driver}]).";
 
             return false;
         }
@@ -114,6 +143,7 @@ class BackupDatabase extends Command
         } catch (Throwable $e) {
             $this->error("Could not run mysqldump: {$e->getMessage()}");
             Log::error('sparkbooks:backup: mysqldump could not be started', ['binary' => $binary, 'error' => $e->getMessage()]);
+            $this->lastFailureReason = "Could not run mysqldump: {$e->getMessage()}";
 
             return false;
         }
@@ -121,6 +151,7 @@ class BackupDatabase extends Command
         if (! $result->successful()) {
             $this->error("mysqldump failed (exit {$result->exitCode()}): {$result->errorOutput()}");
             Log::error('sparkbooks:backup: mysqldump failed', ['exit_code' => $result->exitCode(), 'error' => $result->errorOutput()]);
+            $this->lastFailureReason = "mysqldump failed (exit {$result->exitCode()}): {$result->errorOutput()}";
 
             return false;
         }
@@ -128,6 +159,7 @@ class BackupDatabase extends Command
         if (! is_file($sqlPath) || filesize($sqlPath) === 0) {
             $this->error("mysqldump reported success but produced an empty or missing dump file: {$sqlPath}");
             Log::error('sparkbooks:backup: dump file missing or empty', ['path' => $sqlPath]);
+            $this->lastFailureReason = "mysqldump reported success but produced an empty or missing dump file: {$sqlPath}";
 
             return false;
         }
@@ -216,6 +248,7 @@ class BackupDatabase extends Command
         } catch (Throwable $e) {
             $this->error("Off-host copy to disk [{$diskName}] failed: {$e->getMessage()}");
             Log::error('sparkbooks:backup: off-host copy failed', ['disk' => $diskName, 'error' => $e->getMessage()]);
+            $this->lastFailureReason = "Off-host copy to disk [{$diskName}] failed: {$e->getMessage()}";
 
             return false;
         } finally {

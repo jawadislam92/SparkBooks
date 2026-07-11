@@ -17,3 +17,13 @@ Schedule::command('ledger:verify')->dailyAt('03:00');
 // up; withoutOverlapping guards against a slow run still going when the
 // next day's schedule fires.
 Schedule::command('sparkbooks:backup')->dailyAt('02:00')->withoutOverlapping();
+
+// §17.9 monitoring — queue-worker liveness dead-man's-switch. Dispatches
+// QueueHeartbeatJob onto the queue; the actual heartbeat ping only fires
+// once a real queue:work process pulls the job off and processes it (see
+// QueueHeartbeatJob's docblock), so a dead worker silently fails to ping
+// and the configured external healthcheck service pages on that silence.
+// The backup/integrity heartbeat pings themselves are NOT scheduled here —
+// they live inside sparkbooks:backup / ledger:verify and fire only after
+// each command's own success.
+Schedule::command('sparkbooks:queue-heartbeat')->dailyAt('04:00');
