@@ -510,7 +510,7 @@ class ExpenseController extends Controller
             // No type restriction — an expense's payee is any tenant
             // contact (spec §7.8), unlike Bill which requires a vendor.
             'contacts' => Contact::query()
-                ->where('is_archived', false)
+                ->active()
                 ->orderBy('name')
                 ->get(['id', 'name', 'type'])
                 ->map(fn (Contact $contact) => [
@@ -520,7 +520,7 @@ class ExpenseController extends Controller
                 ])
                 ->values(),
             'bankAccounts' => BankAccount::query()
-                ->where('is_archived', false)
+                ->active()
                 ->orderBy('name')
                 ->get(['id', 'name'])
                 ->map(fn (BankAccount $bankAccount) => [

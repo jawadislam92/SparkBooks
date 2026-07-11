@@ -224,7 +224,7 @@ class BillController extends Controller
         return Inertia::render('Bills/Show', [
             'bill' => $this->billShowPayload($model),
             'bankAccounts' => BankAccount::query()
-                ->where('is_archived', false)
+                ->active()
                 ->orderBy('name')
                 ->get(['id', 'name'])
                 ->values(),
@@ -585,7 +585,7 @@ class BillController extends Controller
     {
         return [
             'contacts' => Contact::query()
-                ->where('is_archived', false)
+                ->active()
                 ->whereIn('type', [ContactType::Vendor->value, ContactType::Both->value])
                 ->orderBy('name')
                 ->get(['id', 'name', 'type'])

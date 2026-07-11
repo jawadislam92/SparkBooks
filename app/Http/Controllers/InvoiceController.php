@@ -217,7 +217,7 @@ class InvoiceController extends Controller
         return Inertia::render('Invoices/Show', [
             'invoice' => $this->invoiceShowPayload($model),
             'bankAccounts' => BankAccount::query()
-                ->where('is_archived', false)
+                ->active()
                 ->orderBy('name')
                 ->get(['id', 'name', 'currency_code'])
                 ->values(),
@@ -623,7 +623,7 @@ class InvoiceController extends Controller
     {
         return [
             'contacts' => Contact::query()
-                ->where('is_archived', false)
+                ->active()
                 ->whereIn('type', [ContactType::Customer->value, ContactType::Both->value])
                 ->orderBy('name')
                 ->get(['id', 'name', 'type'])
@@ -634,7 +634,7 @@ class InvoiceController extends Controller
                 ])
                 ->values(),
             'items' => Item::query()
-                ->where('is_archived', false)
+                ->active()
                 ->orderBy('name')
                 ->get(['id', 'name', 'description', 'unit_price', 'default_income_account_id', 'default_tax_rate_id'])
                 ->map(fn (Item $item) => [
@@ -648,7 +648,7 @@ class InvoiceController extends Controller
                 ->values(),
             'incomeAccounts' => Account::query()
                 ->where('type', AccountType::Income->value)
-                ->where('is_archived', false)
+                ->active()
                 ->orderBy('code')
                 ->get(['id', 'code', 'name'])
                 ->map(fn (Account $account) => [

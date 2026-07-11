@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Models\Concerns\BelongsToCompany;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -41,5 +42,17 @@ class Item extends Model
     public function taxRate(): BelongsTo
     {
         return $this->belongsTo(TaxRate::class, 'default_tax_rate_id');
+    }
+
+    /** Every non-archived item for this company — the shared filter invoice/bill line item pickers apply. Mirrors Account/Contact/BankAccount's own scopeActive. */
+    public function scopeActive(Builder $query): Builder
+    {
+        return $query->where('is_archived', false);
+    }
+
+    /** Every archived item for this company — Items/Index's own "Show archived" filter. */
+    public function scopeArchived(Builder $query): Builder
+    {
+        return $query->where('is_archived', true);
     }
 }

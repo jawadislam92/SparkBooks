@@ -5,8 +5,10 @@ namespace App\Models;
 use App\Enums\AccountSubtype;
 use App\Enums\AccountType;
 use App\Exceptions\Accounts\AccountHasActiveChildren;
+use App\Exceptions\Accounts\SystemAccountCannotBeArchived;
 use App\Exceptions\Accounts\SystemAccountNotNestable;
 use App\Models\Concerns\BelongsToCompany;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -77,6 +79,18 @@ class Account extends Model
             ->where('id', '!=', $this->id);
     }
 
+    /** Every non-archived account for this company — the shared "picker" filter every form-options/eligibility query in this app applies. Mirrors Contact/Item/BankAccount's own scopeActive. */
+    public function scopeActive(Builder $query): Builder
+    {
+        return $query->where('is_archived', false);
+    }
+
+    /** Every archived account for this company — the Chart of Accounts' own "Show archived" filter, applied client-side against the same full payload scopeActive's callers would otherwise narrow to. */
+    public function scopeArchived(Builder $query): Builder
+    {
+        return $query->where('is_archived', true);
+    }
+
     /**
      * Rollup helper for reports (TrialBalanceReport/BalanceSheetReport/
      * ProfitAndLossReport/GeneralLedgerReport): every descendant account id,
@@ -125,6 +139,18 @@ class Account extends Model
             if ($account->isDirty('is_archived') && $account->is_archived
                 && $account->children()->where('is_archived', false)->exists()) {
                 throw new AccountHasActiveChildren("Account {$account->code} has active sub-accounts and cannot be archived while they remain active.");
+            }
+
+            // Phase 7 Task 2: a system account can never be archived — see
+            // SystemAccountCannotBeArchived's docblock for why. Based on the
+            // ORIGINAL is_system flag (same "never trust the live, possibly
+            // just-mutated attribute" reasoning as the is_system-change guard
+            // above), and only checked when is_archived is actually being
+            // flipped TO true, so unarchiving (a no-op for a system account,
+            // which can never get here in the first place) is never blocked.
+            if ($account->getOriginal('is_system')
+                && $account->isDirty('is_archived') && $account->is_archived) {
+                throw new SystemAccountCannotBeArchived("Account {$account->code} is a system account and cannot be archived.");
             }
 
             // Reparenting an EXISTING account must cascade path/depth to

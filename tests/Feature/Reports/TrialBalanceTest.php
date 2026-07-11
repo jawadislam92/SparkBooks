@@ -313,6 +313,50 @@ class TrialBalanceTest extends TestCase
     }
 
     // ---------------------------------------------------------------
+    // Phase 7 Task 2: archiving never touches posted data or balances
+    // ---------------------------------------------------------------
+
+    public function test_archiving_a_zero_balance_account_does_not_change_the_trial_balance(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        app(CompanyContext::class)->set($company);
+        $bank = $this->bankAccount($company);
+        $income = $this->incomeAccount($company);
+        $unused = $this->liabilityAccount($company, ['code' => '2999']);
+        $this->postEntry($bank, $income, 10000, '2026-07-01', 1);
+
+        $before = app(TrialBalanceReport::class)->build(CarbonImmutable::parse('2026-07-31'));
+
+        $this->post("/accounts/{$unused->id}/archive")->assertRedirect(route('accounts.index'));
+        $this->assertTrue($unused->fresh()->is_archived);
+
+        $after = app(TrialBalanceReport::class)->build(CarbonImmutable::parse('2026-07-31'));
+
+        $this->assertSame($before, $after);
+    }
+
+    public function test_an_archived_account_with_historical_activity_still_appears_in_the_trial_balance(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        app(CompanyContext::class)->set($company);
+        $bank = $this->bankAccount($company);
+        $income = $this->incomeAccount($company);
+        $this->postEntry($bank, $income, 10000, '2026-07-01', 1);
+
+        $this->post("/accounts/{$income->id}/archive")->assertRedirect(route('accounts.index'));
+        $this->assertTrue($income->fresh()->is_archived);
+
+        $report = app(TrialBalanceReport::class)->build(CarbonImmutable::parse('2026-07-31'));
+        $row = collect($report['rows'])->firstWhere('account_id', $income->id);
+
+        $this->assertNotNull($row, 'An archived account with historical activity must still appear in the trial balance.');
+        $this->assertSame(10000, $row['credit']);
+        $this->assertSame($report['total_debit'], $report['total_credit']);
+    }
+
+    // ---------------------------------------------------------------
     // Phase 7 Task 1: sub-account rollup
     // ---------------------------------------------------------------
 

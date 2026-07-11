@@ -209,9 +209,60 @@ class ContactsTest extends TestCase
         $this->assertSame($contact->id, $unarchiveAudit->subject_id);
     }
 
+    /**
+     * Archiving is not deletion: a contact with real posted history (a
+     * journal_line referencing it) can still be archived — nothing about the
+     * historical line changes, and the contact stays fully resolvable off
+     * that line's relation (the "retained in history" half of the brief).
+     */
+    public function test_a_contact_with_historical_journal_activity_can_still_be_archived(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        app(CompanyContext::class)->set($company);
+        $contact = Contact::factory()->create(['company_id' => $company->id, 'name' => 'Longtime Customer']);
+        $account = Account::factory()->create([
+            'company_id' => $company->id,
+            'type' => AccountType::Asset->value,
+            'subtype' => AccountSubtype::Receivable->value,
+        ]);
+        $entry = $this->rawJournalEntry($company);
+        DB::table('journal_lines')->insert([
+            'journal_entry_id' => $entry->id,
+            'company_id' => $company->id,
+            'account_id' => $account->id,
+            'debit' => 1000,
+            'credit' => 0,
+            'memo' => null,
+            'contact_id' => $contact->id,
+        ]);
+
+        $this->post("/contacts/{$contact->id}/archive")->assertRedirect(route('contacts.index'));
+        $this->assertTrue($contact->fresh()->is_archived);
+
+        $this->assertSame(1, DB::table('journal_lines')->where('contact_id', $contact->id)->count());
+
+        // Still fully resolvable off its historical line, name intact.
+        $line = DB::table('journal_lines')->where('contact_id', $contact->id)->first();
+        $this->assertSame($contact->id, $line->contact_id);
+        $this->assertSame('Longtime Customer', $contact->fresh()->name);
+    }
+
     // ---------------------------------------------------------------
     // Tenant scoping
     // ---------------------------------------------------------------
+
+    public function test_cross_company_contact_returns_404_on_archive(): void
+    {
+        $companyA = Company::factory()->create();
+        $contactA = Contact::factory()->create(['company_id' => $companyA->id]);
+
+        $companyB = Company::factory()->create();
+        $this->actingAsRole($companyB, Role::Owner);
+
+        $this->post("/contacts/{$contactA->id}/archive")->assertNotFound();
+        $this->assertFalse($contactA->fresh()->is_archived);
+    }
 
     public function test_cross_company_contact_returns_404_on_show(): void
     {
@@ -322,6 +373,31 @@ class ContactsTest extends TestCase
         $this->post("/contacts/{$contact->id}/archive")->assertForbidden();
         $this->post("/contacts/{$contact->id}/unarchive")->assertForbidden();
         $this->get("/contacts/{$contact->id}")->assertForbidden();
+    }
+
+    // ---------------------------------------------------------------
+    // Model scopes (Phase 7 Task 2)
+    // ---------------------------------------------------------------
+
+    public function test_active_and_archived_scopes_filter_by_is_archived_within_the_current_company(): void
+    {
+        $company = Company::factory()->create();
+        app(CompanyContext::class)->set($company);
+        $active = Contact::factory()->create(['company_id' => $company->id]);
+        $archived = Contact::factory()->create(['company_id' => $company->id, 'is_archived' => true]);
+
+        $otherCompany = Company::factory()->create();
+        $foreignActive = Contact::factory()->create(['company_id' => $otherCompany->id]);
+
+        $activeIds = Contact::active()->pluck('id')->all();
+        $archivedIds = Contact::archived()->pluck('id')->all();
+
+        $this->assertContains($active->id, $activeIds);
+        $this->assertNotContains($archived->id, $activeIds);
+        $this->assertNotContains($foreignActive->id, $activeIds);
+
+        $this->assertContains($archived->id, $archivedIds);
+        $this->assertNotContains($active->id, $archivedIds);
     }
 
     // ---------------------------------------------------------------

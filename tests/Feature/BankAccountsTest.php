@@ -399,6 +399,33 @@ class BankAccountsTest extends TestCase
     }
 
     // ---------------------------------------------------------------
+    // Model scopes (Phase 7 Task 2)
+    // ---------------------------------------------------------------
+
+    public function test_active_and_archived_scopes_filter_by_is_archived_within_the_current_company(): void
+    {
+        $company = Company::factory()->create();
+        $active = $this->createBankAccount($company, ['name' => 'Active Account']);
+        $archived = $this->createBankAccount($company, ['name' => 'Archived Account']);
+        app(CompanyContext::class)->set($company);
+        $archived->update(['is_archived' => true]);
+
+        $otherCompany = Company::factory()->create();
+        $foreignActive = $this->createBankAccount($otherCompany, ['name' => 'Foreign Account']);
+
+        app(CompanyContext::class)->set($company);
+        $activeIds = BankAccount::active()->pluck('id')->all();
+        $archivedIds = BankAccount::archived()->pluck('id')->all();
+
+        $this->assertContains($active->id, $activeIds);
+        $this->assertNotContains($archived->id, $activeIds);
+        $this->assertNotContains($foreignActive->id, $activeIds);
+
+        $this->assertContains($archived->id, $archivedIds);
+        $this->assertNotContains($active->id, $archivedIds);
+    }
+
+    // ---------------------------------------------------------------
     // Tenant scoping
     // ---------------------------------------------------------------
 

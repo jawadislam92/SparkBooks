@@ -214,9 +214,21 @@ class StoreInvoiceRequest extends FormRequest
         // Item's BelongsToCompany global scope means a foreign-company id is
         // indistinguishable from a nonexistent one — item_id is only ever a
         // client-side prefill hint (never persisted), so this just confirms
-        // it's a real, tenant-owned item rather than a stray/foreign id.
-        if (Item::query()->find($id) === null) {
+        // it's a real, tenant-owned, non-archived item rather than a stray/
+        // foreign/archived id. An archived item is rejected the same way
+        // contact_id/income_account_id/tax_rate_id are above — the item
+        // picker itself already excludes archived items (see
+        // InvoiceController::formOptions), this is the server-side backstop.
+        $item = Item::query()->find($id);
+
+        if ($item === null) {
             $validator->errors()->add("lines.{$index}.item_id", 'The selected item was not found.');
+
+            return;
+        }
+
+        if ($item->is_archived) {
+            $validator->errors()->add("lines.{$index}.item_id", 'The selected item is archived.');
         }
     }
 }

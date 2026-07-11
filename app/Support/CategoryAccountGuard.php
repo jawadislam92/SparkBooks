@@ -78,7 +78,7 @@ class CategoryAccountGuard
     public static function eligibleQuery(): Builder
     {
         return Account::query()
-            ->where('is_archived', false)
+            ->active()
             ->whereIn('type', array_map(fn (AccountType $type) => $type->value, self::ELIGIBLE_TYPES))
             ->whereNotIn('subtype', [
                 AccountSubtype::Receivable->value,

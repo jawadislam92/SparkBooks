@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Models\Concerns\BelongsToCompany;
 use App\Services\AccountBalances;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -48,5 +49,17 @@ class BankAccount extends Model
         $balancesByAccount ??= app(AccountBalances::class)->asOf();
 
         return $balancesByAccount[$this->ledger_account_id] ?? 0;
+    }
+
+    /** Every non-archived bank/cash account for this company — the shared filter every invoice/bill/expense payment picker applies. Mirrors Account/Contact/Item's own scopeActive. */
+    public function scopeActive(Builder $query): Builder
+    {
+        return $query->where('is_archived', false);
+    }
+
+    /** Every archived bank/cash account for this company — BankAccounts/Index's own "Show archived" filter. */
+    public function scopeArchived(Builder $query): Builder
+    {
+        return $query->where('is_archived', true);
     }
 }

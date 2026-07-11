@@ -352,6 +352,31 @@ class ItemsTest extends TestCase
     }
 
     // ---------------------------------------------------------------
+    // Model scopes (Phase 7 Task 2)
+    // ---------------------------------------------------------------
+
+    public function test_active_and_archived_scopes_filter_by_is_archived_within_the_current_company(): void
+    {
+        $company = Company::factory()->create();
+        app(CompanyContext::class)->set($company);
+        $active = Item::factory()->create(['company_id' => $company->id]);
+        $archived = Item::factory()->create(['company_id' => $company->id, 'is_archived' => true]);
+
+        $otherCompany = Company::factory()->create();
+        $foreignActive = Item::factory()->create(['company_id' => $otherCompany->id]);
+
+        $activeIds = Item::active()->pluck('id')->all();
+        $archivedIds = Item::archived()->pluck('id')->all();
+
+        $this->assertContains($active->id, $activeIds);
+        $this->assertNotContains($archived->id, $activeIds);
+        $this->assertNotContains($foreignActive->id, $activeIds);
+
+        $this->assertContains($archived->id, $archivedIds);
+        $this->assertNotContains($active->id, $archivedIds);
+    }
+
+    // ---------------------------------------------------------------
     // Tenant scoping
     // ---------------------------------------------------------------
 

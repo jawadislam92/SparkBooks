@@ -148,6 +148,34 @@ class InvoiceShowTest extends TestCase
         });
     }
 
+    /**
+     * Phase 7 Task 2 (archiving, surfaced everywhere): archiving a contact
+     * hides it from NEW-document pickers (InvoiceController::formOptions),
+     * but an EXISTING invoice that already references it must keep showing
+     * it, unchanged — archiving is not deletion, and Contact's global scope
+     * has no is_archived filter for exactly this reason.
+     */
+    public function test_show_still_displays_an_archived_contacts_name_on_an_existing_invoice(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $contact = $this->customer($company, ['name' => 'Acme Co']);
+        $income = $this->incomeAccount($company);
+        $invoice = $this->draftInvoiceWithLine($company, $contact, $income);
+
+        $this->post("/contacts/{$contact->id}/archive")->assertRedirect(route('contacts.index'));
+        $this->assertTrue($contact->fresh()->is_archived);
+
+        $response = $this->get("/invoices/{$invoice->id}");
+
+        $response->assertOk();
+        $response->assertInertia(function (AssertableInertia $page) use ($invoice) {
+            $page->component('Invoices/Show');
+            $page->where('invoice.id', $invoice->id);
+            $page->where('invoice.contact.name', 'Acme Co');
+        });
+    }
+
     public function test_show_shares_the_narrower_action_abilities_for_an_owner(): void
     {
         $company = Company::factory()->create();

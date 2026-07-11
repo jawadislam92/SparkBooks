@@ -478,6 +478,77 @@ class ChartOfAccountsTest extends TestCase
         $this->assertFalse($account->fresh()->is_archived);
     }
 
+    /**
+     * Phase 7 Task 2: a system account can never be archived (see
+     * SystemAccountCannotBeArchived's docblock) — the HTTP-layer mirror of
+     * AccountsTest::test_system_account_cannot_be_archived, proving the
+     * model-layer guard surfaces as a friendly 422 (not a 500) through the
+     * same route the parent-with-active-children guard uses.
+     */
+    public function test_archiving_a_system_account_returns_a_friendly_error_not_a_500(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $account = Account::factory()->create(['company_id' => $company->id, 'is_system' => true]);
+
+        $response = $this->postJson("/accounts/{$account->id}/archive");
+
+        $response->assertSessionHasErrors('is_archived');
+        $this->assertFalse($account->fresh()->is_archived);
+        $this->assertSame(0, ActivityLog::query()->where('action', 'account.archived')->count());
+    }
+
+    public function test_cross_company_account_returns_404_on_archive(): void
+    {
+        $companyA = Company::factory()->create();
+        $accountA = $this->bankAccount($companyA);
+
+        $companyB = Company::factory()->create();
+        $this->actingAsRole($companyB, Role::Owner);
+
+        $response = $this->postJson("/accounts/{$accountA->id}/archive");
+
+        $response->assertNotFound();
+        $this->assertFalse($accountA->fresh()->is_archived);
+    }
+
+    /**
+     * Archiving is not deletion: an ordinary (non-system) account with real
+     * posted history can still be archived — only a system account or a
+     * parent with active children is blocked. Its historical journal
+     * activity/balance must be completely unaffected by archiving.
+     */
+    public function test_an_account_with_historical_activity_can_still_be_archived_and_its_balance_is_unchanged(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        app(CompanyContext::class)->set($company);
+        $bank = $this->bankAccount($company);
+        $income = $this->incomeAccount($company);
+        $this->postEntry($bank, $income, 5000, '2026-07-01', 1);
+
+        $balancesByAccount = app(AccountBalances::class)->asOf();
+        $balanceBefore = $balancesByAccount[$income->id] ?? 0;
+
+        $response = $this->postJson("/accounts/{$income->id}/archive");
+        $response->assertRedirect(route('accounts.index'));
+        $this->assertTrue($income->fresh()->is_archived);
+
+        $balancesAfter = app(AccountBalances::class)->asOf();
+        $this->assertSame($balanceBefore, $balancesAfter[$income->id] ?? 0);
+
+        // Still fully visible via its own drill-down (Show) — archiving
+        // hides it from NEW-transaction pickers, never from its own history.
+        $showResponse = $this->get("/accounts/{$income->id}");
+        $showResponse->assertOk();
+        $showResponse->assertInertia(function (AssertableInertia $page) use ($income, $balanceBefore) {
+            $page->where('account.id', $income->id);
+            $page->where('account.is_archived', true);
+            $page->where('account.balance', $balanceBefore);
+            $page->has('ledger.data', 1);
+        });
+    }
+
     // ---------------------------------------------------------------
     // Drill-down (Show)
     // ---------------------------------------------------------------
