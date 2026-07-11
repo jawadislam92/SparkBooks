@@ -246,6 +246,55 @@ class EntryNumberTest extends TestCase
         $this->assertSame(5, $posted->entry_number);
     }
 
+    public function test_backfill_is_idempotent_and_safe_when_an_out_of_order_row_lands_after_posts(): void
+    {
+        // Review-fix regression: the backfill must only number still-UNnumbered
+        // rows (above the company's max) so it can be re-run safely — including
+        // after a new backdated legacy row lands once real posts have already
+        // consumed the counter — without a duplicate-key collision or
+        // renumbering already-numbered rows.
+        $company = Company::factory()->create();
+        app(CompanyContext::class)->set($company);
+
+        // Three legacy unnumbered rows → first backfill numbers them 1,2,3.
+        $this->insertRawEntry($company, '2026-07-01', 100);
+        $this->insertRawEntry($company, '2026-07-02', 101);
+        $this->insertRawEntry($company, '2026-07-03', 102);
+        app(EntryNumberBackfiller::class)->backfill();
+
+        // Real posts continue at 4, 5 via post-time numbering.
+        $this->bankAccount();
+        $this->incomeAccount();
+        $this->assertSame(4, $this->postEntry(103, '2026-07-04')->entry_number);
+        $this->assertSame(5, $this->postEntry(104, '2026-07-05')->entry_number);
+
+        // Snapshot every already-numbered row.
+        $before = JournalEntry::query()->withoutGlobalScopes()->pluck('entry_number', 'id')->all();
+
+        // A NEW out-of-order (backdated) UNnumbered legacy row lands...
+        $lateId = $this->insertRawEntry($company, '2026-06-15', 200);
+
+        // ...and the backfill is RE-RUN (repair scenario). Must NOT throw.
+        app(EntryNumberBackfiller::class)->backfill();
+
+        // Every previously-numbered row is untouched.
+        foreach ($before as $id => $num) {
+            $this->assertSame(
+                $num,
+                (int) JournalEntry::query()->withoutGlobalScopes()->whereKey($id)->value('entry_number'),
+                "Already-numbered entry {$id} must not be renumbered by a re-run."
+            );
+        }
+
+        // The new row is numbered ABOVE the previous max (5) → 6, not colliding.
+        $this->assertSame(6, (int) JournalEntry::query()->withoutGlobalScopes()->whereKey($lateId)->value('entry_number'));
+
+        // All numbers still unique, and the next real post continues at 7.
+        $numbers = JournalEntry::query()->withoutGlobalScopes()->where('company_id', $company->id)->pluck('entry_number')->all();
+        $this->assertSame($numbers, array_unique($numbers));
+        $this->assertSame(7, $this->postEntry(105, '2026-07-06')->entry_number);
+    }
+
     // ---------------------------------------------------------------
     // Additive only: entry numbers must not change any posting amount or
     // the trial balance.
