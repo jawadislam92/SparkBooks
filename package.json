@@ -31,6 +31,7 @@
     "dependencies": {
         "@fontsource/bricolage-grotesque": "^5.2.10",
         "@fontsource/public-sans": "^5.2.7",
-        "@fontsource/spline-sans-mono": "^5.2.8"
+        "@fontsource/spline-sans-mono": "^5.2.8",
+        "chart.js": "^4.5.1"
     }
 }

@@ -2,17 +2,29 @@
 
 namespace Tests\Feature;
 
+use App\Domain\Ledger\EntryDraft;
+use App\Domain\Ledger\LineDraft;
 use App\Enums\AccountSubtype;
 use App\Enums\AccountType;
+use App\Enums\BillStatus;
 use App\Enums\ContactType;
+use App\Enums\InvoiceStatus;
 use App\Enums\Role;
 use App\Models\Account;
+use App\Models\ActivityLog;
 use App\Models\BankAccount;
+use App\Models\Bill;
 use App\Models\Company;
 use App\Models\Contact;
+use App\Models\Invoice;
+use App\Models\JournalEntry;
 use App\Models\User;
+use App\Services\LedgerService;
+use App\Services\Reports\ProfitAndLossReport;
 use App\Support\CompanyContext;
+use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Inertia\Testing\AssertableInertia;
 use Tests\TestCase;
@@ -101,6 +113,24 @@ class DashboardTest extends TestCase
                 ->where('customer_count', 0)
                 ->where('vendor_count', 0)
                 ->where('bank_account_count', 0)
+                // Task 7: every enrichment widget zeros out cleanly on an
+                // empty company — no error, no division-by-zero, no null.
+                ->where('invoices.outstanding_count', 0)
+                ->where('invoices.outstanding_total', 0)
+                ->where('invoices.overdue_count', 0)
+                ->where('invoices.overdue_total', 0)
+                ->where('bills.outstanding_count', 0)
+                ->where('bills.outstanding_total', 0)
+                ->where('bills.overdue_count', 0)
+                ->where('bills.overdue_total', 0)
+                ->where('pl_snapshot.income', 0)
+                ->where('pl_snapshot.expenses', 0)
+                ->where('pl_snapshot.net_profit', 0)
+                ->where('income_expense_chart.income', array_fill(0, 6, 0))
+                ->where('income_expense_chart.expenses', array_fill(0, 6, 0))
+                // No ActivityLog rows exist yet for a company created directly
+                // via the factory (bypassing onboarding's own audit log).
+                ->where('recent_activity', [])
             );
     }
 
@@ -114,10 +144,27 @@ class DashboardTest extends TestCase
         $this->actingAsRole($companyA, Role::Owner);
         $this->depositInto($bankA, 12345);
 
+        // Company A also has an outstanding invoice, an outstanding bill, and
+        // an audit-log row — none of which company B may ever see.
+        $today = CarbonImmutable::today();
+        Invoice::factory()->create([
+            'status' => InvoiceStatus::Sent->value,
+            'due_date' => $today->addDays(10)->toDateString(),
+            'balance' => 7500,
+        ]);
+        Bill::factory()->create([
+            'status' => BillStatus::Received->value,
+            'due_date' => $today->addDays(10)->toDateString(),
+            'balance' => 3300,
+        ]);
+        $this->post('/contacts', ['name' => 'Scoped Co', 'type' => ContactType::Customer->value])
+            ->assertRedirect();
+
         $companyB = Company::factory()->create(['base_currency' => 'PKR']);
         $this->actingAsRole($companyB, Role::Owner);
 
-        // Company B has none of company A's bank accounts or contacts.
+        // Company B has none of company A's bank accounts, contacts,
+        // invoices, bills, or activity-log rows.
         $this->get('/dashboard')
             ->assertOk()
             ->assertInertia(fn (AssertableInertia $page) => $page
@@ -125,7 +172,293 @@ class DashboardTest extends TestCase
                 ->where('customer_count', 0)
                 ->where('vendor_count', 0)
                 ->where('bank_account_count', 0)
+                ->where('invoices.outstanding_count', 0)
+                ->where('invoices.outstanding_total', 0)
+                ->where('bills.outstanding_count', 0)
+                ->where('bills.outstanding_total', 0)
+                ->where('recent_activity', [])
             );
+    }
+
+    // ---------------------------------------------------------------
+    // Task 7: outstanding/overdue invoices, unpaid bills.
+    // ---------------------------------------------------------------
+
+    public function test_dashboard_reports_outstanding_and_overdue_invoices(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        app(CompanyContext::class)->set($company);
+
+        $today = CarbonImmutable::today();
+
+        // Outstanding, not yet due -> counts toward outstanding only.
+        Invoice::factory()->create([
+            'status' => InvoiceStatus::Sent->value,
+            'due_date' => $today->addDays(10)->toDateString(),
+            'balance' => 10000,
+        ]);
+
+        // Outstanding AND overdue (past due, still unpaid).
+        Invoice::factory()->create([
+            'status' => InvoiceStatus::PartiallyPaid->value,
+            'due_date' => $today->subDays(5)->toDateString(),
+            'balance' => 4000,
+        ]);
+
+        // Outstanding with a null due_date -> NEVER overdue (spec §7.12).
+        Invoice::factory()->create([
+            'status' => InvoiceStatus::Sent->value,
+            'due_date' => null,
+            'balance' => 2500,
+        ]);
+
+        // Due exactly today -> not yet overdue (strictly less-than, not <=).
+        Invoice::factory()->create([
+            'status' => InvoiceStatus::Sent->value,
+            'due_date' => $today->toDateString(),
+            'balance' => 1000,
+        ]);
+
+        // Paid -> excluded (balance 0, not outstanding).
+        Invoice::factory()->create([
+            'status' => InvoiceStatus::Paid->value,
+            'due_date' => $today->subDays(30)->toDateString(),
+            'balance' => 0,
+        ]);
+
+        // Draft -> excluded (never sent).
+        Invoice::factory()->create([
+            'status' => InvoiceStatus::Draft->value,
+            'due_date' => $today->subDays(30)->toDateString(),
+            'balance' => 0,
+        ]);
+
+        // Void -> excluded.
+        Invoice::factory()->create([
+            'status' => InvoiceStatus::Void->value,
+            'due_date' => $today->subDays(30)->toDateString(),
+            'balance' => 0,
+        ]);
+
+        $this->get('/dashboard')
+            ->assertOk()
+            ->assertInertia(fn (AssertableInertia $page) => $page
+                ->where('invoices.outstanding_count', 4)
+                ->where('invoices.outstanding_total', 10000 + 4000 + 2500 + 1000)
+                ->where('invoices.overdue_count', 1)
+                ->where('invoices.overdue_total', 4000)
+            );
+    }
+
+    public function test_dashboard_reports_unpaid_bills_and_their_overdue_subset(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        app(CompanyContext::class)->set($company);
+
+        $today = CarbonImmutable::today();
+
+        // Outstanding, not yet due.
+        Bill::factory()->create([
+            'status' => BillStatus::Received->value,
+            'due_date' => $today->addDays(15)->toDateString(),
+            'balance' => 8000,
+        ]);
+
+        // Outstanding AND overdue.
+        Bill::factory()->create([
+            'status' => BillStatus::PartiallyPaid->value,
+            'due_date' => $today->subDays(3)->toDateString(),
+            'balance' => 2200,
+        ]);
+
+        // Null due_date -> never overdue.
+        Bill::factory()->create([
+            'status' => BillStatus::Received->value,
+            'due_date' => null,
+            'balance' => 1500,
+        ]);
+
+        // Paid -> excluded.
+        Bill::factory()->create([
+            'status' => BillStatus::Paid->value,
+            'due_date' => $today->subDays(10)->toDateString(),
+            'balance' => 0,
+        ]);
+
+        // Draft/void -> excluded.
+        Bill::factory()->create([
+            'status' => BillStatus::Draft->value,
+            'due_date' => $today->subDays(10)->toDateString(),
+            'balance' => 0,
+        ]);
+        Bill::factory()->create([
+            'status' => BillStatus::Void->value,
+            'due_date' => $today->subDays(10)->toDateString(),
+            'balance' => 0,
+        ]);
+
+        $this->get('/dashboard')
+            ->assertOk()
+            ->assertInertia(fn (AssertableInertia $page) => $page
+                ->where('bills.outstanding_count', 3)
+                ->where('bills.outstanding_total', 8000 + 2200 + 1500)
+                ->where('bills.overdue_count', 1)
+                ->where('bills.overdue_total', 2200)
+            );
+    }
+
+    // ---------------------------------------------------------------
+    // Task 7: P&L snapshot + income-vs-expense chart tie to
+    // ProfitAndLossReport (no new ledger math on the dashboard).
+    // ---------------------------------------------------------------
+
+    private function bankAccount(Company $company): Account
+    {
+        return Account::factory()->create([
+            'company_id' => $company->id,
+            'code' => '1010',
+            'type' => AccountType::Asset->value,
+            'subtype' => AccountSubtype::Bank->value,
+        ]);
+    }
+
+    private function incomeAccount(Company $company): Account
+    {
+        return Account::factory()->create([
+            'company_id' => $company->id,
+            'code' => '4000',
+            'type' => AccountType::Income->value,
+            'subtype' => AccountSubtype::OperatingIncome->value,
+        ]);
+    }
+
+    private function expenseAccount(Company $company): Account
+    {
+        return Account::factory()->create([
+            'company_id' => $company->id,
+            'code' => '5000',
+            'type' => AccountType::Expense->value,
+            'subtype' => AccountSubtype::OperatingExpense->value,
+        ]);
+    }
+
+    /** Posts a balanced two-line entry directly via LedgerService, mirroring ProfitAndLossReportTest's own helper — the dashboard's P&L widgets only READ ProfitAndLossReport, so their fixtures need real journal_lines underneath. */
+    private function postEntry(Account $debitAccount, Account $creditAccount, int $amount, string $date, int $sourceId, string $sourceType = 'manual_journal'): JournalEntry
+    {
+        return DB::transaction(fn () => app(LedgerService::class)->post(new EntryDraft(
+            entryDate: CarbonImmutable::parse($date),
+            memo: 'Dashboard test entry',
+            sourceType: $sourceType,
+            sourceId: $sourceId,
+            lines: [
+                new LineDraft(accountId: $debitAccount->id, debit: $amount, credit: 0),
+                new LineDraft(accountId: $creditAccount->id, debit: 0, credit: $amount),
+            ],
+        )));
+    }
+
+    public function test_dashboard_pl_snapshot_matches_profit_and_loss_report_for_the_fiscal_year_to_date(): void
+    {
+        $company = Company::factory()->create(); // fiscal_year_start_month defaults to 1 (calendar year)
+        $this->actingAsRole($company, Role::Owner);
+        app(CompanyContext::class)->set($company);
+
+        $bank = $this->bankAccount($company);
+        $income = $this->incomeAccount($company);
+        $expense = $this->expenseAccount($company);
+
+        $today = CarbonImmutable::today();
+        $fiscalYearStart = $today->startOfYear();
+
+        // Inside the fiscal year to date -> counted.
+        $this->postEntry($bank, $income, 50000, $fiscalYearStart->addDays(2)->toDateString(), 1, 'invoice');
+        $this->postEntry($expense, $bank, 20000, $today->toDateString(), 2, 'expense');
+        // Before the fiscal year -> must NOT count.
+        $this->postEntry($bank, $income, 999999, $fiscalYearStart->subDay()->toDateString(), 3, 'invoice');
+
+        $expected = app(ProfitAndLossReport::class)->build($fiscalYearStart, $today);
+
+        $this->get('/dashboard')
+            ->assertOk()
+            ->assertInertia(fn (AssertableInertia $page) => $page
+                ->where('pl_snapshot.from', $expected['from'])
+                ->where('pl_snapshot.to', $expected['to'])
+                ->where('pl_snapshot.income', $expected['income']['total'])
+                ->where('pl_snapshot.expenses', $expected['expenses']['total'])
+                ->where('pl_snapshot.net_profit', $expected['net_profit'])
+                ->where('pl_snapshot.net_profit', 50000 - 20000)
+            );
+    }
+
+    public function test_dashboard_income_expense_chart_matches_the_last_six_months_of_profit_and_loss(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        app(CompanyContext::class)->set($company);
+
+        $bank = $this->bankAccount($company);
+        $income = $this->incomeAccount($company);
+        $expense = $this->expenseAccount($company);
+
+        $today = CarbonImmutable::today();
+        $chartFrom = $today->subMonths(5)->startOfMonth();
+
+        $this->postEntry($bank, $income, 15000, $chartFrom->addDays(3)->toDateString(), 1, 'invoice');
+        $this->postEntry($expense, $bank, 6000, $today->toDateString(), 2, 'expense');
+
+        $expected = app(ProfitAndLossReport::class)->build($chartFrom, $today);
+
+        $this->get('/dashboard')
+            ->assertOk()
+            ->assertInertia(fn (AssertableInertia $page) => $page
+                ->where('income_expense_chart.labels', array_map(fn (array $m): string => $m['label'], $expected['months']))
+                ->where('income_expense_chart.income', $expected['income']['total_by_month'])
+                ->where('income_expense_chart.expenses', $expected['expenses']['total_by_month'])
+            );
+    }
+
+    // ---------------------------------------------------------------
+    // Task 7: recent activity, gated on audit.view.
+    // ---------------------------------------------------------------
+
+    public function test_dashboard_recent_activity_is_humanized_for_a_user_with_audit_view(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner); // Owner holds audit.view
+        app(CompanyContext::class)->set($company);
+
+        $this->post('/contacts', ['name' => 'Acme Corp', 'type' => ContactType::Customer->value])
+            ->assertRedirect();
+
+        $this->get('/dashboard')
+            ->assertOk()
+            ->assertInertia(fn (AssertableInertia $page) => $page
+                ->has('recent_activity', 1)
+                ->where('recent_activity.0.action', 'Contact created')
+                ->where('recent_activity.0.subject', 'Contact #'.Contact::query()->firstOrFail()->id)
+            );
+    }
+
+    public function test_dashboard_hides_recent_activity_for_a_user_without_audit_view(): void
+    {
+        $company = Company::factory()->create();
+
+        // An Owner performs (and thus logs) a real audited action first.
+        $this->actingAsRole($company, Role::Owner);
+        app(CompanyContext::class)->set($company);
+        $this->post('/contacts', ['name' => 'Acme Corp', 'type' => ContactType::Customer->value])
+            ->assertRedirect();
+        $this->assertGreaterThan(0, ActivityLog::query()->count());
+
+        // Staff (config/permissions.php) lacks audit.view — the widget must
+        // come back empty even though rows exist for the company.
+        $this->actingAsRole($company, Role::Staff);
+
+        $this->get('/dashboard')
+            ->assertOk()
+            ->assertInertia(fn (AssertableInertia $page) => $page->where('recent_activity', []));
     }
 
     // ---------------------------------------------------------------
