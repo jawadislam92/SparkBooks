@@ -17,6 +17,7 @@ use App\Http\Controllers\OpeningCsvController;
 use App\Http\Controllers\OtherReceiptController;
 use App\Http\Controllers\PeriodLockController;
 use App\Http\Controllers\ProfileController;
+use App\Http\Controllers\ReconciliationController;
 use App\Http\Controllers\Reports\ApAgingController;
 use App\Http\Controllers\Reports\ArAgingController;
 use App\Http\Controllers\Reports\BalanceSheetController;
@@ -299,6 +300,17 @@ Route::middleware(['auth', 'verified', 'company', 'can:settings.manage'])->group
     Route::post('/setup/opening-balances/import/{kind}', [OpeningCsvController::class, 'import'])
         ->where('kind', '[a-z_]+')
         ->name('setup.opening-balances.import');
+});
+
+// reconciliation.manage (spec §7.14) is held only by Owner/Accountant — even
+// GET/viewing is gated here, unlike periods.lock's broader "may view"
+// read-only split (see PeriodLockController::edit's own comment): there's no
+// separate "reconciliation.view" ability in the catalog.
+Route::middleware(['auth', 'verified', 'company', 'can:reconciliation.manage'])->group(function () {
+    Route::get('/reconciliations', [ReconciliationController::class, 'index'])->name('reconciliations.index');
+    Route::get('/reconciliations/{bankAccount}', [ReconciliationController::class, 'show'])->name('reconciliations.show');
+    Route::post('/reconciliations/{bankAccount}/complete', [ReconciliationController::class, 'complete'])->name('reconciliations.complete');
+    Route::post('/reconciliations/{reconciliation}/reopen', [ReconciliationController::class, 'reopen'])->name('reconciliations.reopen');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:tax_rates.manage'])->group(function () {

@@ -57,6 +57,8 @@ class HandleInertiaRequests extends Middleware
         'bank_accounts.manage',
         'transfers.create',
         'other_receipts.create',
+        // Phase 6 Task 1: Reconciliation nav link + Show's Reopen action.
+        'reconciliation.manage',
         'reports.view',
         'tax_rates.manage',
         'periods.lock',

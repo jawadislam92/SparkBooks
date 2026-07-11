@@ -93,6 +93,11 @@ function navGroups(can: Record<string, boolean>): NavGroup[] {
                     // should still read as "active" while on those screens.
                     activeMatch: [route('transfers.new'), route('other-receipts.new')],
                 },
+                {
+                    label: 'Reconciliation',
+                    href: route('reconciliations.index'),
+                    ability: 'reconciliation.manage',
+                },
             ],
         },
         {
