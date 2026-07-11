@@ -10,6 +10,7 @@ use App\Exceptions\Accounts\AccountHasActiveChildren;
 use App\Exceptions\Accounts\CrossTypeSubAccount;
 use App\Exceptions\Accounts\InvalidSubtreeMove;
 use App\Exceptions\Accounts\MaxDepthExceeded;
+use App\Exceptions\Accounts\SystemAccountNotNestable;
 use App\Exceptions\Ledger\NonPostableAccount;
 use App\Models\Account;
 use App\Models\ActivityLog;
@@ -82,6 +83,12 @@ class SubAccountsTest extends TestCase
                 new LineDraft(accountId: $creditAccount->id, debit: 0, credit: $amount),
             ],
         )));
+    }
+
+    /** Plants the real seeded chart of accounts (with genuine is_system flags) into $company. */
+    private function seedChart(Company $company): void
+    {
+        app(CompanyContext::class)->runFor($company, fn () => app(ChartOfAccountsSeeder::class)->seed($company));
     }
 
     // ---------------------------------------------------------------
@@ -474,5 +481,188 @@ class SubAccountsTest extends TestCase
 
         $this->expectException(LogicException::class);
         $a->update(['parent_id' => $b->id]);
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 7 Task 1 review fix: system accounts are referenced BY CODE in
+    // posting rules + reports, so sub-accounting any of them corrupts those
+    // lookups. They can never gain children nor be nested under anything.
+    // ---------------------------------------------------------------
+
+    /**
+     * Every seeded system account, by code — Retained Earnings (3200), the
+     * AR/AP control accounts (1100/2000), Tax Payable (2100), Opening Balance
+     * Equity (3100), FX Gain/Loss (4950/5950). Each is referenced by code in
+     * posting rules and/or reports, so none may ever be sub-accounted.
+     *
+     * @return list<string>
+     */
+    private const SYSTEM_CODES = ['3200', '1100', '2000', '2100', '3100', '4950', '5950'];
+
+    public function test_create_child_under_any_system_account_is_rejected(): void
+    {
+        $company = Company::factory()->create();
+        $this->seedChart($company);
+        app(CompanyContext::class)->set($company);
+
+        foreach (self::SYSTEM_CODES as $code) {
+            $system = Account::query()->where('code', $code)->sole();
+
+            try {
+                app(AccountService::class)->createChild($system, [
+                    'code' => "900{$code}", 'name' => 'Child', 'subtype' => $system->subtype,
+                ]);
+                $this->fail("Expected SystemAccountNotNestable for system account {$code}.");
+            } catch (SystemAccountNotNestable) {
+                // expected
+            }
+
+            // Untouched: still a top-level postable leaf, no child created.
+            $fresh = $system->fresh();
+            $this->assertTrue($fresh->is_postable, "{$code} should still be postable");
+            $this->assertSame(0, $fresh->children()->count(), "{$code} should have no children");
+        }
+    }
+
+    public function test_make_parent_on_any_system_account_is_rejected(): void
+    {
+        $company = Company::factory()->create();
+        $this->seedChart($company);
+        app(CompanyContext::class)->set($company);
+
+        foreach (self::SYSTEM_CODES as $code) {
+            $system = Account::query()->where('code', $code)->sole();
+
+            try {
+                app(AccountService::class)->makeParent($system);
+                $this->fail("Expected SystemAccountNotNestable for system account {$code}.");
+            } catch (SystemAccountNotNestable) {
+                // expected
+            }
+
+            // Untouched: still a top-level postable leaf, no "— Other" child.
+            $fresh = $system->fresh();
+            $this->assertTrue($fresh->is_postable, "{$code} should still be postable");
+            $this->assertNull($fresh->parent_id, "{$code} should still be top-level");
+            $this->assertSame(0, $fresh->children()->count(), "{$code} should have no children");
+        }
+    }
+
+    public function test_moving_a_non_system_account_under_a_system_account_is_rejected(): void
+    {
+        $company = Company::factory()->create();
+        $this->seedChart($company);
+        app(CompanyContext::class)->set($company);
+        $system = Account::query()->where('code', '3200')->sole();
+        $mine = $this->expenseAccount(['code' => '5111', 'name' => 'Mine']);
+
+        $this->expectException(SystemAccountNotNestable::class);
+        app(AccountService::class)->moveSubtree($mine->fresh(), $system);
+    }
+
+    public function test_moving_a_system_account_under_another_account_is_rejected(): void
+    {
+        $company = Company::factory()->create();
+        $this->seedChart($company);
+        app(CompanyContext::class)->set($company);
+        // 3200 (Retained Earnings, equity, system) under 3000 (Owner's Equity,
+        // equity, NON-system) — same root type, so ONLY the system-account
+        // rule can be what rejects it.
+        $system = Account::query()->where('code', '3200')->sole();
+        $ownersEquity = Account::query()->where('code', '3000')->sole();
+
+        $this->expectException(SystemAccountNotNestable::class);
+        app(AccountService::class)->moveSubtree($system, $ownersEquity);
+    }
+
+    public function test_raw_create_of_a_child_under_a_system_account_is_blocked_by_the_model_guard(): void
+    {
+        // The no-bypass backstop: even skipping AccountService entirely and
+        // creating the row directly must be refused by Account::creating().
+        $company = Company::factory()->create();
+        $this->seedChart($company);
+        app(CompanyContext::class)->set($company);
+        $system = Account::query()->where('code', '3200')->sole();
+
+        $this->expectException(SystemAccountNotNestable::class);
+        Account::query()->create([
+            'code' => '9002', 'name' => 'Sneaky child',
+            'type' => AccountType::Equity->value, 'subtype' => AccountSubtype::Equity->value,
+            'is_system' => false, 'parent_id' => $system->id, 'is_postable' => true,
+        ]);
+    }
+
+    public function test_raw_flip_of_a_system_account_to_non_postable_is_blocked_by_the_model_guard(): void
+    {
+        $company = Company::factory()->create();
+        $this->seedChart($company);
+        app(CompanyContext::class)->set($company);
+        $system = Account::query()->where('code', '3200')->sole();
+
+        $this->expectException(SystemAccountNotNestable::class);
+        $system->update(['is_postable' => false]);
+    }
+
+    /**
+     * THE regression the review demanded: the Balance Sheet cannot be driven
+     * out of balance via sub-accounts. Retained Earnings (3200) carries a
+     * real balance; attempting to sub-account it (the exact empirically-
+     * reproduced corruption path) is rejected, and the Balance Sheet stays
+     * is_balanced=true with 3200's balance intact.
+     */
+    public function test_balance_sheet_cannot_be_driven_out_of_balance_via_sub_accounts(): void
+    {
+        $company = Company::factory()->create(['books_start_date' => '2026-01-01']);
+        $this->seedChart($company);
+        app(CompanyContext::class)->set($company);
+
+        $bank = Account::query()->where('code', '1010')->sole();
+        $retainedEarnings = Account::query()->where('code', '3200')->sole();
+
+        // Give 3200 a genuine posted balance (Dr Bank / Cr Retained Earnings).
+        $this->postEntry($bank, $retainedEarnings, 50000, 1, '2026-02-01');
+
+        $before = app(BalanceSheetReport::class)->build(CarbonImmutable::parse('2026-07-31'));
+        $this->assertTrue($before['is_balanced']);
+        $this->assertSame(0, $before['difference']);
+        $this->assertSame(50000, $before['equity']['retained_earnings']);
+
+        // The corruption path: sub-accounting 3200 must be refused.
+        try {
+            app(AccountService::class)->createChild($retainedEarnings, [
+                'code' => '3201', 'name' => 'RE detail', 'subtype' => AccountSubtype::Equity,
+            ]);
+            $this->fail('Expected SystemAccountNotNestable — sub-accounting Retained Earnings must be blocked.');
+        } catch (SystemAccountNotNestable) {
+            // expected
+        }
+
+        // 3200 untouched, ledger untouched, Balance Sheet still balances with
+        // its retained earnings intact.
+        $this->assertTrue($retainedEarnings->fresh()->is_postable);
+        $after = app(BalanceSheetReport::class)->build(CarbonImmutable::parse('2026-07-31'));
+        $this->assertTrue($after['is_balanced']);
+        $this->assertSame(0, $after['difference']);
+        $this->assertSame(50000, $after['equity']['retained_earnings']);
+        $this->assertLedgerBalances();
+    }
+
+    public function test_non_system_accounts_can_still_be_sub_accounted_freely(): void
+    {
+        // The other side of the guard: ordinary (non-system) accounts are
+        // completely unaffected — this must keep working exactly as before.
+        $company = Company::factory()->create();
+        $this->seedChart($company);
+        app(CompanyContext::class)->set($company);
+        // 5400 Software & Subscriptions is NOT a system account.
+        $software = Account::query()->where('code', '5400')->sole();
+        $this->assertFalse($software->is_system);
+
+        $child = app(AccountService::class)->createChild($software, [
+            'code' => '5401', 'name' => 'Design Tools', 'subtype' => AccountSubtype::OperatingExpense,
+        ]);
+
+        $this->assertSame($software->id, $child->parent_id);
+        $this->assertFalse($software->fresh()->is_postable);
     }
 }

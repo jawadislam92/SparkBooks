@@ -6,6 +6,7 @@ use App\Enums\AccountSubtype;
 use App\Exceptions\Accounts\CrossTypeSubAccount;
 use App\Exceptions\Accounts\InvalidSubtreeMove;
 use App\Exceptions\Accounts\MaxDepthExceeded;
+use App\Exceptions\Accounts\SystemAccountNotNestable;
 use App\Models\Account;
 use App\Models\JournalLine;
 use App\Support\AuditLogger;
@@ -44,6 +45,14 @@ class AccountService
     public function createChild(Account $parent, array $attributes): Account
     {
         return DB::transaction(function () use ($parent, $attributes) {
+            // System accounts (Retained Earnings, AR/AP control, Tax Payable,
+            // OBE, FX Gain/Loss, ...) are referenced by CODE in posting rules
+            // and reports — they must never gain children (see
+            // SystemAccountNotNestable's docblock for the exact corruption).
+            if ($parent->is_system) {
+                throw new SystemAccountNotNestable("{$parent->code} ({$parent->name}) is a system account and can't have sub-accounts.");
+            }
+
             $subtype = $attributes['subtype'] instanceof AccountSubtype
                 ? $attributes['subtype']
                 : AccountSubtype::from($attributes['subtype']);
@@ -107,6 +116,16 @@ class AccountService
     public function makeParent(Account $leaf): Account
     {
         return DB::transaction(function () use ($leaf) {
+            // A system account can never become a parent (nor non-postable) —
+            // it stays a top-level postable leaf forever. This is the
+            // load-bearing guard that keeps the Balance Sheet from being
+            // driven out of balance via 3200 (Retained Earnings), and it
+            // covers createChild() too (which calls makeParent() to promote
+            // its parent before attaching the child).
+            if ($leaf->is_system) {
+                throw new SystemAccountNotNestable("{$leaf->code} ({$leaf->name}) is a system account and can't have sub-accounts.");
+            }
+
             if (! $leaf->isPostable()) {
                 return $leaf;
             }
@@ -168,6 +187,16 @@ class AccountService
     public function moveSubtree(Account $account, ?Account $newParent): Account
     {
         return DB::transaction(function () use ($account, $newParent) {
+            // A system account may neither be nested under anything (it stays
+            // top-level) nor serve as a parent for anyone — same reasoning as
+            // makeParent()/createChild() above.
+            if ($account->is_system && $newParent !== null) {
+                throw new SystemAccountNotNestable("{$account->code} ({$account->name}) is a system account and can't be nested under another account.");
+            }
+            if ($newParent !== null && $newParent->is_system) {
+                throw new SystemAccountNotNestable("{$newParent->code} ({$newParent->name}) is a system account and can't have sub-accounts.");
+            }
+
             if ($newParent !== null) {
                 if ($newParent->id === $account->id || str_starts_with($newParent->path, $account->path)) {
                     throw new InvalidSubtreeMove('An account cannot be moved into itself or one of its own descendants.');

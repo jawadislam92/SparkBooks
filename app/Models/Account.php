@@ -5,6 +5,7 @@ namespace App\Models;
 use App\Enums\AccountSubtype;
 use App\Enums\AccountType;
 use App\Exceptions\Accounts\AccountHasActiveChildren;
+use App\Exceptions\Accounts\SystemAccountNotNestable;
 use App\Models\Concerns\BelongsToCompany;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -103,6 +104,18 @@ class Account extends Model
                 throw new LogicException('System accounts cannot change is_system, code, type, or subtype.');
             }
 
+            // A system account may never be flipped non-postable — becoming a
+            // parent (header) account is the ONLY way is_postable goes false,
+            // and system accounts (referenced by code in posting rules and
+            // reports) must stay top-level postable leaves. This is the
+            // no-bypass backstop for AccountService::makeParent()'s own
+            // system-account guard (which fires first with a friendly
+            // message); it also catches a raw makeParent-less flip.
+            if ($account->getOriginal('is_system')
+                && $account->isDirty('is_postable') && ! $account->is_postable) {
+                throw new SystemAccountNotNestable("Account {$account->code} is a system account and cannot become a sub-account parent.");
+            }
+
             // Archiving is blocked while ANY non-archived child exists (leaf
             // or another parent) — an archived header account whose children
             // are still active would orphan them from the "active" view of
@@ -126,6 +139,18 @@ class Account extends Model
             // descendant's path/depth in the same transaction.
             if ($account->isDirty('parent_id')) {
                 throw new LogicException('Account parent cannot be changed directly — use AccountService::moveSubtree().');
+            }
+        });
+
+        // No child may ever be created UNDER a system account — the no-bypass
+        // backstop for AccountService::createChild()/makeParent()'s own
+        // system-parent guards (which fire first, with friendly messages).
+        // Guards against a raw Account::create(['parent_id' => <system id>])
+        // that skips the service entirely.
+        static::creating(function (Account $account) {
+            if ($account->parent_id !== null
+                && static::query()->whereKey($account->parent_id)->value('is_system')) {
+                throw new SystemAccountNotNestable('A system account cannot have sub-accounts.');
             }
         });
 

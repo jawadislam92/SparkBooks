@@ -85,10 +85,4 @@ class AccountRollup
 
         return $totals;
     }
-
-    /** True when a company has no sub-accounts at all — every report can skip subtotal rows entirely and stay byte-identical to its pre-Phase-7 output. */
-    public function hasNoHierarchy(Collection $accounts): bool
-    {
-        return $accounts->every(fn (Account $account) => $account->parent_id === null);
-    }
 }

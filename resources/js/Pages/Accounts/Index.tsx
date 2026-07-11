@@ -523,17 +523,25 @@ function AccountTypeSheet({
                                 </td>
                                 <td className="py-3 pl-3 align-top text-right">
                                     <div className="flex justify-end gap-1">
-                                        <Button
-                                            type="button"
-                                            variant="quiet"
-                                            size="sm"
-                                            onClick={(event) => {
-                                                event.stopPropagation();
-                                                onAddSubAccount(account);
-                                            }}
-                                        >
-                                            Add sub-account
-                                        </Button>
+                                        {/* System accounts (Retained Earnings,
+                                            AR/AP control, etc.) are referenced
+                                            by code in posting rules and reports
+                                            — they can never have sub-accounts,
+                                            so the action is hidden (the server
+                                            rejects it too, defence in depth). */}
+                                        {!account.is_system && (
+                                            <Button
+                                                type="button"
+                                                variant="quiet"
+                                                size="sm"
+                                                onClick={(event) => {
+                                                    event.stopPropagation();
+                                                    onAddSubAccount(account);
+                                                }}
+                                            >
+                                                Add sub-account
+                                            </Button>
+                                        )}
                                         <Button
                                             type="button"
                                             variant="quiet"
