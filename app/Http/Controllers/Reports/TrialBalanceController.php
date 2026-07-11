@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Reports;
 use App\Http\Controllers\Controller;
 use App\Services\Reports\TrialBalanceReport;
 use App\Support\AuditLogger;
+use App\Support\Money;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Gate;
@@ -26,8 +27,8 @@ class TrialBalanceController extends Controller
 
     /**
      * Streamed CSV: Code, Name, Debit, Credit — money rendered as exact
-     * decimal strings via integer math only (see minorToDecimalString),
-     * never number_format()/float division, so an odd-paisa amount like
+     * decimal strings via Money::minorToDecimalString (integer math only,
+     * never number_format()/float division), so an odd-paisa amount like
      * Rs 33.33 can never round-trip as "33.329999999999995".
      */
     public function exportCsv(Request $request, TrialBalanceReport $report, AuditLogger $audit): StreamedResponse
@@ -46,16 +47,16 @@ class TrialBalanceController extends Controller
                 fputcsv($handle, [
                     $row['code'],
                     $row['name'],
-                    $this->minorToDecimalString($row['debit']),
-                    $this->minorToDecimalString($row['credit']),
+                    Money::minorToDecimalString($row['debit']),
+                    Money::minorToDecimalString($row['credit']),
                 ]);
             }
 
             fputcsv($handle, [
                 '',
                 'Totals',
-                $this->minorToDecimalString($data['total_debit']),
-                $this->minorToDecimalString($data['total_credit']),
+                Money::minorToDecimalString($data['total_debit']),
+                Money::minorToDecimalString($data['total_credit']),
             ]);
 
             fclose($handle);
@@ -69,18 +70,5 @@ class TrialBalanceController extends Controller
         return isset($validated['as_of'])
             ? CarbonImmutable::parse($validated['as_of'])
             : CarbonImmutable::today();
-    }
-
-    /**
-     * Converts an integer minor-unit amount into an exact decimal string
-     * using only integer division/modulo — never float math. Trial Balance
-     * rows are never negative, but this is implemented sign-safe regardless.
-     */
-    private function minorToDecimalString(int $minor): string
-    {
-        $sign = $minor < 0 ? '-' : '';
-        $abs = abs($minor);
-
-        return $sign.intdiv($abs, 100).'.'.str_pad((string) ($abs % 100), 2, '0', STR_PAD_LEFT);
     }
 }

@@ -17,6 +17,12 @@ use App\Http\Controllers\OpeningCsvController;
 use App\Http\Controllers\OtherReceiptController;
 use App\Http\Controllers\PeriodLockController;
 use App\Http\Controllers\ProfileController;
+use App\Http\Controllers\Reports\ApAgingController;
+use App\Http\Controllers\Reports\ArAgingController;
+use App\Http\Controllers\Reports\BalanceSheetController;
+use App\Http\Controllers\Reports\GeneralLedgerController;
+use App\Http\Controllers\Reports\ProfitAndLossController;
+use App\Http\Controllers\Reports\TaxSummaryController;
 use App\Http\Controllers\Reports\TrialBalanceController;
 use App\Http\Controllers\TaxRateController;
 use App\Http\Controllers\TransferController;
@@ -70,6 +76,36 @@ Route::middleware(['auth', 'verified', 'company', 'can:reports.view'])->group(fu
     Route::get('/reports/trial-balance/export.csv', [TrialBalanceController::class, 'exportCsv'])
         ->middleware('can:exports.run')
         ->name('reports.trial-balance.export');
+
+    Route::get('/reports/profit-and-loss', [ProfitAndLossController::class, 'show'])->name('reports.profit-and-loss');
+    Route::get('/reports/profit-and-loss/export.csv', [ProfitAndLossController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('reports.profit-and-loss.export');
+
+    Route::get('/reports/balance-sheet', [BalanceSheetController::class, 'show'])->name('reports.balance-sheet');
+    Route::get('/reports/balance-sheet/export.csv', [BalanceSheetController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('reports.balance-sheet.export');
+
+    Route::get('/reports/ar-aging', [ArAgingController::class, 'show'])->name('reports.ar-aging');
+    Route::get('/reports/ar-aging/export.csv', [ArAgingController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('reports.ar-aging.export');
+
+    Route::get('/reports/ap-aging', [ApAgingController::class, 'show'])->name('reports.ap-aging');
+    Route::get('/reports/ap-aging/export.csv', [ApAgingController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('reports.ap-aging.export');
+
+    Route::get('/reports/general-ledger', [GeneralLedgerController::class, 'show'])->name('reports.general-ledger');
+    Route::get('/reports/general-ledger/export.csv', [GeneralLedgerController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('reports.general-ledger.export');
+
+    Route::get('/reports/tax-summary', [TaxSummaryController::class, 'show'])->name('reports.tax-summary');
+    Route::get('/reports/tax-summary/export.csv', [TaxSummaryController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('reports.tax-summary.export');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:audit.view'])->group(function () {

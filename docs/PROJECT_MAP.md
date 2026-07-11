@@ -8,12 +8,18 @@
 > service/controller/screen/table is added). It is committed to git. If it ever disagrees with
 > the code, the code wins — fix this file.
 >
-> Last updated: **end of Phase 4** (expenses & bills, money out: draft CRUD + amount-based line
-> calc (no qty×price), CategoryAccountGuard (enables tax remittance/owner-drawings/fixed-asset
-> purchases — P12/P13/P15), record expense (P4/P5), receive bill (P6/P6t), pay bill (P7), void
-> reversals (P9, payments-first, is_opening guard), opening vendor payables → is_opening bills,
-> attachment upload hardening (spec §17.8: content-sniff allowlist, private disk), full Purchases
-> UI, checker extension to AP — built on branch `phase-4-expenses-bills`, Task 11 exit).
+> Last updated: **end of Phase 5** (reports & dashboard: `LedgerBalances` (the one shared
+> per-account journal_lines aggregation every report reads through) + `ReportPeriod`
+> (fiscal-year math off `companies.fiscal_year_start_month`), Profit & Loss (income/expense +
+> monthly-comparison columns), Balance Sheet (assets/liab/equity, Retained-Earnings roll-up that
+> stays balanced across a fiscal-year boundary AND pre-books-start activity), one Aging engine for
+> both A/R and A/P (bucketed by the source document's own due date — the one deliberate
+> journal_lines-vs-document-total exception, §7.11), General Ledger (per-account
+> opening/lines/running-balance/closing — the drill-down target every other report links into),
+> Tax Summary (2100 split by each entry's source-type, never by debit/credit column, with a
+> structural residual "Adjustments" bucket), dashboard enrichment to spec §7.12 (outstanding/
+> overdue invoices via AgingReport, unpaid bills, a P&L snapshot, a 6-month income-vs-expense
+> Chart.js bar chart, a gated recent-activity feed) — built on branch `phase-5-reports`).
 > Companion docs: the binding spec is [`superpowers/specs/2026-07-08-accounting-software-v1-design.md`](superpowers/specs/2026-07-08-accounting-software-v1-design.md);
 > phase plans live in [`superpowers/plans/`](superpowers/plans/); per-task build/review evidence
 > is in `.superpowers/sdd/` (git-ignored scratch — read `progress.md` there when resuming).
@@ -60,10 +66,18 @@ invoicing is being built into v1 (spec §17.1 Path 2 "FX-lite"), not deferred. S
 | **Invoicing (money in)** — lifecycle (draft→sent→partially_paid→paid, void), gap-free numbering, draft CRUD + per-line tax, send (P1) posting AR/income/tax, payments (P2/P3, row-locked, real cross-process concurrency proven), void with payments-first refusal (P9), opening-invoice reconciliation (payable via the unmodified payment path), FX-lite send+payment (P1fx/P2fx), branded PDF, decoupled email + resend, full UI. Phase 4 retro-fix: void() now also refuses (friendly 422, not a confusing 404) on an is_opening invoice — correcting one must go through Opening Balances instead | ✅ built | 3→4 |
 | **Expenses & bills (money out) — posting lifecycle** — draft CRUD + amount-based line calc (`DocumentLineCalculator`, no qty×price, spec §7.8) + `CategoryAccountGuard` (dual-layer, mirrors `OtherReceiptService`'s guard shape: allows expense/asset/liability/equity categories — enables tax remittance via 2100 Tax Payable (P12), owner drawings via an equity account like 3900 (P13), fixed-asset purchases via an asset account like 1500 (P15); blocks control (AR/AP)/cash-bank/income/archived accounts); record expense (P4/P5 — Dr category per line, ONE combined Dr 2100 for input tax [a DEBIT, opposite invoicing's output-tax credit], Cr the paid-from bank/cash account); receive bill (P6/P6t — Cr 2000 AP with contact_id); pay bill (P7, row-locked overpayment guard, the exact AP mirror of invoice payments' proven concurrency-safe pattern); void (P9 reversals: void expense/bill-payment/bill, payments-first refusal, is_opening guard); opening vendor payables → is_opening Bills (payable via the completely unmodified P7 path) + `reconcile-opening-bills` backfill for pre-Task-7 opening payables | ✅ built | 4 |
 | **Expenses & bills — attachments, UI, checker** — receipt/bill-scan attachments (spec §17.8, hardened: content-sniffed allowlist [pdf/jpg/png/webp via `finfo`, never the client-declared mime/extension], private `local` disk, uuid filenames, scoped download, full audit trail on upload/delete/download, draft-delete cascade); full Purchases UI (Expenses/Bills Index with status filters + Bills' overdue highlight, Show detail pages for every status, Edit draft editors, Record/Receive/Pay/Void dialogs, shared `Components/documents/*`); integrity checker extended to expense/bill/bill_payment source coverage + contact-level AP reconciliation for opening bills (the AR-side fbbe763 lesson applied proactively) | ✅ built | 4 |
-| P&L, Balance Sheet, agings, GL, tax summary, dashboard | ⛔ not built | 5 |
+| **Profit & Loss + Balance Sheet** — both built on `LedgerBalances` (the one shared per-account journal_lines aggregation every Phase 5 report reads through, reproducing TrialBalanceReport's own inclusion rule exactly) and `ReportPeriod` (fiscal-year math off `companies.fiscal_year_start_month`). P&L: income/expense movement over a period + monthly-comparison columns, net = income − expenses. Balance Sheet: assets/liabilities/equity as-of a date; Retained Earnings = account 3200's posted balance + every COMPLETED fiscal year's net income, with its own Current-Year-Earnings line — the roll-up's lower bound is `min(books_start_date, earliest posted entry_date)` so it never drops pre-books-start activity and always balances (incl. across a fiscal-year boundary) | ✅ built | 5 |
+| **A/R & A/P Aging + General Ledger + Tax Summary** — ONE Aging engine (`AgingReport`, direction param) buckets each contact's outstanding balance (Current/1–30/31–60/61–90/90+) by ITS SOURCE DOCUMENT'S own due date — the one deliberate exception to "reports derive from journal_lines, never document totals" (§9), and only for the bucket date; amounts still tie to 1100/2000, incl. a date-gated opening-document contribution. General Ledger: per-account opening/lines/running-balance/closing — the drill-down target every other report links into; an optional contact filter narrows the listed lines but honestly hides the balance columns (they'd misrepresent a per-contact sub-ledger). Tax Summary: 2100 Tax Payable split collected (invoices) / input (expense·bill tax_total) / remittances (P12 category-2100 lines) / adjustments — classified by each entry's own `source_type`, NEVER by debit/credit column (a reversal swaps sides), adjustments computed as a structural RESIDUAL so the tie-out can't silently drift | ✅ built | 5 |
+| **Dashboard (spec §7.12)** — cash position + counts (Phase 2, unchanged) plus: outstanding/overdue invoices (money from `AgingReport`'s base-correct AR total, NOT `Invoice.balance`, which is doc-currency on an FX invoice), unpaid bills (`Bill.balance` summed directly — bills are base-currency-only), a current-fiscal-year-to-date P&L snapshot, a 6-month income-vs-expense Chart.js bar chart (the app's only Chart.js surface), and a recent-activity feed gated on `audit.view` (empty list, never 403, for anyone else) | ✅ built | 5 |
 | Reconciliation, month-end close, exports, backups | ⛔ not built | 6 |
 
-Tests: **894 PHP + 48 JS**, all green on real MySQL. No float on any money path (CI-enforced).
+Tests: **1057 PHP + 61 JS**, all green on real MySQL. No float on any money path (CI-enforced).
+Every Phase 5 report carries a §12.9 tie-out test: P&L (net = income − expenses), Balance Sheet
+(always balances, incl. across a fiscal-year boundary and pre-books-start activity), A/R & A/P
+aging (ties to 1100/2000, incl. opening documents), Tax Summary (classified by source-type, never
+debit/credit column), Trial Balance (debits == credits) — every report reads `journal_lines` via
+`LedgerBalances`, with `AgingReport`'s own source-document join being the one deliberate exception
+(see §5).
 
 ---
 
@@ -369,6 +383,36 @@ everything touches them) so they're drawn once.
                         POSTED_INVOICE_STATUSES/POSTED_BILL_STATUSES are now both derived from their
                         enum's own isPosted() rather than hand-duplicated (see §10 carried-cleanups note).
 
+  ── Phase 5 report services (read-only; NO ledger writes) ──
+
+    ProfitAndLossController ─▶ ProfitAndLossReport ────┐
+    BalanceSheetController ─▶ BalanceSheetReport ──────┤
+    ArAgingController/ApAgingController ─▶ AgingReport ┼──▶ LedgerBalances ──▶ JournalLine
+    GeneralLedgerController ─▶ GeneralLedgerReport ─────┤      (+ journalEntry for date; same
+    TaxSummaryController ─▶ TaxSummaryReport ───────────┘      inclusion rule as TrialBalanceReport)
+                        LedgerBalances is the ONE shared per-account aggregation every report above
+                        reads through (cumulativeAsOf = Trial-Balance-style as-of a date; movement =
+                        P&L-style over a period) — they can never separately diverge on "what counts".
+                        AgingReport and TaxSummaryReport ALSO write their own direct journal_lines
+                        queries (grouped by journal_entries.source_id, mirroring IntegrityChecker's
+                        actualLedgerBaseArByInvoice()/actualLedgerApByBill() shape) because
+                        LedgerBalances is account-level only: AgingReport needs a per-contact +
+                        per-source-document split (the due date each dollar buckets by);
+                        TaxSummaryReport needs a per-source-type split (collected/input/
+                        remittances). Both then join out to the source document (Invoice/Bill/
+                        OpeningDocument, or ExpenseLine/BillLine) for CLASSIFICATION/bucket-date
+                        only, never for the amount itself — the amount always ties back to
+                        LedgerBalances by construction (see each class's own docblock for the full
+                        tie-out proof).
+                        BalanceSheetReport ─▶ ReportPeriod ─▶ reads Company.fiscal_year_start_month
+                        (also used directly by ProfitAndLossController/GeneralLedgerController/
+                        DashboardController for their own default-range fallback).
+                        DashboardController ─▶ ProfitAndLossReport (fiscal-YTD snapshot + 6-month
+                        chart buckets) + AgingReport::buildReceivables (base-correct AR totals for
+                        the outstanding/overdue invoices widget — see DashboardController's own
+                        class docblock's CURRENCY DISCIPLINE note for why Invoice.balance can't be
+                        summed instead).
+
   SETUP / SUPPORT:
 
     OnboardingController ─▶ CompanySetupService ─▶ ChartOfAccountsSeeder ─▶ Account (seeds §5 chart,
@@ -543,17 +587,41 @@ Exceptions/
                               violations); caught as one type per family by ExpenseController/
                               BillController to surface a friendly 422.
 Http/Controllers/
-  DashboardController.php       /dashboard — cash position (sum of non-archived bank/cash accounts'
-                                linked ledger balances via AccountBalances) + customer/vendor/bank-
-                                account counts (tenant-scoped, read-only). Final Phase 2 nav shape
-                                (Overview/Sales/Books/Reports/Settings) wired in Task 10; real report
-                                widgets are still Phase 5.
+  DashboardController.php       /dashboard — cash position + customer/vendor/bank-account counts
+                                (Phase 2, unchanged) PLUS Phase 5 T7 (spec §7.12): outstanding &
+                                overdue invoices (money from AgingReport::buildReceivables, base-
+                                correct AR — NEVER summed from Invoice.balance, which is doc-
+                                currency on an FX invoice), unpaid bills (Bill.balance summed
+                                directly — bills are base-currency-only), a current-fiscal-year-
+                                to-date P&L snapshot + a 6-month income-vs-expense chart (both thin
+                                reads through ProfitAndLossReport), and a recent-activity feed
+                                gated on audit.view (empty list, never 403, for anyone else). Every
+                                widget reads an EXISTING report service or a document model — no
+                                new ledger aggregation of its own; performs NO ledger writes.
   OnboardingController.php     create company → CompanySetupService.
   CompanySwitchController.php  switch current company (audit-logged, tenant-checked → 404).
   AccountController.php         CoA index/show(drill-down)/store/update/archive/unarchive. Reads AccountBalances.
   ManualJournalController.php   journal list / new / store / reverse. → ManualJournalService.
   PeriodLockController.php      /settings/books view + set lock date.
-  Reports/TrialBalanceController.php  trial balance view + CSV export (integer→decimal string).
+  Reports/TrialBalanceController.php  trial balance view + CSV export (integer→decimal string);
+                                Phase 5 T1 extracted the money-formatting helper into
+                                Money::minorToDecimalString so every later report CSV reuses it.
+  Reports/ProfitAndLossController.php  Phase 5 T2: show + exportCsv (Section/Code/Name + one CSV
+                                column per month bucket + Total); defaults to the current fiscal
+                                year to date (ReportPeriod) when no from/to given.
+  Reports/BalanceSheetController.php  Phase 5 T3: show + exportCsv (as-of date picker); gated
+                                reports.view / exports.run like every other report here.
+  Reports/ArAgingController.php  Phase 5 T4: show + exportCsv — A/R side of the one AgingReport
+                                engine (direction='ar').
+  Reports/ApAgingController.php  Phase 5 T4: show + exportCsv — A/P side (direction='ap'), same
+                                shape as ArAgingController, control account 2000 instead of 1100.
+  Reports/GeneralLedgerController.php  Phase 5 T5: show + exportCsv; accepts the drill-down query
+                                params other reports link in with (?account=&from=&to=&contact=);
+                                the CSV mirrors the screen — drops the Balance/Opening/Closing
+                                columns under a contact filter (see GeneralLedgerReport's own
+                                docblock for why those figures aren't meaningful per-contact).
+  Reports/TaxSummaryController.php  Phase 5 T6: show + exportCsv (period picker; 2100 Tax Payable
+                                split collected/input/remittances/adjustments).
   HealthController.php          /settings/health — latest IntegrityRun + "Run now".
   ProfileController.php, Auth/* Breeze auth + profile (Phase 0, restyled Phase 1).
   ContactController.php         Phase 2 T1: contacts index (type filter) /store/update/archive/
@@ -708,6 +776,57 @@ Services/
   AccountBalances.php          signed per-account balances from journal_lines (read).
   IntegrityChecker.php         source-type-aware checks per company (read) — see §5 READ side note.
   Reports/TrialBalanceReport.php  trial balance from journal_lines (read).
+  Reports/LedgerBalances.php     Phase 5 T1: ⭐ the ONE shared per-account journal_lines
+                                aggregation every report below reads through — cumulativeAsOf()
+                                (Trial-Balance-style, as-of a date) / movement() (P&L-style, over a
+                                period), each optionally filtered by account id or AccountType.
+                                Reproduces TrialBalanceReport's own inclusion rule exactly (posted
+                                lines whose entry_date falls in the window — no separate "posted"
+                                flag exists; LedgerService's rows are always already-posted).
+  Reports/ReportPeriod.php       Phase 5 T1: readonly value object — fiscal-year math off
+                                companies.fiscal_year_start_month (currentFiscalYearStart(),
+                                completedFiscalYears(asOf, since)); never calls now()/today() itself,
+                                so it stays pure and trivially testable.
+  Reports/ProfitAndLossReport.php  Phase 5 T2: income/expense movement over a period + the same
+                                figures split into calendar-month columns (feeds both the report's
+                                own comparison columns and the dashboard's chart); net_profit =
+                                income − expenses, positive-is-normal sign convention throughout.
+  Reports/BalanceSheetReport.php  Phase 5 T3: assets/liabilities/equity as-of a date; Retained
+                                Earnings = account 3200's posted balance + every COMPLETED fiscal
+                                year's net income (ReportPeriod::completedFiscalYears), Current-Year
+                                Earnings its own separate equity line. Roll-up's lower bound is
+                                min(books_start_date, earliest posted entry_date) — a
+                                books_start_date-only bound would drop any activity dated before it
+                                and silently break the MUST-BALANCE identity; the min() fix landed
+                                as a same-phase (Task 3) review fix once real data exposed it.
+  Reports/AgingReport.php        Phase 5 T4: ONE engine for both A/R and A/P (direction param) —
+                                outstanding balance per contact bucketed by the SOURCE DOCUMENT's
+                                own due date (Current/1–30/31–60/61–90/90+), the one deliberate
+                                exception to §9's "never document totals" rule (for the bucket DATE
+                                only — amounts still tie to 1100/2000). Writes its own direct
+                                journal_lines queries grouped by source_id (LedgerBalances is
+                                account-level only, this needs a per-document split); an opening
+                                document's own-total contribution is date-gated on its opening run's
+                                primary entry date so a report dated before the run takes effect
+                                still ties to the control account.
+  Reports/GeneralLedgerReport.php  Phase 5 T5: per-account opening/lines/running-balance/closing
+                                over a period — the drill-down target every other Phase 5 report
+                                links into. Optional contact filter narrows the LISTED lines (e.g.
+                                from an aging row) but does not attempt a per-contact opening
+                                balance, so it deliberately hides the balance columns once active
+                                (they'd misrepresent a per-contact sub-ledger the class was never
+                                asked to build).
+  Reports/TaxSummaryReport.php   Phase 5 T6: 2100 Tax Payable movement over a period, split
+                                collected (source_type='invoice') / input (expense·bill tax_total) /
+                                remittances (expense·bill lines whose OWN category account is 2100 —
+                                a P12 tax remittance) / adjustments — classified by each journal
+                                entry's own source_type, NEVER by debit/credit column (a reversal
+                                swaps sides, so a naive debit=input rule would misclassify a voided
+                                invoice's reversal). Adjustments is a structural RESIDUAL
+                                (totalMovement − collected + input + remittances) so the tie-out to
+                                the ledger can't silently drift as new source types touch 2100 (a
+                                manual journal, or an other_receipt whose category is 2100 — spec-
+                                allowed, see §10 carry-forward).
   BankAccountService.php        Phase 2 T5: creates a BankAccount + its linked 10xx Account together;
                                 concurrency-safe code allocation (lockForUpdate + 3-retry).
   TransferService.php           Phase 2 T6: P11 posting + guards (from≠to, amount≥1, tenant+archived,
@@ -780,7 +899,11 @@ Support/
   Currencies.php               allowed ISO currency list (PKR, USD, …).
   Money.php                     Phase 2 T3: parseToMinor (string→minor units, no float, mirrors
                                 money.ts) + taxMinorUnits (bcmath half-up tax rounding; Phase 3 T2
-                                hardened to throw loud on negative/5-decimal input).
+                                hardened to throw loud on negative/5-decimal input). Phase 5 T1
+                                added minorToDecimalString (exact integer-math decimal string, no
+                                number_format()/float division) — extracted from
+                                TrialBalanceController::exportCsv so every later report CSV export
+                                reuses the same money-rendering helper.
   FxConverter.php                Phase 3 T7: single source of truth for resolving/validating a send-
                                 time fx_rate and converting a minor-unit amount to base (half-up,
                                 bcmath) — both InvoiceService::send() and InvoicePaymentService
@@ -827,8 +950,38 @@ lib/
   summarize.ts (+ summarize.test.ts)   Phase 4 T9: summarizeList — truncates a name list into a
                                 "A, B +N more" display string for Expenses/Bills Index's "categories"
                                 column.
+  incomeExpenseChartData.ts (+ .test.ts)   Phase 5 T7: buildIncomeExpenseChartData — pure
+                                transform from the dashboard's {labels, income, expenses} payload
+                                into Chart.js's dataset shape; the only non-component logic behind
+                                IncomeExpenseChart.tsx, tested independently of the canvas.
+  textColor.ts (+ .test.ts)      Phase 5 T2: hasTextColorClass — detects an existing Tailwind
+                                text-COLOR utility (vs. a text-size/alignment one) in a className
+                                string; the predicate MoneyText.tsx uses to let a caller's color
+                                override win deterministically (see Components/ui/ note below).
 Components/ui/                  Button, Sheet, Field, MoneyText, StatTile — design-system primitives.
                                 StatTile added Phase 2 T10 for the dashboard's 3 stat cards.
+                                MoneyText.tsx (Phase 5 T2 review fix): omits its own default
+                                text-ink class when the caller's className already carries a
+                                text-color utility (lib/textColor.ts::hasTextColorClass), so an
+                                override (e.g. a P&L loss shown in text-clay) wins deterministically
+                                regardless of Tailwind's own stylesheet ordering. MoneyText.test.ts
+                                (Phase 5 T2) is this component's first direct test.
+Components/dashboard/           Phase 5 T7 (spec §7.12): the Dashboard's own widget components.
+  DocumentSummaryCard.tsx         shared shape for "Outstanding & overdue invoices" / "Unpaid
+                                bills" — same card, different noun/figures; the overdue subset only
+                                gets its own (amber) callout when non-zero.
+  IncomeExpenseChart.tsx          the app's only Chart.js surface — a small 6-month income-vs-
+                                expense bar chart, styled from the app's own design tokens (Chart.js
+                                draws to a <canvas>, so token hex values are copied in literally, not
+                                resolved from Tailwind); animation skipped under
+                                prefers-reduced-motion, mirroring every other transition in the app.
+  PlSnapshotCard.tsx               current-fiscal-year-to-date income/expenses/net profit, tone
+                                (spark/clay) matching Reports/ProfitAndLoss.tsx's own Net Profit
+                                convention, links to the full report.
+  RecentActivityCard.tsx           humanized action + subject + relative time list; renders
+                                nothing at all when the caller passes an empty list
+                                (DashboardController gates the underlying data on audit.view
+                                server-side).
 Components/ledger/
   BalanceBeam.tsx              ⭐ signature element: tilts to the heavier side, settles level + glows when balanced.
   LineEditor.tsx               the debit/credit line grid for the JE editor.
@@ -872,15 +1025,40 @@ Layouts/
                                 nav items by the shared `can` map and drops empty groups. Phase 4 T9
                                 added a "Purchases" nav group (Expenses/Bills, gated
                                 expenses.draft/bills.draft) alongside the existing Sales group.
+                                Phase 5 filled out the "Reports" nav group (was Trial Balance only)
+                                with Profit & loss / Balance sheet / A/R aging / A/P aging / General
+                                ledger / Tax summary, all gated the pre-existing `reports.view`
+                                ability (no NAV_ABILITIES change needed — it already covered this).
   GuestLayout.tsx              centered card for auth pages. AuthenticatedLayout.tsx = Breeze leftover (unused).
 Pages/
   Dashboard.tsx                cash position + customer/vendor/bank-account StatTile cards (Phase 2
-                                T10, real DashboardController data); friendly empty-state hint when
-                                there's nothing yet. Real report widgets are still Phase 5.
+                                T10); friendly empty-state hint when there's nothing yet. Phase 5 T7
+                                (spec §7.12) added: outstanding/overdue invoices + unpaid bills
+                                (DocumentSummaryCard ×2), a P&L snapshot (PlSnapshotCard), the
+                                income-vs-expense chart (IncomeExpenseChart), and a gated recent-
+                                activity feed (RecentActivityCard, renders nothing for a viewer
+                                without audit.view).
   Onboarding/CreateCompany.tsx company setup form.
   Accounts/Index.tsx, Show.tsx chart of accounts + account ledger drill-down.
   Journal/New.tsx, Index.tsx   ⭐ manual JE editor (BalanceBeam home) + journal list.
   Reports/TrialBalance.tsx     trial balance report + CSV export button.
+  Reports/ProfitAndLoss.tsx     Phase 5 T2: income statement — period picker (defaults to current
+                                fiscal YTD), monthly comparison columns, CSV export, print.
+  Reports/BalanceSheet.tsx      Phase 5 T3: as-of date picker, assets/liabilities/equity, a visible
+                                balanced/unbalanced tie-out indicator (is_balanced/difference),
+                                Retained Earnings detail (posted balance + completed-FY rollup),
+                                CSV export, print.
+  Reports/ArAging.tsx            Phase 5 T4: as-of date picker, per-contact bucket table, a
+                                ties-to-control tie-out indicator, CSV export, print.
+  Reports/ApAging.tsx            Phase 5 T4: A/P mirror of ArAging.tsx — same shape, 2000 control
+                                account.
+  Reports/GeneralLedger.tsx      Phase 5 T5: account/date-range/contact filters (accepts the same
+                                drill-down query params other reports link in with), per-account
+                                opening/lines/running-balance/closing, hides the balance columns
+                                under an active contact filter (mirrors GeneralLedgerReport), CSV
+                                export, print.
+  Reports/TaxSummary.tsx         Phase 5 T6: period picker, collected/input/remittances/adjustments
+                                breakdown + net tax payable, CSV export, print.
   Settings/Books.tsx, Health.tsx  period lock + integrity health.
   Settings/TaxRates.tsx         Phase 2 T3: tax rates CRUD screen.
   Contacts/Index.tsx            Phase 2 T1: contacts list, type filter (All/Customers/Vendors),
@@ -985,8 +1163,18 @@ routes/web.php           all in-app routes, each gated (see the gate on each gro
                           invoices] / bills.void gate groups) the same way; attachment upload/download
                           share their document's own draft gate, delete reuses the void gate (spec
                           §17.8's Owner/Admin/Accountant decision — the tightest existing ability that
-                          already maps to that exact role set, not a new permission).
+                          already maps to that exact role set, not a new permission). Phase 5 added
+                          /reports/* for profit-and-loss, balance-sheet, ar-aging, ap-aging,
+                          general-ledger, tax-summary (trial-balance already existed) — the whole
+                          group sits behind one `can:reports.view` route-group middleware, with every
+                          `/export.csv` sibling additionally gated `can:exports.run` (stricter: view
+                          AND export).
 routes/auth.php          Breeze auth routes. routes/console.php  the ledger:verify schedule.
+package.json              Phase 5 T2: added chart.js ^4.5.1 (bundled npm dep) — the Dashboard's
+                          income-vs-expense chart is the app's only Chart.js surface.
+vitest.config.ts          Phase 5 T2: added the `@` → resources/js/* alias (mirrors tsconfig) so a
+                          component test (e.g. MoneyText.test.ts) can import via the same alias the
+                          component itself uses internally.
 ```
 
 ---
@@ -1104,18 +1292,20 @@ types (Task 11).
   sees a different overdue boundary than the server would compute. Not a Phase 4 regression — flag
   for a future server-date (or at least company-timezone-aware) fix across both invoice and bill
   overdue logic together, ideally consolidating all three copies into one.
-- The contact-level opening reconciliation pattern (fbbe763, originally an AR-only fix) is now
-  **proven on both AR and AP** — `IntegrityChecker::checkOpeningArReconciliation()` and this phase's
-  `checkOpeningApReconciliation()` are near-identical siblings. Phase 5's aging report will likely
-  want the same "sum over a contact's opening documents, not a per-document split of a shared
-  ledger line" reasoning — reuse the pattern rather than re-deriving it.
-- Phase 5 aging will need to tie AR/AP agings to their control accounts (1100/2000) via each source
-  document's own due date: `opening_documents.due_date` (captured at opening-balance setup, Phase 2
-  T8) for opening receivables/payables, `invoices.due_date` (nullable — captured/edited in the
-  invoice form and exposed in payloads since Phase 3, but NOT required) for AR, and `bills.due_date`
-  (REQUIRED at receive time, Phase 4 T4's `BillDueDateRequired` guard) for AP. The asymmetry —
-  Invoice's due_date is optional (an invoice can have none), Bill's is mandatory — means AR aging
-  must define a fallback bucket for invoices with a null due_date before it is built.
+- ~~The contact-level opening reconciliation pattern (fbbe763, originally an AR-only fix) is now
+  proven on both AR and AP ... Phase 5's aging report will likely want the same reasoning — reuse
+  the pattern rather than re-deriving it~~ — **cleared Phase 5 T4, adapted rather than reused
+  verbatim**: aging needs a per-DOCUMENT split (each doc keeps its own due date) the contact-only
+  `IntegrityChecker` pattern can't provide, so `AgingReport` instead treats an opening document's
+  own contribution as its own `total` column, date-gated on its opening run's primary entry date
+  (see `AgingReport`'s "THE OPENING-DOCUMENT EXCEPTION" docblock for the full reasoning) — same
+  spirit, adapted shape.
+- ~~Phase 5 aging will need to tie AR/AP agings to their control accounts (1100/2000) via each
+  source document's own due date ... AR aging must define a fallback bucket for invoices with a
+  null due_date before it is built~~ — **cleared Phase 5 T4**: built exactly as anticipated —
+  `AgingReport`'s Current bucket holds both not-yet-due AND null-due-date documents (a document
+  with no established due date has no deadline it could be judged "past" against), ties to
+  1100/2000 via a per-document journal_lines reconstruction.
 - `2000`/`2100` account lookups in ExpenseService/BillService/BillPaymentService are `firstOrFail`
   (a raw 500, not a friendly error, if either seed account were ever missing) — the exact same
   accepted risk as Phase 3's AR/Tax-Payable lookups (both accounts are seeded + non-deletable, so
@@ -1127,3 +1317,39 @@ types (Task 11).
 - `NAV_ABILITIES` needed extending again this phase (6 new entries: expenses.draft/record/void,
   bills.draft/receive/void) — still a hand-maintained subset of `config/permissions.php`, still
   manual every time a future task gates a new nav link or action-bar button.
+
+**New from Phase 5 (carry to Phase 6+):**
+- **LIVE BROWSER DRIVE is PENDING for Phase 5 too** — the same standing gap as the Phase 4 item
+  above, not closed this phase either: interactive browser tooling was broken again this session.
+  Phase 5 was verified via the full test suite (1057 PHP + 61 JS) + `ledger:verify` + curl-rendered
+  Inertia pages for every report and the dashboard — including a real-data Balance Sheet as-of
+  check that is what actually CAUGHT the pre-books-start Retained-Earnings bug (fixed same-phase,
+  Task 3 review fix; see `BalanceSheetReport::resolveSinceDate()`'s docblock) — but a genuine
+  human-style click-through (period pickers, CSV downloads, print, the dashboard's chart rendering)
+  was never done. Do this before the pre-handoff walkthrough, same as the still-open Phase 4 item.
+- `OtherReceiptService`'s category guard (Phase 2 T7) does not exclude the Tax subtype (2100) from
+  eligible "category" accounts for an other-receipt — a receipt shouldn't semantically be
+  categorizable as a tax payment. `TaxSummaryReport`'s residual "Adjustments" bucket is now
+  STRUCTURALLY robust to this (any such receipt just falls into adjustments and the tie-out still
+  holds), so it's no longer a correctness bug for Phase 5's own report — but the semantic guard gap
+  itself is still open and pre-existing from Phase 4. Fix candidate for whichever future phase
+  tightens `IneligibleCategoryAccount`.
+- `GeneralLedgerReport::sourceLabel()` renders "{Type} #{id}" (e.g. "Invoice #42") using the
+  document's OWN id, not its user-facing reference number (invoice number, a bill's own vendor
+  reference, etc.) — deliberate (a per-source_type join wasn't judged worth it for a label whose
+  job is just "what kind of thing posted this"), but worth revisiting if a future phase wants the
+  GL to read more like a bank/vendor statement.
+- All-accounts General Ledger (no `account` filter) and any big-period report load every matching
+  `journal_lines` row into memory in one query — the same pre-existing volume caveat as
+  `AccountController::show`'s own drill-down (§10, carried since Phase 1); fine at current volume,
+  revisit together before a bulk-history company hits either path.
+- No dark mode anywhere in the app, Phase 5 included — `IncomeExpenseChart.tsx`'s Chart.js colors
+  are hardcoded light-mode token hex values (a `<canvas>` can't resolve Tailwind classes/CSS custom
+  properties), so a future dark-mode pass would need to re-render the chart, not just re-theme CSS.
+- Phase 6 (reconciliation, month-end close, exports, backups) has three natural hooks already built
+  this phase: `ReportPeriod`'s fiscal-year math is the obvious place a "lock the fiscal year" /
+  period-close feature would anchor; `BalanceSheetReport`'s Retained-Earnings roll-up is exactly the
+  computation a formal year-end close would need to make durable (today it's recomputed live, on
+  every request); and every Phase 5 report's CSV export already goes through the same
+  `Money::minorToDecimalString` helper, so a Phase 6 "bulk export" feature has one money-rendering
+  convention to reuse rather than five to reconcile.

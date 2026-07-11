@@ -177,6 +177,24 @@ class Money
     }
 
     /**
+     * Converts an integer minor-unit amount into an exact decimal string
+     * using only integer division/modulo — never float math, never
+     * number_format() — so an odd-paisa amount like Rs 33.33 can never
+     * round-trip as "33.329999999999995". Every report's CSV export renders
+     * money through this (first extracted from
+     * TrialBalanceController::exportCsv in the Phase 5 reporting-foundation
+     * task, so future reports don't each reinvent it). Sign-safe, though
+     * report amounts are typically never negative.
+     */
+    public static function minorToDecimalString(int $minor): string
+    {
+        $sign = $minor < 0 ? '-' : '';
+        $abs = abs($minor);
+
+        return $sign.intdiv($abs, 100).'.'.str_pad((string) ($abs % 100), 2, '0', STR_PAD_LEFT);
+    }
+
+    /**
      * Scales a percent-rate decimal string (up to RATE_DECIMALS places) to
      * an exact integer bc-string representing rate * 10^RATE_DECIMALS.
      */
