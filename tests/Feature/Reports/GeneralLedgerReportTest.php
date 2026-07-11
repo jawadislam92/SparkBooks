@@ -491,6 +491,69 @@ class GeneralLedgerReportTest extends TestCase
     }
 
     // ---------------------------------------------------------------
+    // Phase 7 Task 3: visible entry numbers surfaced in the GL payload
+    // ---------------------------------------------------------------
+
+    public function test_line_carries_a_stable_entry_number_and_display(): void
+    {
+        $company = Company::factory()->create();
+        app(CompanyContext::class)->set($company);
+        $bank = $this->bankAccount($company);
+        $income = $this->incomeAccount($company);
+
+        $entry = $this->postEntry($bank, $income, 10000, '2026-07-01', 1);
+
+        $build = fn () => app(GeneralLedgerReport::class)->build(
+            CarbonImmutable::parse('2026-07-01'),
+            CarbonImmutable::parse('2026-07-31'),
+            $bank->id,
+        );
+
+        $firstRead = $build()['accounts'][0]['lines'][0];
+        $secondRead = $build()['accounts'][0]['lines'][0];
+
+        $this->assertSame($entry->entry_number, $firstRead['entry_number']);
+        $this->assertSame('JE-000001', $firstRead['entry_number_display']);
+        // Stable across rebuilds -- not derived from anything that changes
+        // between two reads of the same already-posted entry.
+        $this->assertSame($firstRead['entry_number'], $secondRead['entry_number']);
+        $this->assertSame($firstRead['entry_number_display'], $secondRead['entry_number_display']);
+        $this->assertNull($firstRead['reverses_entry_number']); // a primary entry reverses nothing
+    }
+
+    public function test_reversal_line_surfaces_the_original_entrys_number(): void
+    {
+        $company = Company::factory()->create();
+        app(CompanyContext::class)->set($company);
+        $bank = $this->bankAccount($company);
+        $income = $this->incomeAccount($company);
+
+        $entry = $this->postEntry($bank, $income, 10000, '2026-07-05', 1, 'invoice', 'Invoice INV-0001');
+        DB::transaction(fn () => app(LedgerService::class)->reverse($entry, CarbonImmutable::parse('2026-07-15'), 'Void invoice'));
+
+        $report = app(GeneralLedgerReport::class)->build(
+            CarbonImmutable::parse('2026-07-01'),
+            CarbonImmutable::parse('2026-07-31'),
+            $bank->id,
+        );
+
+        $lines = $report['accounts'][0]['lines'];
+        [$originalLine, $reversalLine] = $lines;
+
+        $this->assertSame('primary', $originalLine['entry_role']);
+        $this->assertSame(1, $originalLine['entry_number']);
+        $this->assertNull($originalLine['reverses_entry_number']);
+
+        $this->assertSame('reversal', $reversalLine['entry_role']);
+        $this->assertSame(2, $reversalLine['entry_number']);
+        $this->assertNotSame($originalLine['entry_number'], $reversalLine['entry_number']);
+        // The reversal has its OWN number (above) but also surfaces the
+        // ORIGINAL's number it reverses.
+        $this->assertSame(1, $reversalLine['reverses_entry_number']);
+        $this->assertSame('JE-000001', $reversalLine['reverses_entry_number_display']);
+    }
+
+    // ---------------------------------------------------------------
     // Phase 7 Task 1: sub-account rollup
     // ---------------------------------------------------------------
 

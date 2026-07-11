@@ -90,7 +90,7 @@ class GeneralLedgerController extends Controller
                         $account['code'],
                         $account['name'],
                         $line['entry_date'],
-                        "Entry #{$line['entry_id']}",
+                        $line['entry_number_display'] ?? "Entry #{$line['entry_id']}",
                         $line['source_label'],
                         $line['contact_name'] ?? '',
                         Money::minorToDecimalString($line['debit']),

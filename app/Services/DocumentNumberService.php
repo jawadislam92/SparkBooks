@@ -36,6 +36,29 @@ class DocumentNumberService
             throw new LogicException('DocumentNumberService::next must run inside the caller\'s transaction.');
         }
 
+        return sprintf('%s-%04d', $prefix, $this->allocate($series));
+    }
+
+    /**
+     * Phase 7 Task 3 (visible entry numbers): the same gap-free, per-company
+     * counter machinery as next(), but returns the raw integer instead of a
+     * formatted "PREFIX-0001" string — used by LedgerService::post to fill
+     * journal_entries.entry_number (a stored integer column, not a string),
+     * with the display form derived separately by
+     * JournalEntry::displayNumber(). Same transaction requirement, same
+     * FOR-UPDATE row-lock concurrency guarantee as next() — see its docblock.
+     */
+    public function nextNumber(string $series): int
+    {
+        if (DB::transactionLevel() === 0) {
+            throw new LogicException('DocumentNumberService::nextNumber must run inside the caller\'s transaction.');
+        }
+
+        return $this->allocate($series);
+    }
+
+    private function allocate(string $series): int
+    {
         $companyId = $this->context->id();
 
         DB::table('document_counters')->insertOrIgnore([
@@ -61,6 +84,6 @@ class DocumentNumberService
                 'updated_at' => now(),
             ]);
 
-        return sprintf('%s-%04d', $prefix, $number);
+        return $number;
     }
 }

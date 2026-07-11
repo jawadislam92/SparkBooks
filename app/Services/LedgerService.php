@@ -21,7 +21,7 @@ use LogicException;
 
 class LedgerService
 {
-    public function __construct(private CompanyContext $context) {}
+    public function __construct(private CompanyContext $context, private DocumentNumberService $numbers) {}
 
     /**
      * THE one gate into the ledger. Callers must already hold a DB transaction
@@ -34,6 +34,16 @@ class LedgerService
         }
         $this->validate($draft);
 
+        // Phase 7 Task 3 (visible entry numbers): allocated inside THIS
+        // transaction, via the same FOR-UPDATE row-lock counter machinery
+        // DocumentNumberService already uses for INV/BILL numbers (series
+        // 'JE') — gap-free and duplicate-free under concurrent posts. A
+        // reversal gets its OWN number here exactly like a primary entry;
+        // the link back to the original entry it reverses is
+        // reverses_entry_id (already set below), surfaced via
+        // JournalEntry::reversesEntry()->displayNumber().
+        $entryNumber = $this->numbers->nextNumber('JE');
+
         $entry = JournalEntry::query()->create([
             'entry_date' => $draft->entryDate->toDateString(),
             'memo' => $draft->memo,
@@ -42,6 +52,7 @@ class LedgerService
             'entry_role' => $draft->role->value,
             'reverses_entry_id' => $draft->reversesEntryId,
             'created_by' => auth()->id(),
+            'entry_number' => $entryNumber,
         ]);
         foreach ($draft->lines as $line) {
             // company_id is set by the BelongsToCompany creating hook from context

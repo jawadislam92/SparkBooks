@@ -8,6 +8,10 @@ import { useState } from 'react';
 interface GeneralLedgerLine {
     id: number;
     entry_id: number;
+    entry_number: number | null;
+    entry_number_display: string | null;
+    reverses_entry_number: number | null;
+    reverses_entry_number_display: string | null;
     entry_date: string;
     entry_role: 'primary' | 'reversal';
     source_type: string;
@@ -117,11 +121,16 @@ function AccountSection({
                             <tr key={line.id} className="border-b border-rule text-ink last:border-b-0">
                                 <td className="py-2 pr-3 align-top">{formatDisplayDate(line.entry_date)}</td>
                                 <td className="py-2 pr-3 align-top text-ink-700">
-                                    Entry #{line.entry_id}
+                                    {line.entry_number_display ?? `Entry #${line.entry_id}`}
                                     {line.entry_role === 'reversal' && (
                                         <span className="ml-1.5 rounded-full bg-paper px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-clay">
                                             Reversal
                                         </span>
+                                    )}
+                                    {line.entry_role === 'reversal' && line.reverses_entry_number_display && (
+                                        <div className="text-xs text-ink-700">
+                                            Reverses {line.reverses_entry_number_display}
+                                        </div>
                                     )}
                                     {line.memo && <div className="text-xs text-ink-700">{line.memo}</div>}
                                 </td>

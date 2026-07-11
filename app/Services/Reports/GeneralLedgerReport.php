@@ -74,6 +74,10 @@ class GeneralLedgerReport
      *         lines: list<array{
      *             id: int,
      *             entry_id: int,
+     *             entry_number: ?int,
+     *             entry_number_display: ?string,
+     *             reverses_entry_number: ?int,
+     *             reverses_entry_number_display: ?string,
      *             entry_date: string,
      *             entry_role: string,
      *             source_type: string,
@@ -168,6 +172,17 @@ class GeneralLedgerReport
                     $lineRows[] = [
                         'id' => $line->id,
                         'entry_id' => $entry->id,
+                        // Phase 7 Task 3: the human-readable, gap-free,
+                        // per-company number — distinct from entry_id (the
+                        // DB row id) above. reverses_entry_number is only
+                        // ever non-null on a reversal line (entry_role ===
+                        // 'reversal'), surfacing the ORIGINAL entry's own
+                        // number alongside the reversal's — the reversal
+                        // gets its own number, this just points back.
+                        'entry_number' => $entry->entry_number,
+                        'entry_number_display' => $entry->displayNumber(),
+                        'reverses_entry_number' => $entry->reversesEntry?->entry_number,
+                        'reverses_entry_number_display' => $entry->reversesEntry?->displayNumber(),
                         'entry_date' => $entry->entry_date->toDateString(),
                         'entry_role' => $entry->entry_role->value,
                         'source_type' => $entry->source_type,
@@ -233,7 +248,10 @@ class GeneralLedgerReport
     private function fetchLines(CarbonImmutable $from, CarbonImmutable $to, ?int $accountId, ?int $contactId): Collection
     {
         $query = JournalLine::query()
-            ->with('journalEntry')
+            // journalEntry.reversesEntry is eager-loaded so a reversal
+            // line's reverses_entry_number(_display) below costs no extra
+            // per-line query.
+            ->with('journalEntry.reversesEntry')
             ->whereHas('journalEntry', fn ($e) => $e->whereBetween('entry_date', [$from->toDateString(), $to->toDateString()]));
 
         if ($accountId !== null) {
