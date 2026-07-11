@@ -6,6 +6,7 @@ use App\Exceptions\Reconciliation\ReconciliationAlreadyReopened;
 use App\Exceptions\Reconciliation\ReconciliationLineIneligible;
 use App\Exceptions\Reconciliation\ReconciliationNotNewest;
 use App\Exceptions\Reconciliation\ReconciliationOutOfBalance;
+use App\Exceptions\Reconciliation\ReconciliationOutOfOrder;
 use App\Models\BankAccount;
 use App\Models\JournalLine;
 use App\Models\Reconciliation;
@@ -102,9 +103,29 @@ class ReconciliationService
             return DB::transaction(function () use ($account, $statementDate, $statementEndingBalanceMinor, $tickedJournalLineIds) {
                 $lockedAccount = BankAccount::query()->where('id', $account->id)->lockForUpdate()->firstOrFail();
 
+                // Chronological-chain guard (spec §7.9): the new statement
+                // must be dated strictly AFTER the account's latest completed
+                // reconciliation, because opening_reconciled_balance is
+                // carried from that reconciliation's own ending balance.
+                // Completing an earlier (or same-dated) statement after a
+                // later one would silently take the later statement's ending
+                // as this one's opening — a corrupt chain the diff==0 gate
+                // alone can't reliably catch (a coincidental zero-out would
+                // store the bogus opening). Mirrors reopen()'s newest-first
+                // guard from the completion side. Checked BEFORE line
+                // validation so an out-of-order date fails with the clearest
+                // message rather than an incidental "off by N" balance error.
+                $latestCompleted = $this->latestCompleted($lockedAccount);
+                if ($latestCompleted !== null && $latestCompleted->statement_date->gte($statementDate)) {
+                    throw new ReconciliationOutOfOrder(
+                        "This account's last completed reconciliation is dated {$latestCompleted->statement_date->toDateString()}. ".
+                        'Reconciliations must be completed in chronological order — pick a statement date after that.'
+                    );
+                }
+
                 $tickedLines = $this->validateTickedLines($lockedAccount, $statementDate, $tickedJournalLineIds);
 
-                $openingBalance = $this->openingReconciledBalance($lockedAccount);
+                $openingBalance = $latestCompleted?->statement_ending_balance ?? 0;
                 $tickedTotal = $tickedLines->sum(fn (JournalLine $line) => $line->debit - $line->credit);
                 $difference = $statementEndingBalanceMinor - ($openingBalance + $tickedTotal);
 

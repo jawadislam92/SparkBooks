@@ -206,6 +206,35 @@ class ReconciliationTest extends TestCase
         $this->assertLedgerBalances();
     }
 
+    public function test_a_negative_statement_balance_reconciles_at_difference_zero(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $account = $this->bankAccount($company);
+        $other = $this->bankAccount($company);
+
+        // A withdrawal OUT of $account (Dr $other / Cr $account) is a
+        // negative/credit line on $account's ledger account — signed
+        // debit − credit = −30,000. statement_ending_balance and
+        // reconciliation_lines.amount are signed BIGINT, so an overdrawn
+        // statement must reconcile with pure integer math (no abs/unsigned
+        // assumption): difference = −30,000 − (0 + −30,000) = 0.
+        $withdrawalLineId = $this->withdrawalLine($account, $other, '2026-07-01', 30000);
+
+        $response = $this->complete($account, '2026-07-01', -30000, [$withdrawalLineId]);
+        $response->assertRedirect(route('reconciliations.show', $account->id));
+
+        $reconciliation = Reconciliation::query()->sole();
+        $this->assertSame(-30000, $reconciliation->statement_ending_balance);
+        $this->assertSame('completed', $reconciliation->status);
+
+        $reconciliationLine = ReconciliationLine::query()->sole();
+        $this->assertSame($withdrawalLineId, $reconciliationLine->journal_line_id);
+        $this->assertSame(-30000, $reconciliationLine->amount);
+
+        $this->assertLedgerBalances();
+    }
+
     // -----------------------------------------------------------------
     // Ticked-line eligibility
     // -----------------------------------------------------------------
@@ -320,6 +349,43 @@ class ReconciliationTest extends TestCase
 
         $this->assertSame(50000, $rec2->opening_reconciled_balance);
         $this->assertSame(70000, $rec2->statement_ending_balance);
+        $this->assertLedgerBalances();
+    }
+
+    // -----------------------------------------------------------------
+    // Chronological chain: complete() must be strictly newest-date-first
+    // -----------------------------------------------------------------
+
+    public function test_completing_an_earlier_or_same_dated_statement_after_a_later_one_is_rejected(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $account = $this->bankAccount($company);
+        $other = $this->bankAccount($company);
+
+        // Complete the LATER statement (July 15) first.
+        $lateLine = $this->depositLine($account, $other, '2026-07-15', 70000);
+        $this->complete($account, '2026-07-15', 70000, [$lateLine])->assertRedirect();
+        $this->assertSame(1, Reconciliation::query()->count());
+
+        // Now attempt an EARLIER statement (July 1). Even though this line's
+        // own math could be coaxed to zero, completing it would silently
+        // inherit July 15's ending (70,000) as its opening — corrupt chain.
+        $earlyLine = $this->depositLine($account, $other, '2026-07-01', 50000);
+        $earlier = $this->complete($account, '2026-07-01', 50000, [$earlyLine]);
+
+        $earlier->assertSessionHasErrors('status');
+        $this->assertStringContainsString('chronological order', session('errors')->first('status'));
+        $this->assertStringContainsString('2026-07-15', session('errors')->first('status'));
+
+        // A SAME-dated statement (July 15 again) is rejected the same way —
+        // "strictly after", not ">=".
+        $sameDate = $this->complete($account, '2026-07-15', 70000, []);
+        $sameDate->assertSessionHasErrors('status');
+        $this->assertStringContainsString('chronological order', session('errors')->first('status'));
+
+        // Nothing beyond the first (July 15) reconciliation was stored.
+        $this->assertSame(1, Reconciliation::query()->count());
         $this->assertLedgerBalances();
     }
 
