@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\AccountController;
+use App\Http\Controllers\AuditLogController;
 use App\Http\Controllers\BankAccountController;
 use App\Http\Controllers\BillController;
 use App\Http\Controllers\CompanySwitchController;
@@ -112,6 +113,10 @@ Route::middleware(['auth', 'verified', 'company', 'can:reports.view'])->group(fu
 Route::middleware(['auth', 'verified', 'company', 'can:audit.view'])->group(function () {
     Route::get('/settings/health', [HealthController::class, 'show'])->name('settings.health');
     Route::post('/settings/health/run', [HealthController::class, 'run'])->name('settings.health.run');
+
+    // Phase 6 Task 2 (§7.13): READ-ONLY audit-log viewer, no new mutating
+    // routes — same audit.view gate as Health above.
+    Route::get('/settings/audit-log', [AuditLogController::class, 'index'])->name('settings.audit-log');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:accounts.manage'])->group(function () {

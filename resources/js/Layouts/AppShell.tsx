@@ -123,6 +123,7 @@ function navGroups(can: Record<string, boolean>): NavGroup[] {
                 },
                 { label: 'Opening balances', href: route('setup.opening-balances'), ability: 'settings.manage' },
                 { label: 'Health', href: route('settings.health'), ability: 'audit.view' },
+                { label: 'Audit log', href: route('settings.audit-log'), ability: 'audit.view' },
             ],
         },
     ];

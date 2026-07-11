@@ -14,11 +14,11 @@ use App\Services\AccountBalances;
 use App\Services\Reports\AgingReport;
 use App\Services\Reports\ProfitAndLossReport;
 use App\Services\Reports\ReportPeriod;
+use App\Support\AuditHumanizer;
 use App\Support\CompanyContext;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Gate;
-use Illuminate\Support\Str;
 use Inertia\Inertia;
 use Inertia\Response;
 
@@ -265,11 +265,13 @@ class DashboardController extends Controller
      * Last RECENT_ACTIVITY_LIMIT activity_log rows the viewer may see
      * (audit.view — Owner/Accountant only per config/permissions.php;
      * Admin/Staff get an empty list, never a 403, so the widget just hides
-     * itself). Humanized: an action label ("Invoice sent", never the raw
-     * 'invoice.sent' code), an optional subject reference ("Invoice #12"),
-     * and a relative time — NO before/after JSON reaches the client.
-     * ActivityLog's own BelongsToCompany scope keeps this tenant-safe with
-     * no explicit company_id filter needed, same as every other query here.
+     * itself). Humanized via the shared AuditHumanizer (Phase 6 Task 2
+     * extracted it here so the full Audit log viewer reuses the exact same
+     * logic): an action label ("Invoice sent", never the raw 'invoice.sent'
+     * code), an optional subject reference ("Invoice #12"), and a relative
+     * time — NO before/after JSON reaches the client. ActivityLog's own
+     * BelongsToCompany scope keeps this tenant-safe with no explicit
+     * company_id filter needed, same as every other query here.
      *
      * @return list<array{id:int, action:string, subject:?string, when:string, created_at:string}>
      */
@@ -286,33 +288,11 @@ class DashboardController extends Controller
             ->get()
             ->map(fn (ActivityLog $log): array => [
                 'id' => $log->id,
-                'action' => $this->humanizeAction($log->action),
-                'subject' => $this->humanizeSubject($log->subject_type, $log->subject_id),
+                'action' => AuditHumanizer::action($log->action),
+                'subject' => AuditHumanizer::subject($log->subject_type, $log->subject_id),
                 'when' => $log->created_at->diffForHumans(),
                 'created_at' => $log->created_at->toIso8601String(),
             ])
             ->all();
-    }
-
-    /** 'invoice.draft_created' -> "Invoice draft created"; 'fx_accounts.backfilled' -> "Fx accounts backfilled". */
-    private function humanizeAction(string $action): string
-    {
-        [$subject, $verb] = array_pad(explode('.', $action, 2), 2, '');
-
-        $words = trim(str_replace('_', ' ', $subject).' '.str_replace('_', ' ', $verb));
-
-        return Str::ucfirst($words);
-    }
-
-    /** subject_type is the morph class (no morph map configured — see AppServiceProvider), e.g. "App\Models\BillPayment" -> "Bill Payment #7". Null when the action has no subject (e.g. fx_accounts.backfilled). */
-    private function humanizeSubject(?string $subjectType, ?int $subjectId): ?string
-    {
-        if ($subjectType === null) {
-            return null;
-        }
-
-        $label = Str::headline(class_basename($subjectType));
-
-        return $subjectId !== null ? "{$label} #{$subjectId}" : $label;
     }
 }
