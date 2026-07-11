@@ -93,6 +93,16 @@ function navGroups(can: Record<string, boolean>): NavGroup[] {
                     // should still read as "active" while on those screens.
                     activeMatch: [route('transfers.new'), route('other-receipts.new')],
                 },
+                {
+                    label: 'Reconciliation',
+                    href: route('reconciliations.index'),
+                    ability: 'reconciliation.manage',
+                },
+                {
+                    label: 'Month-end close',
+                    href: route('close.show'),
+                    ability: 'periods.lock',
+                },
             ],
         },
         {
@@ -105,6 +115,11 @@ function navGroups(can: Record<string, boolean>): NavGroup[] {
                 { label: 'Trial balance', href: route('reports.trial-balance'), ability: 'reports.view' },
                 { label: 'General ledger', href: route('reports.general-ledger'), ability: 'reports.view' },
                 { label: 'Tax summary', href: route('reports.tax-summary'), ability: 'reports.view' },
+                {
+                    label: 'Accountant package',
+                    href: route('reports.accountant-package'),
+                    ability: 'reports.view',
+                },
             ],
         },
         {
@@ -118,6 +133,7 @@ function navGroups(can: Record<string, boolean>): NavGroup[] {
                 },
                 { label: 'Opening balances', href: route('setup.opening-balances'), ability: 'settings.manage' },
                 { label: 'Health', href: route('settings.health'), ability: 'audit.view' },
+                { label: 'Audit log', href: route('settings.audit-log'), ability: 'audit.view' },
             ],
         },
     ];

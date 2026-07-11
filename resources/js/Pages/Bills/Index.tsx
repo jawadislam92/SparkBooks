@@ -1,4 +1,5 @@
 import Button from '@/Components/ui/Button';
+import ExportCsvLink from '@/Components/ui/ExportCsvLink';
 import MoneyText from '@/Components/ui/MoneyText';
 import Sheet from '@/Components/ui/Sheet';
 import StatusChip, { BILL_STATUS_LABELS } from '@/Components/documents/StatusChip';
@@ -75,12 +76,30 @@ function matchesSearch(bill: BillRow, search: string): boolean {
     );
 }
 
+/** Real server-side Bill status values the export endpoint accepts — excludes 'all' and the client-only 'overdue' derived filter. */
+const EXPORTABLE_STATUSES: ReadonlySet<string> = new Set([
+    'draft',
+    'received',
+    'partially_paid',
+    'paid',
+    'void',
+]);
+
 export default function Index({ bills }: IndexPageProps) {
-    const { currentCompany } = usePage<PageProps>().props;
+    const { currentCompany, can } = usePage<PageProps>().props;
     const currency = currentCompany?.base_currency ?? 'PKR';
     const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
     const [search, setSearch] = useState('');
     const today = useMemo(() => todayIsoDate(), []);
+
+    // 'overdue' is a client-computed filter (due_date < today, still payable)
+    // with no matching server-side Bill.status value, so it can't travel as
+    // an export ?status= filter the way the other options can — the export
+    // falls back to "all" rather than sending a value the endpoint would
+    // reject with a 422.
+    const exportHref = EXPORTABLE_STATUSES.has(statusFilter)
+        ? `${route('bills.export')}?status=${encodeURIComponent(statusFilter)}`
+        : route('bills.export');
 
     const visibleBills = useMemo(
         () =>
@@ -135,9 +154,12 @@ export default function Index({ bills }: IndexPageProps) {
                         className={SEARCH_INPUT_CLASSES}
                     />
                 </div>
-                <Button type="button" onClick={() => router.visit(route('bills.new'))}>
-                    New bill
-                </Button>
+                <div className="flex items-center gap-2">
+                    {can['exports.run'] && <ExportCsvLink href={exportHref} />}
+                    <Button type="button" onClick={() => router.visit(route('bills.new'))}>
+                        New bill
+                    </Button>
+                </div>
             </div>
 
             <Sheet>

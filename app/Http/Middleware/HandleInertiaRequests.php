@@ -57,11 +57,17 @@ class HandleInertiaRequests extends Middleware
         'bank_accounts.manage',
         'transfers.create',
         'other_receipts.create',
+        // Phase 6 Task 1: Reconciliation nav link + Show's Reopen action.
+        'reconciliation.manage',
         'reports.view',
         'tax_rates.manage',
         'periods.lock',
         'settings.manage',
         'audit.view',
+        // Phase 6 Task 3 (spec §11/§17.8): every list screen's Export CSV
+        // button (Invoices/Bills/Expenses/Contacts/Items/Banking/Journal
+        // Index.tsx) gates on this — Owner/Admin/Accountant, not Staff.
+        'exports.run',
     ];
 
     /**

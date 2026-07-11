@@ -7,6 +7,7 @@ use App\Services\AccountBalances;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class BankAccount extends Model
 {
@@ -24,6 +25,11 @@ class BankAccount extends Model
     public function ledgerAccount(): BelongsTo
     {
         return $this->belongsTo(Account::class, 'ledger_account_id');
+    }
+
+    public function reconciliations(): HasMany
+    {
+        return $this->hasMany(Reconciliation::class);
     }
 
     /**

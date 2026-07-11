@@ -8,12 +8,18 @@ use App\Http\Requests\StoreManualJournalRequest;
 use App\Models\Account;
 use App\Models\ManualJournal;
 use App\Services\ManualJournalService;
+use App\Support\AuditLogger;
+use App\Support\CsvExport;
+use App\Support\Money;
+use Carbon\CarbonImmutable;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
 use Inertia\Response;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class ManualJournalController extends Controller
 {
@@ -49,6 +55,64 @@ class ManualJournalController extends Controller
         return Inertia::render('Journal/Index', [
             'journals' => $journals,
         ]);
+    }
+
+    /**
+     * List-screen CSV export (Phase 6 Task 3, spec §11/§17.8) — the SAME
+     * scope Journal/Index reads (every manual journal for the current
+     * company), optionally narrowed by `status` (posted/reversed) and an
+     * `entry_date` range (`from`/`to`) — the one list export in this task
+     * with a genuine period filter, since a manual journal (unlike
+     * invoices/bills/expenses) has no other natural single-value filter.
+     * Amount is the entry's debit total (== credit total by construction —
+     * §12.9 — since LedgerService refuses an unbalanced post). Gated
+     * `exports.run` in addition to this controller's own `ledger.post_manual`
+     * group (routes/web.php). Audit-logged via the shared CsvExport helper.
+     */
+    public function exportCsv(Request $request, AuditLogger $audit): StreamedResponse
+    {
+        $validated = $request->validate([
+            'status' => ['nullable', 'string', Rule::in(['posted', 'reversed'])],
+            'from' => ['nullable', 'date'],
+            'to' => ['nullable', 'date'],
+        ]);
+        $status = $validated['status'] ?? null;
+        $from = isset($validated['from']) ? CarbonImmutable::parse($validated['from']) : null;
+        $to = isset($validated['to']) ? CarbonImmutable::parse($validated['to']) : null;
+
+        $journals = ManualJournal::query()
+            ->with(['journalEntry.lines', 'creator'])
+            ->when($status !== null, fn ($query) => $query->where('status', $status))
+            ->when($from !== null, fn ($query) => $query->whereDate('entry_date', '>=', $from->toDateString()))
+            ->when($to !== null, fn ($query) => $query->whereDate('entry_date', '<=', $to->toDateString()))
+            ->orderByDesc('entry_date')
+            ->orderByDesc('id')
+            ->get();
+
+        $rows = $journals->map(function (ManualJournal $journal) {
+            $amount = (int) $journal->journalEntry?->lines->sum('debit');
+
+            return [
+                $journal->entry_date->toDateString(),
+                $journal->memo,
+                $journal->status,
+                $journal->creator?->name,
+                Money::minorToDecimalString($amount),
+            ];
+        });
+
+        return CsvExport::stream(
+            'journal-entries.csv',
+            ['Date', 'Memo', 'Status', 'Created By', 'Amount'],
+            $rows,
+            $audit,
+            'journal_entries.exported',
+            [
+                'status' => $status ?? 'all',
+                'from' => $from?->toDateString(),
+                'to' => $to?->toDateString(),
+            ],
+        );
     }
 
     public function create(): Response

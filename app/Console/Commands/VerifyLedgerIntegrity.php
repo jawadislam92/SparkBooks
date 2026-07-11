@@ -6,7 +6,9 @@ use App\Models\Company;
 use App\Models\IntegrityRun;
 use App\Models\JournalEntry;
 use App\Services\IntegrityChecker;
+use App\Support\AlertNotifier;
 use App\Support\CompanyContext;
+use App\Support\Heartbeat;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -31,19 +33,24 @@ class VerifyLedgerIntegrity extends Command
 
     protected $description = "Verify every company's ledger balances and is internally consistent (spec §9 correctness watchdog)";
 
-    public function handle(IntegrityChecker $checker, CompanyContext $context): int
+    public function handle(IntegrityChecker $checker, CompanyContext $context, Heartbeat $heartbeat, AlertNotifier $alertNotifier): int
     {
         $companies = Company::query()->withoutGlobalScopes()->get();
 
         if ($companies->isEmpty()) {
             Log::error('ledger:verify: zero companies found — refusing to report success on zero evaluated companies (vacuous-check guard).');
             $this->error('No companies found. Nothing was evaluated — this is a failure, not a pass.');
+            $alertNotifier->alert(
+                'SparkBooks ledger:verify: zero companies evaluated',
+                "ledger:verify ran and found zero companies to check — this is treated as a failure, not a vacuous pass.\nVerify the scheduled job is running against the expected database."
+            );
 
             return self::FAILURE;
         }
 
         $anyFindings = false;
         $anyVacuous = false;
+        $findingsSummary = [];
 
         foreach ($companies as $company) {
             // Ground truth, independent of CompanyContext: does this company
@@ -53,7 +60,7 @@ class VerifyLedgerIntegrity extends Command
             $hasDocuments = DB::table('manual_journals')->where('company_id', $company->id)->exists()
                 || DB::table('journal_entries')->where('company_id', $company->id)->exists();
 
-            $context->runFor($company, function () use ($company, $checker, $hasDocuments, &$anyFindings, &$anyVacuous) {
+            $context->runFor($company, function () use ($company, $checker, $hasDocuments, &$anyFindings, &$anyVacuous, &$findingsSummary) {
                 // What the checker's own scoping sees for this company.
                 $entryCountInContext = JournalEntry::query()->count();
 
@@ -87,6 +94,8 @@ class VerifyLedgerIntegrity extends Command
                     foreach ($findings as $finding) {
                         $this->line("  - [{$finding['check']}] {$finding['detail']}");
                     }
+                    $findingsSummary[] = "Company {$company->id} ({$company->name}): ".
+                        collect($findings)->map(fn (array $f) => "[{$f['check']}] {$f['detail']}")->implode('; ');
                 } else {
                     $this->info("Company {$company->id} ({$company->name}): clean");
                 }
@@ -94,8 +103,15 @@ class VerifyLedgerIntegrity extends Command
         }
 
         if ($anyFindings || $anyVacuous) {
+            $alertNotifier->alert(
+                'SparkBooks ledger:verify: integrity findings detected',
+                implode("\n", $findingsSummary) ?: 'ledger:verify found findings — see application logs for details.'
+            );
+
             return self::FAILURE;
         }
+
+        $heartbeat->ping('integrity');
 
         return self::SUCCESS;
     }

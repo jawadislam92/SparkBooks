@@ -60,6 +60,28 @@ return [
             'report' => false,
         ],
 
+        // Off-host copy target for `sparkbooks:backup` (spec §11), any
+        // S3-compatible bucket. Config-gated: BackupDatabase checks
+        // `bucket` before ever calling Storage::disk('backups') — with no
+        // BACKUP_S3_BUCKET set, the off-host copy step is skipped cleanly
+        // (same "wired but inert without env" pattern as Sentry's DSN gate,
+        // see config/sentry.php). Falls back to the AWS_* vars so a single
+        // set of S3 credentials can serve both the app's own 's3' disk and
+        // this one, but has its own BACKUP_S3_* overrides for a separate
+        // backups-only bucket/account.
+        'backups' => [
+            'driver' => env('BACKUP_S3_DRIVER', 's3'),
+            'key' => env('BACKUP_S3_ACCESS_KEY_ID', env('AWS_ACCESS_KEY_ID')),
+            'secret' => env('BACKUP_S3_SECRET_ACCESS_KEY', env('AWS_SECRET_ACCESS_KEY')),
+            'region' => env('BACKUP_S3_REGION', env('AWS_DEFAULT_REGION', 'us-east-1')),
+            'bucket' => env('BACKUP_S3_BUCKET'),
+            'url' => env('BACKUP_S3_URL'),
+            'endpoint' => env('BACKUP_S3_ENDPOINT'),
+            'use_path_style_endpoint' => env('BACKUP_S3_USE_PATH_STYLE_ENDPOINT', true),
+            'throw' => false,
+            'report' => false,
+        ],
+
     ],
 
     /*

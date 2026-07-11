@@ -1,4 +1,5 @@
 import Button from '@/Components/ui/Button';
+import ExportCsvLink from '@/Components/ui/ExportCsvLink';
 import Field from '@/Components/ui/Field';
 import MoneyText from '@/Components/ui/MoneyText';
 import Sheet from '@/Components/ui/Sheet';
@@ -247,6 +248,7 @@ export default function Index({ bankAccounts }: IndexPageProps) {
                     Show archived
                 </label>
                 <div className="flex items-center gap-2">
+                    {can['exports.run'] && <ExportCsvLink href={route('bank-accounts.export')} />}
                     {can['other_receipts.create'] && (
                         <Button
                             type="button"

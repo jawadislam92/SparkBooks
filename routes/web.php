@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\AccountController;
+use App\Http\Controllers\AuditLogController;
 use App\Http\Controllers\BankAccountController;
 use App\Http\Controllers\BillController;
 use App\Http\Controllers\CompanySwitchController;
@@ -11,12 +12,15 @@ use App\Http\Controllers\HealthController;
 use App\Http\Controllers\InvoiceController;
 use App\Http\Controllers\ItemController;
 use App\Http\Controllers\ManualJournalController;
+use App\Http\Controllers\MonthEndCloseController;
 use App\Http\Controllers\OnboardingController;
 use App\Http\Controllers\OpeningBalanceController;
 use App\Http\Controllers\OpeningCsvController;
 use App\Http\Controllers\OtherReceiptController;
 use App\Http\Controllers\PeriodLockController;
 use App\Http\Controllers\ProfileController;
+use App\Http\Controllers\ReconciliationController;
+use App\Http\Controllers\Reports\AccountantPackageController;
 use App\Http\Controllers\Reports\ApAgingController;
 use App\Http\Controllers\Reports\ArAgingController;
 use App\Http\Controllers\Reports\BalanceSheetController;
@@ -57,6 +61,12 @@ Route::middleware(['auth', 'verified', 'company', 'can:ledger.post_manual'])->gr
     Route::get('/journal-entries', [ManualJournalController::class, 'index'])->name('journal-entries.index');
     Route::get('/journal-entries/new', [ManualJournalController::class, 'create'])->name('journal-entries.new');
     Route::post('/journal-entries', [ManualJournalController::class, 'store'])->name('journal-entries.store');
+    // Phase 6 Task 3 (spec §11/§17.8): list-screen CSV export — additionally
+    // gated exports.run, same double-gate shape as every /reports/*/export.csv
+    // route below (view/base-ability group AND exports.run).
+    Route::get('/journal-entries/export.csv', [ManualJournalController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('journal-entries.export');
     Route::post('/journal-entries/{manualJournal}/reverse', [ManualJournalController::class, 'reverse'])->name('journal-entries.reverse');
 });
 
@@ -106,11 +116,25 @@ Route::middleware(['auth', 'verified', 'company', 'can:reports.view'])->group(fu
     Route::get('/reports/tax-summary/export.csv', [TaxSummaryController::class, 'exportCsv'])
         ->middleware('can:exports.run')
         ->name('reports.tax-summary.export');
+
+    // Phase 6 Task 4 (spec §11): the Accountant Package — "one-click ... This
+    // is also the escape hatch" — General Ledger, Trial Balance, P&L, Balance
+    // Sheet, A/R aging, A/P aging for a chosen period, bundled as a single
+    // zip. The download is additionally gated exports.run, same double-gate
+    // shape as every /reports/*/export.csv route above.
+    Route::get('/reports/accountant-package', [AccountantPackageController::class, 'show'])->name('reports.accountant-package');
+    Route::get('/reports/accountant-package/download', [AccountantPackageController::class, 'download'])
+        ->middleware('can:exports.run')
+        ->name('reports.accountant-package.download');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:audit.view'])->group(function () {
     Route::get('/settings/health', [HealthController::class, 'show'])->name('settings.health');
     Route::post('/settings/health/run', [HealthController::class, 'run'])->name('settings.health.run');
+
+    // Phase 6 Task 2 (§7.13): READ-ONLY audit-log viewer, no new mutating
+    // routes — same audit.view gate as Health above.
+    Route::get('/settings/audit-log', [AuditLogController::class, 'index'])->name('settings.audit-log');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:accounts.manage'])->group(function () {
@@ -128,6 +152,16 @@ Route::middleware(['auth', 'verified', 'company', 'can:contacts.manage'])->group
     Route::patch('/contacts/{contact}', [ContactController::class, 'update'])->name('contacts.update');
     Route::post('/contacts/{contact}/archive', [ContactController::class, 'archive'])->name('contacts.archive');
     Route::post('/contacts/{contact}/unarchive', [ContactController::class, 'unarchive'])->name('contacts.unarchive');
+    // Phase 6 Task 3 (spec §11/§17.8): list-screen CSV export — registered
+    // BEFORE /contacts/{contact} below on purpose (mirrors invoices.index's
+    // own ordering comment): {contact} is a single-segment wildcard that
+    // would otherwise happily capture "export.csv" as the parameter, since
+    // Laravel matches routes in registration order. Additionally gated
+    // exports.run, same double-gate shape as every /reports/*/export.csv
+    // route below.
+    Route::get('/contacts/export.csv', [ContactController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('contacts.export');
     Route::get('/contacts/{contact}', [ContactController::class, 'show'])->name('contacts.show');
 });
 
@@ -135,6 +169,16 @@ Route::middleware(['auth', 'verified', 'company', 'can:invoices.draft'])->group(
     Route::get('/invoices', [InvoiceController::class, 'index'])->name('invoices.index');
     Route::get('/invoices/new', [InvoiceController::class, 'create'])->name('invoices.new');
     Route::post('/invoices', [InvoiceController::class, 'store'])->name('invoices.store');
+    // Phase 6 Task 3 (spec §11/§17.8): list-screen CSV export — registered
+    // BEFORE /invoices/{invoice} below on purpose, same reasoning as that
+    // route's own ordering comment: {invoice} is a single-segment wildcard
+    // that would otherwise happily capture "export.csv" as the parameter.
+    // Additionally gated exports.run, same double-gate shape as every
+    // /reports/*/export.csv route below (view/base-ability group AND
+    // exports.run) — Staff holds invoices.draft but not exports.run.
+    Route::get('/invoices/export.csv', [InvoiceController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('invoices.export');
     // Registered BEFORE the /edit route below on purpose: both are GETs under
     // /invoices/{invoice}/..., and Laravel matches route definitions in
     // registration order — {invoice} alone would otherwise never lose to a
@@ -182,6 +226,12 @@ Route::middleware(['auth', 'verified', 'company', 'can:expenses.draft'])->group(
     Route::get('/expenses', [ExpenseController::class, 'index'])->name('expenses.index');
     Route::get('/expenses/new', [ExpenseController::class, 'create'])->name('expenses.new');
     Route::post('/expenses', [ExpenseController::class, 'store'])->name('expenses.store');
+    // Phase 6 Task 3 (spec §11/§17.8): list-screen CSV export — registered
+    // BEFORE /expenses/{expense} below, same wildcard-ordering reasoning as
+    // invoices.export above. Additionally gated exports.run.
+    Route::get('/expenses/export.csv', [ExpenseController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('expenses.export');
     // Registered BEFORE /edit below on purpose — mirrors invoices.show/
     // invoices.edit's own ordering comment (Phase 3 T11): both are GETs
     // under /expenses/{expense}/..., Laravel matches in registration order.
@@ -222,6 +272,12 @@ Route::middleware(['auth', 'verified', 'company', 'can:bills.draft'])->group(fun
     Route::get('/bills', [BillController::class, 'index'])->name('bills.index');
     Route::get('/bills/new', [BillController::class, 'create'])->name('bills.new');
     Route::post('/bills', [BillController::class, 'store'])->name('bills.store');
+    // Phase 6 Task 3 (spec §11/§17.8): list-screen CSV export — registered
+    // BEFORE /bills/{bill} below, same wildcard-ordering reasoning as
+    // invoices.export above. Additionally gated exports.run.
+    Route::get('/bills/export.csv', [BillController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('bills.export');
     // Registered BEFORE /edit below — mirrors expenses.show's own ordering
     // comment above (Phase 4 Task 9). The canonical landing page for every
     // status, including draft and the opening-bill banner (relocated here
@@ -270,6 +326,13 @@ Route::middleware(['auth', 'verified', 'company', 'can:items.manage'])->group(fu
     Route::patch('/items/{item}', [ItemController::class, 'update'])->name('items.update');
     Route::post('/items/{item}/archive', [ItemController::class, 'archive'])->name('items.archive');
     Route::post('/items/{item}/unarchive', [ItemController::class, 'unarchive'])->name('items.unarchive');
+    // Phase 6 Task 3 (spec §11/§17.8): list-screen CSV export. No wildcard
+    // GET route in this group (items has no dedicated show page), so no
+    // ordering hazard — additionally gated exports.run, same double-gate
+    // shape as every /reports/*/export.csv route below.
+    Route::get('/items/export.csv', [ItemController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('items.export');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:bank_accounts.manage'])->group(function () {
@@ -278,6 +341,15 @@ Route::middleware(['auth', 'verified', 'company', 'can:bank_accounts.manage'])->
     Route::patch('/bank-accounts/{bankAccount}', [BankAccountController::class, 'update'])->name('bank-accounts.update');
     Route::post('/bank-accounts/{bankAccount}/archive', [BankAccountController::class, 'archive'])->name('bank-accounts.archive');
     Route::post('/bank-accounts/{bankAccount}/unarchive', [BankAccountController::class, 'unarchive'])->name('bank-accounts.unarchive');
+    // Phase 6 Task 3 (spec §11/§17.8): list-screen CSV export — the bank/
+    // cash accounts list (no dedicated bank-transactions index screen exists
+    // yet, see BankAccountController::exportCsv's own docblock). No wildcard
+    // GET route in this group, so no ordering hazard. Additionally gated
+    // exports.run, same double-gate shape as every /reports/*/export.csv
+    // route below.
+    Route::get('/bank-accounts/export.csv', [BankAccountController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('bank-accounts.export');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:transfers.create'])->group(function () {
@@ -299,6 +371,30 @@ Route::middleware(['auth', 'verified', 'company', 'can:settings.manage'])->group
     Route::post('/setup/opening-balances/import/{kind}', [OpeningCsvController::class, 'import'])
         ->where('kind', '[a-z_]+')
         ->name('setup.opening-balances.import');
+});
+
+// reconciliation.manage (spec §7.14) is held only by Owner/Accountant — even
+// GET/viewing is gated here, unlike periods.lock's broader "may view"
+// read-only split (see PeriodLockController::edit's own comment): there's no
+// separate "reconciliation.view" ability in the catalog.
+Route::middleware(['auth', 'verified', 'company', 'can:reconciliation.manage'])->group(function () {
+    Route::get('/reconciliations', [ReconciliationController::class, 'index'])->name('reconciliations.index');
+    Route::get('/reconciliations/{bankAccount}', [ReconciliationController::class, 'show'])->name('reconciliations.show');
+    Route::post('/reconciliations/{bankAccount}/complete', [ReconciliationController::class, 'complete'])->name('reconciliations.complete');
+    Route::post('/reconciliations/{reconciliation}/reopen', [ReconciliationController::class, 'reopen'])->name('reconciliations.reopen');
+});
+
+// Phase 6 Task 5 (spec §17.5): the month-end close checklist — gated
+// entirely by periods.lock, same Owner/Accountant-only ability as the period
+// lock itself (config/permissions.php): "who may close the books" is exactly
+// "who may move the lock". Unlike settings.books's GET, there is no broader
+// read-only viewer split here.
+Route::middleware(['auth', 'verified', 'company', 'can:periods.lock'])->group(function () {
+    Route::get('/close', [MonthEndCloseController::class, 'show'])->name('close.show');
+    Route::post('/close/acknowledge', [MonthEndCloseController::class, 'acknowledge'])->name('close.acknowledge');
+    Route::post('/close/integrity-check', [MonthEndCloseController::class, 'runIntegrityCheck'])->name('close.integrity-check');
+    Route::post('/close/lock', [MonthEndCloseController::class, 'lock'])->name('close.lock');
+    Route::post('/close/complete', [MonthEndCloseController::class, 'complete'])->name('close.complete');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:tax_rates.manage'])->group(function () {

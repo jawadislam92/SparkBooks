@@ -1,4 +1,5 @@
 import Button from '@/Components/ui/Button';
+import ExportCsvLink from '@/Components/ui/ExportCsvLink';
 import Field from '@/Components/ui/Field';
 import Sheet from '@/Components/ui/Sheet';
 import AppShell from '@/Layouts/AppShell';
@@ -10,7 +11,7 @@ import {
     isVendorType,
 } from '@/lib/contactLabels';
 import { PageProps } from '@/types';
-import { Head, router, useForm } from '@inertiajs/react';
+import { Head, router, useForm, usePage } from '@inertiajs/react';
 import {
     Dialog,
     DialogBackdrop,
@@ -223,10 +224,16 @@ function ContactFormDialog({
 }
 
 export default function Index({ contacts }: IndexPageProps) {
+    const { can } = usePage<PageProps>().props;
     const [showArchived, setShowArchived] = useState(false);
     const [typeFilter, setTypeFilter] = useState<TypeFilter>('all');
     const [editingContact, setEditingContact] = useState<ContactRow | null>(null);
     const [creating, setCreating] = useState(false);
+
+    const exportHref =
+        typeFilter === 'all'
+            ? route('contacts.export')
+            : `${route('contacts.export')}?type=${encodeURIComponent(typeFilter)}`;
 
     // Type filter mirrors the server-side ContactType semantics: "customer"
     // shows customer + both, "vendor" shows vendor + both, "all" shows every
@@ -290,9 +297,12 @@ export default function Index({ contacts }: IndexPageProps) {
                         Show archived
                     </label>
                 </div>
-                <Button type="button" onClick={() => setCreating(true)}>
-                    New contact
-                </Button>
+                <div className="flex items-center gap-2">
+                    {can['exports.run'] && <ExportCsvLink href={exportHref} />}
+                    <Button type="button" onClick={() => setCreating(true)}>
+                        New contact
+                    </Button>
+                </div>
             </div>
 
             <Sheet>
