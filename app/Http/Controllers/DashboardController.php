@@ -11,6 +11,7 @@ use App\Models\Bill;
 use App\Models\Contact;
 use App\Models\Invoice;
 use App\Services\AccountBalances;
+use App\Services\Reports\AgingReport;
 use App\Services\Reports\ProfitAndLossReport;
 use App\Services\Reports\ReportPeriod;
 use App\Support\CompanyContext;
@@ -25,12 +26,23 @@ use Inertia\Response;
  * Dashboard — Phase 2 gave this a "light" real-data pass (cash position + a
  * couple of counts). Phase 5 Task 7 enriches it to spec §7.12: outstanding &
  * overdue invoices, unpaid bills, a P&L snapshot, an income-vs-expense chart,
- * and a gated recent-activity feed. Every widget reads EITHER the Invoice/Bill
- * models directly (their own status/balance/due_date columns, already kept
- * consistent by InvoicePaymentService/BillPaymentService — no re-derivation
- * of ledger math here) OR the Phase 5 ProfitAndLossReport service (which
- * itself reads journal_lines via LedgerBalances) — never a fresh ledger
- * query of its own. This controller performs NO ledger writes.
+ * and a gated recent-activity feed. Every widget reads an EXISTING Phase 5
+ * report service (ProfitAndLossReport / AgingReport, both of which read
+ * journal_lines via LedgerBalances) or a document model — never a fresh
+ * ledger query of its own, and never a NEW ledger aggregation. This
+ * controller performs NO ledger writes.
+ *
+ * CURRENCY DISCIPLINE (the one non-obvious thing here): the invoices widget's
+ * TOTALS come from AgingReport, NOT from summing Invoice.balance —
+ * Invoice.balance is in the invoice's OWN document currency (PKR for a
+ * domestic invoice, USD for a foreign-currency one), so summing it and
+ * labelling the result base currency would be flat wrong for any FX invoice
+ * (PROJECT_MAP §9: reports derive from journal_lines, never document totals).
+ * AgingReport already reconstructs base-correct AR outstanding from
+ * journal_lines and ties to the 1100 control account, so the widget reuses it
+ * for its money figures and keeps only the currency-agnostic COUNTS from the
+ * model. Bills are base-currency-only in v1 (spec §17.1), so Bill.balance IS
+ * base currency and the bills widget sums it directly — no aging needed.
  */
 class DashboardController extends Controller
 {
@@ -43,6 +55,7 @@ class DashboardController extends Controller
     public function show(
         AccountBalances $balances,
         ProfitAndLossReport $plReport,
+        AgingReport $agingReport,
         CompanyContext $context,
     ): Response {
         $balancesByAccount = $balances->asOf();
@@ -75,10 +88,7 @@ class DashboardController extends Controller
             'customer_count' => $customerCount,
             'vendor_count' => $vendorCount,
             'bank_account_count' => $bankAccounts->count(),
-            'invoices' => $this->documentWidget(
-                Invoice::query()->whereIn('status', $this->outstandingInvoiceStatuses()),
-                $today,
-            ),
+            'invoices' => $this->invoiceWidget($agingReport, $today),
             'bills' => $this->documentWidget(
                 Bill::query()->whereIn('status', $this->outstandingBillStatuses()),
                 $today,
@@ -117,14 +127,66 @@ class DashboardController extends Controller
     }
 
     /**
-     * Shared shape for the invoices/bills widgets: count + total of every
-     * still-payable document (the query is pre-filtered to the right
-     * status set by the caller), plus the overdue subset — a document with
-     * a null due_date is NEVER overdue (spec §7.12: no due date means no
-     * deadline it could be judged "past"), and "overdue" is strictly
-     * due_date < today, mirroring resources/js/lib/overdue.ts's
+     * The outstanding & overdue invoices widget. COUNTS come per-invoice
+     * from the Invoice model (a count has no currency, and the null-due-date/
+     * strictly-past-due predicate below is the exact one Invoices/Index.tsx
+     * and resources/js/lib/overdue.ts already use). MONEY comes from
+     * AgingReport::buildReceivables — see the class docblock's CURRENCY
+     * DISCIPLINE note for why Invoice.balance can't be summed here:
+     *
+     *   outstanding_total = the AR aging grand total (base-correct AR
+     *                       outstanding, tied to the 1100 control account).
+     *   overdue_total     = Σ of every PAST-DUE aging bucket (everything
+     *                       except Current). Current holds both not-yet-due
+     *                       AND null-due-date documents (AgingReport::
+     *                       bucketFor), so excluding it lines up exactly with
+     *                       the count predicate: a null due_date is never
+     *                       overdue, due-today is not yet overdue.
+     *
+     * The counts (per-invoice) and totals (per-contact, ledger-derived) come
+     * from different groupings on purpose — the counts answer "how many
+     * documents", the totals answer "how much base money", and only the
+     * money had a currency problem to fix.
+     *
+     * @return array{outstanding_count:int, outstanding_total:int, overdue_count:int, overdue_total:int}
+     */
+    private function invoiceWidget(AgingReport $agingReport, CarbonImmutable $today): array
+    {
+        $counts = $this->documentWidget(
+            Invoice::query()->whereIn('status', $this->outstandingInvoiceStatuses()),
+            $today,
+        );
+
+        $aging = $agingReport->buildReceivables($today);
+
+        $overdueTotal = 0;
+        foreach ($aging['buckets'] as $bucket) {
+            if ($bucket !== 'current') {
+                $overdueTotal += $aging['totals'][$bucket];
+            }
+        }
+
+        return [
+            'outstanding_count' => $counts['outstanding_count'],
+            'outstanding_total' => $aging['grand_total'],
+            'overdue_count' => $counts['overdue_count'],
+            'overdue_total' => $overdueTotal,
+        ];
+    }
+
+    /**
+     * Count + total of every still-payable document (the query is
+     * pre-filtered to the right status set by the caller), plus the overdue
+     * subset — a document with a null due_date is NEVER overdue (spec §7.12:
+     * no due date means no deadline it could be judged "past"), and "overdue"
+     * is strictly due_date < today, mirroring resources/js/lib/overdue.ts's
      * isBillOverdue() (and Invoices/Index.tsx's own identical isOverdue())
      * exactly — due exactly today is not yet overdue.
+     *
+     * Used directly for the BILLS widget (bills are base-currency-only, so
+     * summing Bill.balance IS a base-currency figure). For INVOICES,
+     * invoiceWidget() uses only the currency-agnostic COUNTS from here and
+     * takes its money figures from AgingReport instead (see that method).
      *
      * @param  Builder<Invoice>|Builder<Bill>  $query
      * @return array{outstanding_count:int, outstanding_total:int, overdue_count:int, overdue_total:int}

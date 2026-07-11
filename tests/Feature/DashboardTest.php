@@ -20,6 +20,7 @@ use App\Models\Invoice;
 use App\Models\JournalEntry;
 use App\Models\User;
 use App\Services\LedgerService;
+use App\Services\Reports\AgingReport;
 use App\Services\Reports\ProfitAndLossReport;
 use App\Support\CompanyContext;
 use Carbon\CarbonImmutable;
@@ -190,44 +191,58 @@ class DashboardTest extends TestCase
         $this->actingAsRole($company, Role::Owner);
         app(CompanyContext::class)->set($company);
 
+        // The invoice widget's TOTALS come from the AR aging report (base-
+        // correct, ledger-tied — see the mixed-currency test below and the
+        // controller docblock), so the outstanding ones need real AR ledger
+        // postings behind them; the COUNTS come per-invoice from the model.
+        // Every invoice here is base-currency (PKR fx 1), so balance == the
+        // base AR amount and the two agree by construction.
+        $ar = $this->arAccount($company);
+        $income = $this->incomeAccount($company);
         $today = CarbonImmutable::today();
+        $issued = $today->subDays(40)->toDateString();
 
         // Outstanding, not yet due -> counts toward outstanding only.
-        Invoice::factory()->create([
+        $notYetDue = Invoice::factory()->create([
             'status' => InvoiceStatus::Sent->value,
             'due_date' => $today->addDays(10)->toDateString(),
             'balance' => 10000,
         ]);
+        $this->postArEntry($ar, $income, $notYetDue, 10000, $issued);
 
         // Outstanding AND overdue (past due, still unpaid).
-        Invoice::factory()->create([
+        $overdue = Invoice::factory()->create([
             'status' => InvoiceStatus::PartiallyPaid->value,
             'due_date' => $today->subDays(5)->toDateString(),
             'balance' => 4000,
         ]);
+        $this->postArEntry($ar, $income, $overdue, 4000, $issued);
 
         // Outstanding with a null due_date -> NEVER overdue (spec §7.12).
-        Invoice::factory()->create([
+        $noDueDate = Invoice::factory()->create([
             'status' => InvoiceStatus::Sent->value,
             'due_date' => null,
             'balance' => 2500,
         ]);
+        $this->postArEntry($ar, $income, $noDueDate, 2500, $issued);
 
         // Due exactly today -> not yet overdue (strictly less-than, not <=).
-        Invoice::factory()->create([
+        $dueToday = Invoice::factory()->create([
             'status' => InvoiceStatus::Sent->value,
             'due_date' => $today->toDateString(),
             'balance' => 1000,
         ]);
+        $this->postArEntry($ar, $income, $dueToday, 1000, $issued);
 
-        // Paid -> excluded (balance 0, not outstanding).
+        // Paid -> excluded (balance 0, not outstanding). No live AR: its
+        // posting (if any) has been fully relieved, so aging drops it too.
         Invoice::factory()->create([
             'status' => InvoiceStatus::Paid->value,
             'due_date' => $today->subDays(30)->toDateString(),
             'balance' => 0,
         ]);
 
-        // Draft -> excluded (never sent).
+        // Draft -> excluded (never sent, never posted).
         Invoice::factory()->create([
             'status' => InvoiceStatus::Draft->value,
             'due_date' => $today->subDays(30)->toDateString(),
@@ -248,6 +263,77 @@ class DashboardTest extends TestCase
                 ->where('invoices.outstanding_total', 10000 + 4000 + 2500 + 1000)
                 ->where('invoices.overdue_count', 1)
                 ->where('invoices.overdue_total', 4000)
+            );
+    }
+
+    public function test_dashboard_invoice_totals_are_base_correct_for_mixed_currency_and_tie_to_ar_control(): void
+    {
+        // The bug this guards: summing Invoice.balance (DOCUMENT currency) and
+        // labelling it base currency understates a foreign-currency invoice by
+        // (fx_rate − 1)×. The widget instead reads AR aging (base-correct,
+        // journal_lines-derived, ties to the 1100 control account).
+        $company = Company::factory()->create(['base_currency' => 'PKR']);
+        $this->actingAsRole($company, Role::Owner);
+        app(CompanyContext::class)->set($company);
+
+        $ar = $this->arAccount($company);
+        $income = $this->incomeAccount($company);
+        $contact = Contact::factory()->create();
+        $today = CarbonImmutable::today();
+        $issued = $today->subDays(20)->toDateString();
+
+        // Domestic PKR invoice: PKR 1,000 (100000 minor). Document == base.
+        // Not yet due -> outstanding but not overdue.
+        $pkrInvoice = Invoice::factory()->create([
+            'contact_id' => $contact->id,
+            'status' => InvoiceStatus::Sent->value,
+            'currency_code' => 'PKR',
+            'fx_rate' => 1,
+            'due_date' => $today->addDays(10)->toDateString(),
+            'total' => 100000,
+            'balance' => 100000,
+            'base_total' => 100000,
+        ]);
+        $this->postArEntry($ar, $income, $pkrInvoice, 100000, $issued);
+
+        // Foreign USD invoice: USD 100.00 (10000 minor DOCUMENT) @ fx 280 =
+        // base PKR 28,000 (2800000 minor). balance stays document currency;
+        // the AR ledger posting is in BASE (P1fx converts before posting).
+        // Past due -> outstanding AND overdue.
+        $usdInvoice = Invoice::factory()->create([
+            'contact_id' => $contact->id,
+            'status' => InvoiceStatus::Sent->value,
+            'currency_code' => 'USD',
+            'fx_rate' => 280,
+            'due_date' => $today->subDays(5)->toDateString(),
+            'total' => 10000,
+            'balance' => 10000,
+            'base_total' => 2800000,
+        ]);
+        $this->postArEntry($ar, $income, $usdInvoice, 2800000, $issued);
+
+        $naiveDocSum = 100000 + 10000;        // 110000 — the OLD, wrong figure
+        $baseCorrect = 100000 + 2800000;      // 2900000 — base AR outstanding
+        $this->assertNotSame($naiveDocSum, $baseCorrect, 'premise: the FX invoice makes the two diverge');
+
+        // The AR aging itself agrees and ties to the 1100 control balance.
+        $aging = app(AgingReport::class)->buildReceivables($today);
+        $this->assertSame($baseCorrect, $aging['grand_total']);
+        $this->assertTrue($aging['ties_to_control']);
+        $this->assertSame($aging['control_balance'], $aging['grand_total']);
+
+        $this->get('/dashboard')
+            ->assertOk()
+            ->assertInertia(fn (AssertableInertia $page) => $page
+                ->where('invoices.outstanding_count', 2)
+                // Base-correct + ledger-tied, NOT the naive document-currency
+                // sum (110000) the old code produced.
+                ->where('invoices.outstanding_total', $baseCorrect)
+                ->where('invoices.outstanding_total', 2900000)
+                ->where('invoices.overdue_count', 1)
+                // Just the USD invoice is past due -> its base AR (2800000),
+                // NOT its document balance (10000).
+                ->where('invoices.overdue_total', 2800000)
             );
     }
 
@@ -344,6 +430,17 @@ class DashboardTest extends TestCase
         ]);
     }
 
+    private function arAccount(Company $company): Account
+    {
+        return Account::factory()->create([
+            'company_id' => $company->id,
+            'code' => '1100',
+            'name' => 'Accounts Receivable',
+            'type' => AccountType::Asset->value,
+            'subtype' => AccountSubtype::Receivable->value,
+        ]);
+    }
+
     /** Posts a balanced two-line entry directly via LedgerService, mirroring ProfitAndLossReportTest's own helper — the dashboard's P&L widgets only READ ProfitAndLossReport, so their fixtures need real journal_lines underneath. */
     private function postEntry(Account $debitAccount, Account $creditAccount, int $amount, string $date, int $sourceId, string $sourceType = 'manual_journal'): JournalEntry
     {
@@ -355,6 +452,26 @@ class DashboardTest extends TestCase
             lines: [
                 new LineDraft(accountId: $debitAccount->id, debit: $amount, credit: 0),
                 new LineDraft(accountId: $creditAccount->id, debit: 0, credit: $amount),
+            ],
+        )));
+    }
+
+    /**
+     * Dr AR (with contact_id — control accounts require it), Cr income — the
+     * P1 shape InvoiceService::send() posts, in BASE-currency minor units
+     * (P1fx converts a foreign invoice to base BEFORE posting, so the ledger
+     * only ever holds base). Mirrors AgingReportTest::postInvoiceEntry().
+     */
+    private function postArEntry(Account $ar, Account $income, Invoice $invoice, int $baseAmount, string $date): void
+    {
+        DB::transaction(fn () => app(LedgerService::class)->post(new EntryDraft(
+            entryDate: CarbonImmutable::parse($date),
+            memo: 'Invoice AR',
+            sourceType: 'invoice',
+            sourceId: $invoice->id,
+            lines: [
+                new LineDraft(accountId: $ar->id, debit: $baseAmount, credit: 0, contactId: $invoice->contact_id),
+                new LineDraft(accountId: $income->id, debit: 0, credit: $baseAmount),
             ],
         )));
     }
