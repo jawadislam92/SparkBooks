@@ -59,22 +59,52 @@ use Illuminate\Support\Collection;
  * this still ties out to the ledger by construction — see the class-level
  * tie-out test).
  *
- * ADJUSTMENTS: source_type='manual_journal' lines on 2100, signed
- * (credit - debit) — reported as-is (a manual Cr increases the liability, a
- * manual Dr decreases it), so "Net = collected - input - remittances +
- * adjustments" adds it with its own natural sign.
+ * ADJUSTMENTS — everything else, computed as a RESIDUAL so the tie-out is
+ * STRUCTURAL rather than dependent on the three named buckets happening to
+ * be exhaustive. Collected covers source_type='invoice'; input+remittances
+ * cover the whole of expense/bill's 2100 movement (an expense/bill debits
+ * 2100 only via its combined tax_total line + its category-2100 lines, and
+ * nothing else — see ExpenseService::p4Lines/BillService::p6Lines — so those
+ * two figures reconstruct its 2100 movement exactly). Every OTHER 2100
+ * movement — a manual_journal adjustment (P) AND, crucially, an
+ * other_receipt whose category is 2100 (OtherReceiptService's category guard
+ * excludes Receivable/Payable/Cash/Bank but NOT the Tax subtype, so an
+ * other-receipt CAN legitimately credit 2100), AND any future/unexpected
+ * source_type that touches 2100 — is captured here by DEFINITION:
+ *
+ *     adjustments = totalMovement - collected + input + remittances
+ *
+ * where totalMovement is the WHOLE account's (credit - debit) net over the
+ * period. Because collected contributes +collected to that total, input
+ * contributes -input, and remittances contributes -remittances (the sign
+ * reasoning below), this residual is exactly "all 2100 movement not already
+ * attributed" — manual + other adjustments to tax. The "Adjustments" line
+ * label stays; it now honestly means that. This is deliberately NOT a plain
+ * Σ(manual_journal) sum: an earlier version of this report only bucketed
+ * manual_journal and silently stopped tying to the ledger the moment an
+ * other_receipt (or anything else) credited 2100 — the residual approach
+ * makes that class of drift impossible by construction.
+ *
+ * SIGN REASONING (all in the "liability increased" convention = credit -
+ * debit, which is the negation of LedgerBalances' debit - credit net):
+ *   - collected  : an invoice CREDITS 2100 → +collected to the movement.
+ *   - input      : an expense/bill DEBITS 2100 by tax_total → -input.
+ *   - remittances: an expense/bill DEBITS 2100 by its 2100-category lines
+ *                  → -remittances.
  *
  * TIE-OUT (load-bearing, see TaxSummaryReportTest): net_tax_payable ==
- * collected - input - remittances + adjustments == the WHOLE account's
- * (credit - debit) net movement over the period == -1 * LedgerBalances::
- * movement($from, $to, [2100])['net'] (LedgerBalances' net is debit -
- * credit; 2100 is credit-normal, so the "liability increased" convention
- * this report uses is the negation of that).
+ * collected - input - remittances + adjustments == totalMovement == the
+ * WHOLE account's (credit - debit) net over the period == -1 *
+ * LedgerBalances::movement($from, $to, [2100])['net'] — now true BY
+ * CONSTRUCTION for any mix of source types, not just the currently-known
+ * ones.
  *
  * READ-ONLY: this class performs no ledger writes.
  */
 class TaxSummaryReport
 {
+    public function __construct(private LedgerBalances $ledger) {}
+
     /**
      * @return array{
      *     from: string,
@@ -102,8 +132,20 @@ class TaxSummaryReport
         }
 
         $collected = $this->sourceTypeTotal($from, $to, $taxAccount->id, 'invoice');
-        $adjustments = $this->sourceTypeTotal($from, $to, $taxAccount->id, 'manual_journal');
         [$input, $remittances] = $this->inputAndRemittanceTotals($from, $to, $taxAccount->id);
+
+        // Whole-account 2100 net movement over the period, in the
+        // liability-increase convention (credit - debit). LedgerBalances'
+        // net is debit - credit, so negate. This is the ground truth the
+        // report must tie to — making adjustments its RESIDUAL (below) is
+        // what makes that tie STRUCTURAL, see class docblock.
+        $movement = $this->ledger->movement($from, $to, [$taxAccount->id]);
+        $totalMovement = -($movement[$taxAccount->id]['net'] ?? 0);
+
+        // Everything not already attributed to collected/input/remittances:
+        // manual_journal, other_receipt→2100, and any future source. Derived,
+        // not summed — so net_tax_payable == totalMovement by construction.
+        $adjustments = $totalMovement - $collected + $input + $remittances;
 
         return [
             'from' => $from->toDateString(),
@@ -134,12 +176,11 @@ class TaxSummaryReport
 
     /**
      * Straightforward (credit - debit) net of every 2100 line whose entry has
-     * the given `source_type`, dated within [from, to] — used for both
-     * collected (source_type='invoice') and adjustments
-     * (source_type='manual_journal'), neither of which has a P12-style
-     * second component to split out (see class docblock). A reversal shares
-     * the same source_type as its original (spec §4), so it nets back down
-     * automatically within this same sum — never filtered out.
+     * the given `source_type`, dated within [from, to] — used for collected
+     * (source_type='invoice'), which has no P12-style second component to
+     * split out (see class docblock). A reversal shares the same source_type
+     * as its original (spec §4), so it nets back down automatically within
+     * this same sum — never filtered out.
      */
     private function sourceTypeTotal(CarbonImmutable $from, CarbonImmutable $to, int $taxAccountId, string $sourceType): int
     {

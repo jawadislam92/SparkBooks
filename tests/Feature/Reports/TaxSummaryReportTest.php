@@ -247,6 +247,31 @@ class TaxSummaryReportTest extends TestCase
         return $this->postEntry('manual_journal', $journal->id, $lines, $date);
     }
 
+    /**
+     * An other_receipt whose category is 2100 — money in (Dr bank) categorized
+     * against Tax Payable (Cr 2100). OtherReceiptService's category guard
+     * excludes Receivable/Payable/Cash/Bank but NOT the Tax subtype, so this
+     * is a legitimately postable shape (the semantic question of whether it
+     * SHOULD be is a separate concern — the report just has to tie out to it).
+     * source_type='other_receipt' is deliberately none of the report's three
+     * named buckets, so it must land in the residual Adjustments line.
+     *
+     * The OtherReceipt document row itself is NOT created here (unlike
+     * AgingReportTest's invoice/bill builders, which must exist because that
+     * report joins to them): TaxSummaryReport never reads the other_receipts
+     * table — an other_receipt is classified purely by source_type from the
+     * ledger and folded into the movement residual — so a real row would only
+     * add an unused BankAccount+OtherReceipt fixture (bank_account_id is a
+     * NOT-NULL FK) without exercising anything the report actually does.
+     */
+    private function otherReceiptToTax(Account $bank, Account $taxPayable, int $amount, string $date, int $sourceId = 1): JournalEntry
+    {
+        return $this->postEntry('other_receipt', $sourceId, [
+            new LineDraft(accountId: $bank->id, debit: $amount, credit: 0),
+            new LineDraft(accountId: $taxPayable->id, debit: 0, credit: $amount),
+        ], $date);
+    }
+
     /** @param  list<LineDraft>  $lines */
     private function postEntry(string $sourceType, int $sourceId, array $lines, string $date): JournalEntry
     {
@@ -491,6 +516,43 @@ class TaxSummaryReportTest extends TestCase
         $this->assertLedgerBalances();
     }
 
+    /**
+     * THE GAP the reviewer found: an other_receipt CAN credit 2100 (its
+     * category guard doesn't exclude the Tax subtype), and source_type=
+     * 'other_receipt' is none of the three named buckets. An earlier version
+     * of this report only bucketed manual_journal for adjustments, so this
+     * movement silently fell out of the tie-out. With adjustments computed as
+     * the RESIDUAL of the whole 2100 movement, it now lands in Adjustments and
+     * net STILL equals the 2100 movement.
+     */
+    public function test_other_receipt_crediting_2100_lands_in_adjustments_and_net_still_ties(): void
+    {
+        $company = Company::factory()->create();
+        app(CompanyContext::class)->set($company);
+        $accounts = $this->chart($company);
+
+        $this->otherReceiptToTax($accounts['bank'], $accounts['taxPayable'], 700, '2026-07-05');
+
+        $report = $this->build('2026-07-01', '2026-07-31');
+
+        // Not misfiled into any of the three named buckets...
+        $this->assertSame(0, $report['collected']);
+        $this->assertSame(0, $report['input']);
+        $this->assertSame(0, $report['remittances']);
+        // ...captured by the residual Adjustments line instead.
+        $this->assertSame(700, $report['adjustments']);
+        $this->assertSame(700, $report['net_tax_payable']);
+
+        // And the structural tie-out holds: net == 2100 period movement.
+        $movement = app(LedgerBalances::class)->movement(
+            CarbonImmutable::parse('2026-07-01'),
+            CarbonImmutable::parse('2026-07-31'),
+            [$accounts['taxPayable']->id],
+        );
+        $this->assertSame($report['net_tax_payable'], -($movement[$accounts['taxPayable']->id]['net'] ?? 0));
+        $this->assertLedgerBalances();
+    }
+
     // ---------------------------------------------------------------
     // Tie-out (§12.9-style gate): net == the whole 2100 account's period
     // movement, regardless of how many source types touched it.
@@ -522,6 +584,11 @@ class TaxSummaryReportTest extends TestCase
 
         $this->manualAdjustment($accounts['category'], $accounts['taxPayable'], 300, true, '2026-07-06');
 
+        // An other_receipt→2100 line in the same mix — a source_type outside
+        // the three named buckets — proving the tie-out holds structurally,
+        // not just because the KNOWN source types happen to be exhaustive.
+        $this->otherReceiptToTax($accounts['bank'], $accounts['taxPayable'], 450, '2026-07-07');
+
         // Void the expense mid-period too, so the tie-out is proven across a
         // mix of primary AND reversal entries, not just primaries.
         $this->voidEntry($expenseEntry, '2026-07-08');
@@ -530,6 +597,10 @@ class TaxSummaryReportTest extends TestCase
 
         $expectedNet = $report['collected'] - $report['input'] - $report['remittances'] + $report['adjustments'];
         $this->assertSame($expectedNet, $report['net_tax_payable']);
+
+        // The other_receipt + manual adjustment both live in Adjustments
+        // (neither collected/input/remittances), so it's non-zero here.
+        $this->assertNotSame(0, $report['adjustments']);
 
         $movement = app(LedgerBalances::class)->movement(
             CarbonImmutable::parse('2026-07-01'),
