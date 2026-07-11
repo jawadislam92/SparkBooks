@@ -8,21 +8,34 @@
 > service/controller/screen/table is added). It is committed to git. If it ever disagrees with
 > the code, the code wins — fix this file.
 >
-> Last updated: **end of Phase 5** (reports & dashboard: `LedgerBalances` (the one shared
-> per-account journal_lines aggregation every report reads through) + `ReportPeriod`
-> (fiscal-year math off `companies.fiscal_year_start_month`), Profit & Loss (income/expense +
-> monthly-comparison columns), Balance Sheet (assets/liab/equity, Retained-Earnings roll-up that
-> stays balanced across a fiscal-year boundary AND pre-books-start activity), one Aging engine for
-> both A/R and A/P (bucketed by the source document's own due date — the one deliberate
-> journal_lines-vs-document-total exception, §7.11), General Ledger (per-account
-> opening/lines/running-balance/closing — the drill-down target every other report links into),
-> Tax Summary (2100 split by each entry's source-type, never by debit/credit column, with a
-> structural residual "Adjustments" bucket), dashboard enrichment to spec §7.12 (outstanding/
-> overdue invoices via AgingReport, unpaid bills, a P&L snapshot, a 6-month income-vs-expense
-> Chart.js bar chart, a gated recent-activity feed) — built on branch `phase-5-reports`).
+> Last updated: **end of Phase 6 (FINAL) — v1 feature-complete** (bank reconciliation (§7.9,
+> `ReconciliationService` — NEVER writes the ledger, only marks `journal_lines` as cleared via
+> a `reconciliation_lines` pivot; `complete()` refuses unless the live difference is exactly 0;
+> `reopen()` is newest-first only, and `complete()` itself refuses an out-of-order statement date
+> — both keep the `opening_reconciled_balance` chain consistent), a read-only audit-log viewer
+> (§7.13, humanized via the shared `AuditHumanizer` so it can never drift from the dashboard's own
+> recent-activity widget, and never leaks a row's raw before/after JSON), list-screen CSV exports
+> + export-access logging across all 14 export endpoints (§11/§17.8, via the shared `CsvExport`
+> helper — auditing is baked into the same call that streams the response, so it can't be skipped
+> by omission), the Accountant Package one-click zip (§11 — General Ledger/Trial Balance/P&L/
+> Balance Sheet/A/R aging/A/P aging, each as a CSV + a PDF, 12 entries total, built entirely from
+> the existing Phase 5 report services with no new accounting math), the month-end close checklist
+> (§17.5, `MonthEndCloseService` — 7 steps computed live over existing machinery: reconcile /
+> aging-review / TB-review / drafts-sweep / integrity-check / period-lock / export, no new
+> accounting logic, only 2 of the 7 steps are stored state), scheduled backups + a rehearsed
+> restore procedure (§11 — 14-daily + 8-weekly retention via the pure `BackupRetentionPolicy`,
+> off-host S3 copy config-gated, `docs/RESTORE.md` documents an actual rehearsal run), and
+> monitoring/heartbeats (§17.9 — alert-the-moment-it-happens via email + optional Slack on backup
+> failure or `ledger:verify` findings, dead-man's-switch heartbeat pings for the backup/integrity/
+> queue-worker lifelines, both config-gated exactly like Sentry's DSN so monitoring ships inert by
+> default) — built on branch `phase-6-close-ops`. **This is the final phase — the app is now
+> feature-complete against the binding spec.** What's left is launch-track/deploy-config only, not
+> a missing feature (see §10).
 > Companion docs: the binding spec is [`superpowers/specs/2026-07-08-accounting-software-v1-design.md`](superpowers/specs/2026-07-08-accounting-software-v1-design.md);
-> phase plans live in [`superpowers/plans/`](superpowers/plans/); per-task build/review evidence
-> is in `.superpowers/sdd/` (git-ignored scratch — read `progress.md` there when resuming).
+> phase plans live in [`superpowers/plans/`](superpowers/plans/) (Phase 6's is
+> [`2026-07-11-phase-6-close-exports-ops.md`](superpowers/plans/2026-07-11-phase-6-close-exports-ops.md));
+> per-task build/review evidence is in `.superpowers/sdd/` (git-ignored scratch — read
+> `progress.md` there when resuming).
 
 ---
 
@@ -69,15 +82,31 @@ invoicing is being built into v1 (spec §17.1 Path 2 "FX-lite"), not deferred. S
 | **Profit & Loss + Balance Sheet** — both built on `LedgerBalances` (the one shared per-account journal_lines aggregation every Phase 5 report reads through, reproducing TrialBalanceReport's own inclusion rule exactly) and `ReportPeriod` (fiscal-year math off `companies.fiscal_year_start_month`). P&L: income/expense movement over a period + monthly-comparison columns, net = income − expenses. Balance Sheet: assets/liabilities/equity as-of a date; Retained Earnings = account 3200's posted balance + every COMPLETED fiscal year's net income, with its own Current-Year-Earnings line — the roll-up's lower bound is `min(books_start_date, earliest posted entry_date)` so it never drops pre-books-start activity and always balances (incl. across a fiscal-year boundary) | ✅ built | 5 |
 | **A/R & A/P Aging + General Ledger + Tax Summary** — ONE Aging engine (`AgingReport`, direction param) buckets each contact's outstanding balance (Current/1–30/31–60/61–90/90+) by ITS SOURCE DOCUMENT'S own due date — the one deliberate exception to "reports derive from journal_lines, never document totals" (§9), and only for the bucket date; amounts still tie to 1100/2000, incl. a date-gated opening-document contribution. General Ledger: per-account opening/lines/running-balance/closing — the drill-down target every other report links into; an optional contact filter narrows the listed lines but honestly hides the balance columns (they'd misrepresent a per-contact sub-ledger). Tax Summary: 2100 Tax Payable split collected (invoices) / input (expense·bill tax_total) / remittances (P12 category-2100 lines) / adjustments — classified by each entry's own `source_type`, NEVER by debit/credit column (a reversal swaps sides), adjustments computed as a structural RESIDUAL so the tie-out can't silently drift | ✅ built | 5 |
 | **Dashboard (spec §7.12)** — cash position + counts (Phase 2, unchanged) plus: outstanding/overdue invoices (money from `AgingReport`'s base-correct AR total, NOT `Invoice.balance`, which is doc-currency on an FX invoice), unpaid bills (`Bill.balance` summed directly — bills are base-currency-only), a current-fiscal-year-to-date P&L snapshot, a 6-month income-vs-expense Chart.js bar chart (the app's only Chart.js surface), and a recent-activity feed gated on `audit.view` (empty list, never 403, for anyone else) | ✅ built | 5 |
-| Reconciliation, month-end close, exports, backups | ⛔ not built | 6 |
+| **Bank reconciliation** (§7.9, diff-0 gate, reopen-newest-first, no ledger write, FX-reconciles-at-0) | ✅ built | 6 |
+| Audit-log viewer (§7.13, humanized action/subject, no-raw-JSON-leak) | ✅ built | 6 |
+| List-screen CSV exports + export access logging (§17.8, 14 endpoints, every one audit-logged) | ✅ built | 6 |
+| Accountant package — one-click zip (§11, 6 reports × CSV+PDF, 12 entries, zero new accounting math) | ✅ built | 6 |
+| Month-end close checklist (§17.5, 7-step checklist computed over existing machinery) | ✅ built | 6 |
+| Backups + rehearsed restore (§11, 14 daily + 8 weekly retention, off-host S3 config-gated, `docs/RESTORE.md`) | ✅ built | 6 |
+| Monitoring/heartbeats (§17.9, alert-on-findings/backup-failure via email+Slack, dead-man's-switch heartbeats) | ✅ built | 6 |
 
-Tests: **1057 PHP + 61 JS**, all green on real MySQL. No float on any money path (CI-enforced).
+Tests: **1192 PHP + 61 JS**, all green on real MySQL (verified via `php artisan test` +
+`npm run test:js` at Phase 6 exit). No float on any money path (CI-enforced).
 Every Phase 5 report carries a §12.9 tie-out test: P&L (net = income − expenses), Balance Sheet
 (always balances, incl. across a fiscal-year boundary and pre-books-start activity), A/R & A/P
 aging (ties to 1100/2000, incl. opening documents), Tax Summary (classified by source-type, never
 debit/credit column), Trial Balance (debits == credits) — every report reads `journal_lines` via
 `LedgerBalances`, with `AgingReport`'s own source-document join being the one deliberate exception
-(see §5).
+(see §5). Phase 6 adds its own tie-out coverage: reconciliation (difference-must-be-exactly-0,
+the reconciliation_lines unique-index double-reconcile guard, newest-first reopen, an FX invoice
+payment still reconciles to exactly 0 since P2fx posts actual-base-received to the bank ledger
+line), month-end close (each of the 7 steps computed against real system state — reconcile/aging/
+TB/drafts/integrity/lock/export — no double-counting), every export endpoint asserted to write its
+`AuditLogger` row (§17.8), and the accountant package's bundled report figures asserted to match
+each standalone report service's own output (debits==credits, balance sheet balances, net profit
+ties out) — not byte-for-byte against the standalone CSV endpoints, since the package renders its
+own CSVs into an in-memory zip rather than calling those controllers directly (see
+`AccountantPackageService`'s own class docblock).
 
 ---
 
@@ -434,6 +463,160 @@ everything touches them) so they're drawn once.
                               as a genuinely separate OS process by InvoicePaymentConcurrencyTest (Task 13)
                               to prove the overpayment guard under real cross-process row-lock contention
                               — see that test's class docblock for the full design.
+
+  ── Phase 6 (FINAL) write-side + read-side services: reconciliation, close, exports, ops ──
+
+    ReconciliationController ─▶ ReconciliationService ─┬─▶ IdempotencyService (complete/reopen only —
+                          (start preview,               │     start() is a plain read, no key needed)
+                          complete, reopen)              ├─▶ BankAccount (lockForUpdate on complete/reopen
+                                                         │     — serializes two concurrent completions/
+                                                         │     reopens against the same account)
+                                                         ├─▶ JournalLine (READ only — bank ledger lines,
+                                                         │     dated ≤ statement date, not already
+                                                         │     reconciled by a LIVE reconciliation)
+                                                         ├─▶ Reconciliation, ReconciliationLine (models;
+                                                         │     NO LedgerService call anywhere in this
+                                                         │     class — reconciliation only marks which
+                                                         │     lines cleared, never posts)
+                                                         └─▶ AuditLogger
+                              complete(): REFUSES (ReconciliationOutOfBalance) unless statement_ending_
+                              balance − (opening_reconciled_balance + Σ ticked lines) === 0 — nothing
+                              stored on failure; ALSO refuses (ReconciliationOutOfOrder) a statement dated
+                              on/before the account's latest completed reconciliation, since
+                              opening_reconciled_balance is carried from that reconciliation's own ending
+                              balance. reopen(): NEWEST-FIRST ONLY (ReconciliationNotNewest) — deletes the
+                              target's reconciliation_lines rows (the unlock) and flips status to
+                              'reopened'; ReconciliationAlreadyReopened guards a second reopen.
+                              ReconciliationLineIneligible covers all three per-line ticked-line guards
+                              (wrong account / dated after statement / already reconciled elsewhere).
+
+    MonthEndCloseController ─▶ MonthEndCloseService (spec §17.5) — PURE READ, no new accounting logic,
+                          (show, acknowledge,          computes 7 step statuses fresh every request:
+                          runIntegrityCheck, lock,        1. reconcile   ─▶ Reconciliation (every active
+                          complete)                            bank/cash account has a completed
+                                                                reconciliation on/after the month end)
+                                                        2-3. ar_ap_aging / trial_balance ─▶ MonthEndClose
+                                                                (the ONLY two steps that are stored state
+                                                                — a human "I reviewed this" acknowledge,
+                                                                no system signal exists for that)
+                                                        4. drafts      ─▶ Invoice/Bill/Expense (every
+                                                                UNPOSTED draft dated ≤ the month end;
+                                                                manual journals excluded — a draft manual
+                                                                journal is structurally impossible, see
+                                                                MonthEndCloseService::draftsStep's own
+                                                                docblock)
+                                                        5. integrity   ─▶ IntegrityRun (the SAME persisted
+                                                                row HealthController::show reads — a run
+                                                                from either screen updates both)
+                                                        6. lock        ─▶ Company.books_locked_through
+                                                                (the SAME column PeriodLockController
+                                                                reads/writes — movable, not one-way)
+                                                        7. export      ─▶ ActivityLog (best-effort: was an
+                                                                accountant_package.exported row logged for
+                                                                this exact month end — informational only,
+                                                                never gates completion)
+                              MonthEndCloseController::lock/runIntegrityCheck/complete each write through
+                              the SAME existing mechanism a standalone screen would (Company.
+                              books_locked_through, IntegrityChecker+IntegrityRun) rather than duplicating
+                              it — this controller is a guided SCREEN over Phase 0-5 machinery.
+
+    AuditLogController ─▶ ActivityLog (READ-ONLY — spec §7.13; adds NO new logging of its own) ─▶
+                          AuditHumanizer::action/subject/module (shared with DashboardController's own
+                          recent-activity widget — Phase 6 Task 2 extracted it FROM there, so the two
+                          screens can never disagree on what an action code means). Deliberately never
+                          serializes a row's before/after JSON to the client (that column can hold
+                          another user's full field values).
+
+    7 list controllers (BankAccount/Bill/Contact/Expense/Invoice/Item/ManualJournal)::exportCsv
+                          (Phase 6 Task 3, spec §11/§17.8) ─▶ CsvExport::stream ─┬─▶ AuditLogger
+                                                                                  (baked into the SAME
+                                                                                  call that builds the
+                                                                                  streamed response — an
+                                                                                  export can't be
+                                                                                  obtained without the
+                                                                                  audit row also being
+                                                                                  written)
+                                                                                 └─▶ Money::minorToDecimalString
+                              (each mirrors that Index page's own list scope; ManualJournal's is the
+                              only one with a genuine status+date-range filter, since a manual journal
+                              has no other natural single-value filter like invoice status)
+
+    AccountantPackageController ─▶ AccountantPackageService (spec §11) ─┬─▶ GeneralLedgerReport,
+                          (show, download)                              │   TrialBalanceReport,
+                                                                          │   ProfitAndLossReport,
+                                                                          │   BalanceSheetReport, AgingReport
+                                                                          │   (×2, receivables+payables) —
+                                                                          │   the SAME Phase 5 report
+                                                                          │   services every standalone
+                                                                          │   report/export already reads;
+                                                                          │   this class performs NO
+                                                                          │   accounting math of its own
+                                                                          ├─▶ barryvdh/laravel-dompdf
+                                                                          │   (renders resources/views/
+                                                                          │   pdf/reports/* — mirrors
+                                                                          │   InvoicePdf's own palette/
+                                                                          │   money-formatting convention)
+                                                                          ├─▶ ZipArchive (12-entry zip:
+                                                                          │   6 reports × CSV+PDF; every
+                                                                          │   failure path after tempnam()
+                                                                          │   unlinks the temp file —
+                                                                          │   "no temp-file leak on
+                                                                          │   success OR exception")
+                                                                          └─▶ AuditLogger
+                              (`accountant_package.exported`, after the zip is built, before it streams)
+
+    VerifyLedgerIntegrity (cmd) ─▶ [existing IntegrityChecker path, unchanged] ─┬─▶ Heartbeat::ping('integrity')
+                          Phase 6 Task 7 extended handle() to alert/ping AROUND│   (on a fully clean run)
+                          the existing check, never inside it:                └─▶ AlertNotifier::alert
+                                                                                    (on ANY finding, OR on
+                                                                                    the pre-existing
+                                                                                    zero-companies vacuous-
+                                                                                    check guard)
+
+    BackupDatabase (artisan sparkbooks:backup, spec §11) ─┬─▶ Process (mysqldump --result-file, no shell
+                          scheduled daily 02:00           │     redirection — portable Windows/Linux)
+                                                            ├─▶ ZipArchive (database.sql + a recursive copy
+                                                            │     of the private attachments disk +
+                                                            │     manifest.json into one timestamped
+                                                            │     artifact)
+                                                            ├─▶ Storage::disk('backups') (off-host S3 copy
+                                                            │     — config-gated on a bucket being set;
+                                                            │     Storage::disk() is never even called
+                                                            │     when it isn't, so an unconfigured backups
+                                                            │     disk can never throw)
+                                                            ├─▶ BackupRetentionPolicy::partition (pure fn —
+                                                            │     14 daily + 8 weekly, calendar-anchored,
+                                                            │     an undatable filename is never kept)
+                                                            ├─▶ SecretScrubber::scrub (redacts
+                                                            │     --password=/-p<secret> from every
+                                                            │     Process failure message before it reaches
+                                                            │     the console, logs, OR the alert body —
+                                                            │     closes a real cleartext-DB-password leak
+                                                            │     found in review, Task 7 follow-up)
+                                                            ├─▶ Heartbeat::ping('backup') (on success)
+                                                            └─▶ AlertNotifier::alert (on ANY failure branch
+                                                                — directory creation, mysqldump, archive
+                                                                build, or the off-host copy)
+
+    RestoreDatabase (artisan sparkbooks:restore) ─▶ Process (mysql client, SQL piped via stdin) — REQUIRES
+                          an explicit --database=<target>; NEVER guesses/defaults to the app's own
+                          configured database; demands an interactive confirmation (or --force) if the
+                          target happens to equal that configured database. Rehearsed once end-to-end
+                          against the dev DB + a disposable scratch DB (docs/RESTORE.md, evidence
+                          captured verbatim).
+
+    QueueHeartbeat (artisan sparkbooks:queue-heartbeat, scheduled daily 04:00) ─▶ QueueHeartbeatJob
+                          (dispatched onto the queue) ─▶ Heartbeat::ping('queue') — the ping fires ONLY
+                          from inside the job's own handle(), i.e. only once a REAL queue:work process
+                          pulls it off the queue; a dead/stalled worker leaves the job queued forever and
+                          the ping never fires, which is the entire point (proves worker liveness, not
+                          just "cron fired the command").
+
+    AlertNotifier ─▶ Mail::to(config('monitoring.alert_email'))->send(MonitoringAlertMail) (synchronous,
+                     deliberately NOT ShouldQueue — an alert about a broken system shouldn't wait behind a
+                     possibly-also-broken queue worker) + Http::post(config('monitoring.slack_webhook'))
+                     — either, both, or neither may be configured; neither configured still logs a
+                     warning so a real failure stays visible in application logs.
 ```
 
 ---
@@ -529,6 +712,26 @@ Console/Commands/
                               Bill for any pre-Task-7 opening payable that doesn't have one yet.
                               Idempotent, not scheduled; NEVER posts a second ledger entry (the AP
                               was already posted by the original opening_balance_run).
+  BackupDatabase.php          Phase 6 Task 6/7 (spec §11): `sparkbooks:backup` — dumps the DB
+                              (mysqldump --result-file) + a recursive copy of the private
+                              attachments disk into one timestamped zip, copies it off-host when
+                              the `backups` S3 disk is configured, prunes via
+                              BackupRetentionPolicy (14 daily + 8 weekly). Scheduled daily 02:00.
+                              Pings the `backup` heartbeat on success / alerts on any failure
+                              branch (Task 7); every Process failure message is scrubbed via
+                              SecretScrubber before it reaches logs/console/alert body.
+  RestoreDatabase.php          Phase 6 Task 6 (spec §11): `sparkbooks:restore <file>
+                              --database=<target>` — NEVER guesses a target (refuses without
+                              --database=); demands interactive confirmation (or --force) if the
+                              target equals the app's own configured database. Accepts a
+                              sparkbooks:backup .zip (extracts database.sql to a cleaned-up temp
+                              dir) or a raw .sql dump. Rehearsed once end-to-end — see
+                              docs/RESTORE.md.
+  QueueHeartbeat.php            Phase 6 Task 7 (spec §17.9): `sparkbooks:queue-heartbeat` —
+                              dispatches QueueHeartbeatJob onto the queue; scheduled daily 04:00.
+                              The command's own execution proves nothing about a worker being
+                              alive (cron fires regardless) — only the JOB's handle() actually
+                              pings, and only once a real queue:work process pulls it off.
 Domain/Ledger/
   EntryDraft.php              readonly DTO: date, memo, source, lines[], role, reversesEntryId.
   LineDraft.php               readonly DTO: accountId, debit, credit, memo, contactId.
@@ -586,6 +789,17 @@ Exceptions/
                               are business rules checked BEFORE LedgerService, not ledger posting-time
                               violations); caught as one type per family by ExpenseController/
                               BillController to surface a friendly 422.
+  Reconciliation/*.php          Phase 6 Task 1 (spec §7.9): the reconciliation guard hierarchy,
+                              base `ReconciliationException` deliberately NOT a LedgerException
+                              (this feature never calls LedgerService at all) —
+                              ReconciliationOutOfBalance (difference != 0 at complete()),
+                              ReconciliationLineIneligible (a ticked line fails one of its three
+                              eligibility checks), ReconciliationOutOfOrder (a statement dated
+                              on/before the account's latest completed reconciliation),
+                              ReconciliationNotNewest (reopening anything but the account's
+                              newest completed reconciliation), ReconciliationAlreadyReopened (a
+                              second reopen of the same reconciliation) — caught as one type by
+                              ReconciliationController to surface a friendly 422.
 Http/Controllers/
   DashboardController.php       /dashboard — cash position + customer/vendor/bank-account counts
                                 (Phase 2, unchanged) PLUS Phase 5 T7 (spec §7.12): outstanding &
@@ -597,11 +811,19 @@ Http/Controllers/
                                 reads through ProfitAndLossReport), and a recent-activity feed
                                 gated on audit.view (empty list, never 403, for anyone else). Every
                                 widget reads an EXISTING report service or a document model — no
-                                new ledger aggregation of its own; performs NO ledger writes.
+                                new ledger aggregation of its own; performs NO ledger writes. Phase
+                                6 Task 2: its own private humanizeAction/humanizeSubject helpers were
+                                EXTRACTED into the shared App\Support\AuditHumanizer so the new Audit
+                                log viewer reuses the exact same logic (this controller now just
+                                calls AuditHumanizer::action/subject) — no behavior change.
   OnboardingController.php     create company → CompanySetupService.
   CompanySwitchController.php  switch current company (audit-logged, tenant-checked → 404).
   AccountController.php         CoA index/show(drill-down)/store/update/archive/unarchive. Reads AccountBalances.
   ManualJournalController.php   journal list / new / store / reverse. → ManualJournalService.
+                                Phase 6 Task 3: gained exportCsv (list-screen CSV, spec §11/§17.8) —
+                                the one list export with a genuine status+entry_date-range filter
+                                (a manual journal has no other natural single-value filter);
+                                `journal_entries.exported` audit action via CsvExport.
   PeriodLockController.php      /settings/books view + set lock date.
   Reports/TrialBalanceController.php  trial balance view + CSV export (integer→decimal string);
                                 Phase 5 T1 extracted the money-formatting helper into
@@ -626,10 +848,20 @@ Http/Controllers/
   ProfileController.php, Auth/* Breeze auth + profile (Phase 0, restyled Phase 1).
   ContactController.php         Phase 2 T1: contacts index (type filter) /store/update/archive/
                                 unarchive/show(drill-down: outstanding balance from JournalLine).
+                                Phase 6 Task 3: gained exportCsv (list-screen CSV, spec §11/§17.8),
+                                registered BEFORE /contacts/{contact} (wildcard-ordering hazard,
+                                same reasoning as invoices.export) — `contacts.exported` audit
+                                action via CsvExport.
   TaxRateController.php         Phase 2 T3: tax rates CRUD. tax_rates.manage gate (pre-existed).
   ItemController.php            Phase 2 T2: items catalog CRUD + archive/unarchive. items.manage gate.
+                                Phase 6 Task 3: gained exportCsv (list-screen CSV, spec §11/§17.8) —
+                                no wildcard-ordering hazard (items has no dedicated show page);
+                                `items.exported` audit action via CsvExport.
   BankAccountController.php     Phase 2 T5: bank/cash account index/store/update/archive/unarchive.
-                                → BankAccountService for linked-CoA-account creation.
+                                → BankAccountService for linked-CoA-account creation. Phase 6 Task 3:
+                                gained exportCsv (list-screen CSV, spec §11/§17.8) — the closest
+                                existing "Banking" list screen (no separate bank-transactions index
+                                exists yet); `bank_accounts.exported` audit action via CsvExport.
   TransferController.php        Phase 2 T6: /transfers/new + store. → TransferService (P11).
   OtherReceiptController.php    Phase 2 T7: /other-receipts/new + store. → OtherReceiptService (P14).
   OpeningBalanceController.php  Phase 2 T8: /setup/opening-balances create/store (P8a-c, re-run).
@@ -640,19 +872,52 @@ Http/Controllers/
   InvoiceController.php          Phase 3: index/new/store/show/edit/update/destroy (draft only) +
                                 send/void/recordPayment/voidPayment/pdf/email/resendEmail. Every
                                 mutating action gated per its own `invoices.*` permission (draft vs.
-                                send vs. void are independently gated — §7.14).
+                                send vs. void are independently gated — §7.14). Phase 6 Task 3: gained
+                                exportCsv (list-screen CSV, spec §11/§17.8), registered BEFORE
+                                /invoices/{invoice} (wildcard-ordering hazard) and additionally gated
+                                `exports.run` (Staff holds invoices.draft but not exports.run) —
+                                `invoices.exported` audit action via CsvExport.
   ExpenseController.php          Phase 4 T2/T3/T6/T8/T9: index/new/store/show/edit/update/destroy
                                 (draft only) + record/void + storeAttachment/downloadAttachment/
                                 destroyAttachment (spec §17.8). Show (T9) is the canonical landing
                                 page for every status; Edit stays the draft-only editor. No type
-                                restriction on the payee contact (spec §7.8, unlike Bill).
+                                restriction on the payee contact (spec §7.8, unlike Bill). Phase 6
+                                Task 3: gained exportCsv (list-screen CSV, spec §11/§17.8) —
+                                `expenses.exported` audit action via CsvExport.
   BillController.php             Phase 4 T2/T4/T5/T6/T8/T9: index/new/store/show/edit/update/destroy
                                 (draft only) + receive/recordPayment/void/voidPayment +
                                 storeAttachment/downloadAttachment/destroyAttachment. contact_id is
                                 REQUIRED and must be a vendor/both (spec §7.8); `reference` carries
                                 the vendor's own bill number (no internal numbering). Show (T9) also
                                 renders the payments list + the opening-bill banner (relocated here
-                                from Edit).
+                                from Edit). Phase 6 Task 3: gained exportCsv (list-screen CSV, spec
+                                §11/§17.8) — `bills.exported` audit action via CsvExport.
+  ReconciliationController.php    Phase 6 Task 1 (spec §7.9): index (pick-a-bank-account landing) /
+                                show (history + a READ-only start() preview when a statement date +
+                                ending balance are given as query params) / complete / reopen. $bankAccount
+                                and $reconciliation are plain route params (SetCompanyContext ordering,
+                                §9 rule 7). ReconciliationException family caught to a friendly 422 on
+                                a generic `status` field (mirrors InvoiceController::recordPayment).
+  MonthEndCloseController.php     Phase 6 Task 5 (spec §17.5): show (renders MonthEndCloseService's 7
+                                step statuses) / acknowledge (the 2 manual-review steps) /
+                                runIntegrityCheck (same IntegrityRun persistence HealthController::run
+                                uses) / lock (same books_locked_through mechanism PeriodLockController
+                                uses, pinned to this checklist's month end) / complete (requires the
+                                period actually locked through the month end first). Gated entirely by
+                                `periods.lock` — no read-only viewer split, unlike PeriodLockController.
+  AuditLogController.php          Phase 6 Task 2 (spec §7.13): index — a READ-ONLY, paginated
+                                (50/page), filterable (user/module/date-range) view over
+                                `activity_log`. Adds NO new logging of its own. Humanizes via the
+                                shared AuditHumanizer; NEVER serializes a row's raw before/after JSON
+                                to the client. Gated `can:audit.view` (Owner/Accountant), same
+                                middleware pattern as HealthController.
+  Reports/AccountantPackageController.php   Phase 6 Task 4 (spec §11): show (period picker screen) /
+                                download (builds the zip via AccountantPackageService, audit-logs
+                                `accountant_package.exported`, streams via response()->download()
+                                ->deleteFileAfterSend(true); a try/catch around the audit call
+                                unlinks the temp file on a pre-stream failure too). Sits in the
+                                `reports.view` group; download additionally gated `exports.run`,
+                                same double-gate shape as every other report's own CSV export route.
 Http/Middleware/
   SetCompanyContext.php        resolves current company → CompanyContext; repairs stale/foreign id.
   RequireCompany.php           redirects users with no company to onboarding.
@@ -664,7 +929,9 @@ Http/Middleware/
                                 NAV_ABILITIES for the Invoices nav link; Phase 4 extended it again for
                                 expenses.draft/bills.draft (nav links), expenses.record/bills.receive
                                 and expenses.void/bills.void (the Expenses/Bills Edit and Show pages'
-                                action-bar gating).
+                                action-bar gating). Phase 6 extended it twice more:
+                                `reconciliation.manage` (the Reconciliation nav link + Show's Reopen
+                                action) and `exports.run` (every list screen's Export CSV button).
 Http/Requests/
   StoreCompanyRequest, StoreAccountRequest, UpdateAccountRequest, StoreManualJournalRequest,
   ProfileUpdateRequest, Auth/LoginRequest   — form validation.
@@ -690,6 +957,13 @@ Http/Requests/
                                 FormRequests above — per-line category-account eligibility
                                 (delegates to CategoryAccountGuard::guard) + tax-rate tenant/archived
                                 checks, each its own field-level error.
+  CompleteReconciliationRequest.php   Phase 6 Task 1 (spec §7.9): shape validation for
+                                ReconciliationController::complete — lifts X-Idempotency-Key into a
+                                virtual field (mirrors StoreTransferRequest/StorePaymentRequest);
+                                `ticked_journal_line_ids` is `present` not `required` (an explicit
+                                empty array is legal — a no-clearing-activity statement still
+                                reconciles to its opening balance). Authorization is the
+                                `can:reconciliation.manage` route middleware, not this class.
 Rules/
   AllowedAttachmentContent.php   Phase 4 T8 (spec §17.8): ValidationRule wrapping
                                 AttachmentContentSniffer — rejects a spoofed upload (e.g. a renamed
@@ -704,7 +978,8 @@ Models/
                                 journal_lines.contact_id now has a composite tenant FK →
                                 contacts(id, company_id) (Phase 2 T1; was non-null-only in Phase 1).
   ManualJournal.php            source document for a manual JE.
-  ActivityLog.php              append-only audit rows.
+  ActivityLog.php              append-only audit rows. Phase 6 Task 2 added a user() BelongsTo (the
+                                actor, nullable) so the Audit log viewer can eager-load names for display.
   IdempotencyKey.php           (company_id,key) unique; stores replay snapshot.
   IntegrityRun.php             persisted integrity-check result (clean? findings json).
   Contact.php                  Phase 2 T1: customer/vendor/both; name/email/phone/tax_number/
@@ -714,6 +989,7 @@ Models/
                                 default_tax_rate_id (both nullable, tenant+type validated); archivable.
   BankAccount.php               Phase 2 T5: bank|cash, currency (=base, enforced), linked Account
                                 (auto-created 10xx code); archivable (doesn't cascade-archive the CoA row).
+                                Phase 6 Task 1 added a reconciliations() HasMany.
   Transfer.php                  Phase 2 T6: source document for a P11 transfer (from/to BankAccount, amount).
   OtherReceipt.php               Phase 2 T7: source document for a P14 receipt (bank, category account, payer).
   OpeningBalanceRun.php         Phase 2 T8: one row per opening-balance setup/re-run; status active|void.
@@ -764,6 +1040,24 @@ Models/
                                 uploaded_by; morphTo attachable() (Expense|Bill). attachable_id/type
                                 deliberately absent from $fillable — set via the morph relation's
                                 setAttribute(), never mass-assigned.
+  Reconciliation.php                Phase 6 Task 1 (spec §7.9): one completed (or since-reopened)
+                                bank statement reconciliation — bank_account_id/statement_date/
+                                statement_ending_balance/opening_reconciled_balance (carried from
+                                the prior completed reconciliation's own ending balance, 0 for the
+                                first)/status ('completed'|'reopened')/completed_by/completed_at.
+                                lines() HasMany ReconciliationLine. NEVER writes a ledger entry —
+                                see ReconciliationService's own class docblock.
+  ReconciliationLine.php             Phase 6 Task 1: THE "reconciled" marker — a journal_line is
+                                reconciled iff a row exists here under a still-'completed'
+                                reconciliation. (company_id, journal_line_id) unique index enforces
+                                "a line can't be reconciled twice while live"; reopen() deletes a
+                                reconciliation's rows here, which is what unlocks its lines again.
+  MonthEndClose.php                  Phase 6 Task 5 (spec §17.5): one row per company per month-end
+                                date — holds ONLY what can't be derived from existing tables: the
+                                two manual-acknowledge timestamps (ar_ap_reviewed_at/
+                                trial_balance_reviewed_at) and completed_at/completed_by. The other
+                                4 of the 7 close steps are computed live by MonthEndCloseService and
+                                never stored here.
 Providers/AppServiceProvider.php  registers Gates from config/permissions.php; scoped bindings.
 Services/
   CompanySetupService.php      create company, attach Owner, seed defaults.
@@ -892,6 +1186,34 @@ Services/
                                 filename, private `local` disk), delete(), deleteAllFor() (draft-
                                 delete cascade — rows now, files after the caller's txn commits),
                                 download() (streams back the ORIGINAL filename). Every op audited.
+  ReconciliationService.php        Phase 6 Task 1 (spec §7.9): ⭐ bank reconciliation — writes NO
+                                ledger entries anywhere in this class. start() is a READ-only
+                                preview (unreconciled lines + opening_reconciled_balance). complete()
+                                REFUSES (ReconciliationOutOfBalance) unless the live difference is
+                                exactly 0, and REFUSES (ReconciliationOutOfOrder) a statement dated
+                                on/before the account's latest completed reconciliation — both guard
+                                the opening_reconciled_balance chain. reopen() is NEWEST-FIRST ONLY
+                                (ReconciliationNotNewest) for the same reason, and refuses a second
+                                reopen (ReconciliationAlreadyReopened). Shape mirrors
+                                InvoicePaymentService/TransferService: Idempotency → DB::transaction →
+                                lockForUpdate (bank account row on complete, + the reconciliation row
+                                too on reopen) → guards → mutation → AuditLogger.
+  MonthEndCloseService.php         Phase 6 Task 5 (spec §17.5): PURE READ, no new accounting logic —
+                                computes the 7-step close checklist's done/not-done status fresh
+                                every request over existing machinery (T1 reconciliations, draft
+                                documents, IntegrityChecker's persisted IntegrityRun, the period
+                                lock). Only steps() is public; the two manual-acknowledge steps read
+                                MonthEndClose, the other five are derived from real tables with no
+                                storage of their own.
+  AccountantPackageService.php      Phase 6 Task 4 (spec §11): ⭐ the one-click Accountant Package —
+                                General Ledger/Trial Balance/P&L/Balance Sheet/A/R aging/A/P aging
+                                for a chosen period, each as a CSV + a PDF (dompdf, mirrors
+                                InvoicePdf's own palette/money-formatting), zipped into 12 entries.
+                                Every figure comes from the SAME Phase 5 report services every
+                                standalone report/export already reads — this class performs NO
+                                accounting math of its own, only formats/bundles. Every failure
+                                branch after tempnam() unlinks the temp file before rethrowing — no
+                                temp-file leak on success OR exception.
 Support/
   CompanyContext.php           request-scoped current company; get() throws if unset.
   IdempotencyService.php       exactly-once execute() wrapper (baseline txn guard).
@@ -921,13 +1243,65 @@ Support/
                                 allowlist shared by both App\Rules\AllowedAttachmentContent (HTTP-
                                 path 422) and AttachmentService::store (caller-independent guard) so
                                 the two can never drift apart. MAX_BYTES = 10MB.
+  CsvExport.php                    Phase 6 Task 3 (spec §11/§17.8): shared streamed-CSV response
+                                builder for every list-screen export endpoint. `$audit` is a
+                                REQUIRED argument, logged BEFORE the streamed response is built — a
+                                caller cannot get a CsvExport::stream() response without an audit row
+                                also being written. The pre-existing Phase 5 report CSV exports
+                                predate this helper and log inline instead (unchanged, no regression
+                                risk); this is the completeness guarantee for every NEW export.
+  AuditHumanizer.php                Phase 6 Task 2: turns a raw activity_log `action` code + subject
+                                reference into human-readable strings — action() ('invoice.sent' ->
+                                "Invoice sent"), subject() (morph class + id -> "Bill Payment #7"),
+                                module() (the action prefix before the first dot, e.g. 'bill_payment'
+                                — feeds the Audit log viewer's own module filter). Extracted FROM
+                                DashboardController's recent-activity widget so both surfaces can
+                                never drift on what an action code means. Never touches before/after.
+  BackupRetentionPolicy.php         Phase 6 Task 6 (spec §11): pure fn — THE `sparkbooks:backup`
+                                retention rule, "14 daily + 8 weekly, prune the rest." No disk I/O,
+                                no clock reads of its own (filenames + "today" passed in) — fully
+                                testable with fabricated filenames. Daily tier is calendar-anchored
+                                (not a plain top-N cut, so a missed day can't pull an extra old
+                                backup into the fresh window); weekly tier keeps the single
+                                most-recent backup per ISO (year, week). An undatable filename is
+                                always marked for deletion, never silently kept.
+  Heartbeat.php                     Phase 6 Task 7 (spec §17.9): dead-man's-switch ping
+                                (healthchecks.io-style) — ping('backup'|'integrity'|'queue').
+                                Config-gated exactly like Sentry's DSN: a blank URL is a clean no-op.
+                                A network failure while pinging is swallowed (logged, never thrown)
+                                — the whole point of a dead-man's-switch is that the EXTERNAL service
+                                pages on silence, not on an exception here.
+  AlertNotifier.php                  Phase 6 Task 7 (spec §17.9): alert-the-moment-it-happens —
+                                email + optional Slack, both config-gated (unset = inert). Called by
+                                VerifyLedgerIntegrity (findings, or zero companies) and
+                                BackupDatabase (any failure) the instant the condition is detected.
+                                Neither channel configured still logs a warning so a real failure
+                                stays visible in logs; each channel's own send failure is caught and
+                                logged separately — a broken alert channel never throws back into the
+                                command reporting a real failure.
+  SecretScrubber.php                 Phase 6 Task 7 review fix: redacts `--password=<secret>`/
+                                `-p<secret>` from free text before it's logged or alerted. Closes a
+                                real leak — mysqldump's Process exception messages (timeout/
+                                start-failure) interpolate the FULL command line, password included;
+                                every BackupDatabase failure message is scrubbed through here before
+                                it reaches the console, logs, OR the alert body.
 Jobs/
   SendInvoiceEmail.php            Phase 3 T10: queued job — sets CompanyContext via runFor, sends
                                 InvoiceMail, records an EmailAttempt, updates Invoice.email_status.
                                 Dispatched AFTER the posting transaction commits (never inside it) —
                                 a mail failure can never roll back or touch the ledger.
+  QueueHeartbeatJob.php            Phase 6 Task 7 (spec §17.9): ⭐ dispatched by
+                                `sparkbooks:queue-heartbeat` (scheduled daily 04:00). The heartbeat
+                                ping fires ONLY from inside this job's own handle() — proves a real
+                                queue:work process is alive, unlike the scheduled command's own
+                                execution (cron fires regardless of any worker existing). A dead
+                                worker means this job sits queued forever and the ping never fires.
 Mail/
   InvoiceMail.php                  Phase 3 T10: Mailable — renders InvoicePdf as an attachment.
+  MonitoringAlertMail.php           Phase 6 Task 7 (spec §17.9): the monitoring alert email, sent by
+                                AlertNotifier the instant a backup fails or ledger:verify finds
+                                anything. Deliberately NOT ShouldQueue — an alert about a broken
+                                system shouldn't wait behind a possibly-also-broken queue worker.
 ```
 
 ### Frontend — `resources/js/`
@@ -966,6 +1340,13 @@ Components/ui/                  Button, Sheet, Field, MoneyText, StatTile — de
                                 override (e.g. a P&L loss shown in text-clay) wins deterministically
                                 regardless of Tailwind's own stylesheet ordering. MoneyText.test.ts
                                 (Phase 5 T2) is this component's first direct test.
+                                ExportCsvLink.tsx (Phase 6 Task 3, spec §11/§17.8): a plain `<a>` (not
+                                an Inertia Link, so the browser navigates natively and streams the
+                                CSV download) — factored out of Reports/TrialBalance.tsx's own inline
+                                link since every list Index.tsx (Invoices/Bills/Expenses/Contacts/
+                                Items/Banking/Journal) needs the identical button. Callers gate
+                                rendering on `can['exports.run']` themselves; the component always
+                                renders once mounted.
 Components/dashboard/           Phase 5 T7 (spec §7.12): the Dashboard's own widget components.
   DocumentSummaryCard.tsx         shared shape for "Outstanding & overdue invoices" / "Unpaid
                                 bills" — same card, different noun/figures; the overdue subset only
@@ -1029,6 +1410,10 @@ Layouts/
                                 with Profit & loss / Balance sheet / A/R aging / A/P aging / General
                                 ledger / Tax summary, all gated the pre-existing `reports.view`
                                 ability (no NAV_ABILITIES change needed — it already covered this).
+                                Phase 6 added: "Reconciliation" + "Month-end close" to the Banking
+                                group (gated reconciliation.manage/periods.lock), "Accountant
+                                package" to Reports (gated reports.view), and "Audit log" to Settings
+                                (gated audit.view) — 3 new nav links.
   GuestLayout.tsx              centered card for auth pages. AuthenticatedLayout.tsx = Breeze leftover (unused).
 Pages/
   Dashboard.tsx                cash position + customer/vendor/bank-account StatTile cards (Phase 2
@@ -1040,7 +1425,9 @@ Pages/
                                 without audit.view).
   Onboarding/CreateCompany.tsx company setup form.
   Accounts/Index.tsx, Show.tsx chart of accounts + account ledger drill-down.
-  Journal/New.tsx, Index.tsx   ⭐ manual JE editor (BalanceBeam home) + journal list.
+  Journal/New.tsx, Index.tsx   ⭐ manual JE editor (BalanceBeam home) + journal list. Phase 6 Task 3:
+                                Index.tsx gained an ExportCsvLink (status + entry-date-range filter,
+                                gated exports.run).
   Reports/TrialBalance.tsx     trial balance report + CSV export button.
   Reports/ProfitAndLoss.tsx     Phase 5 T2: income statement — period picker (defaults to current
                                 fiscal YTD), monthly comparison columns, CSV export, print.
@@ -1059,14 +1446,40 @@ Pages/
                                 export, print.
   Reports/TaxSummary.tsx         Phase 5 T6: period picker, collected/input/remittances/adjustments
                                 breakdown + net tax payable, CSV export, print.
+  Reports/AccountantPackage.tsx  Phase 6 Task 4 (spec §11): the one-click Accountant Package screen —
+                                a from/to period picker (mirrors Reports/ProfitAndLoss.tsx's own),
+                                lists the 6 bundled reports, a single Download button (gated
+                                `canExport`/`exports.run`) that hits
+                                /reports/accountant-package/download.
+  Reconciliation/Index.tsx       Phase 6 Task 1 (spec §7.9): pick-a-bank-account landing page —
+                                mirrors Banking/Index's account list, links into Reconciliation/Show
+                                per account.
+  Reconciliation/Show.tsx        Phase 6 Task 1: ⭐ the reconciliation workspace — statement date +
+                                ending balance form, unreconciled-lines tick list with a LIVE
+                                difference readout, Finish enabled ONLY at difference 0, a completed/
+                                reopened history list with a Reopen action (newest-completed only).
+                                Accountant screen — debit/credit words allowed.
+  Close/Index.tsx                 Phase 6 Task 5 (spec §17.5): the month-end close checklist screen —
+                                renders MonthEndCloseService's 7 step statuses (reconcile/aging-
+                                review/TB-review/drafts-sweep/integrity/lock/export), each with its
+                                own action (acknowledge/run check/lock/link to the accountant
+                                package), plus a final "Complete close" action once the period is
+                                locked through the month end.
+  Audit/Index.tsx                  Phase 6 Task 2 (spec §7.13): the read-only audit-log viewer —
+                                paginated (50/page) table (timestamp/user/humanized action/subject/
+                                IP), filters by user/module/date-range. Never renders a row's raw
+                                before/after JSON.
   Settings/Books.tsx, Health.tsx  period lock + integrity health.
   Settings/TaxRates.tsx         Phase 2 T3: tax rates CRUD screen.
   Contacts/Index.tsx            Phase 2 T1: contacts list, type filter (All/Customers/Vendors),
-                                show-archived toggle, "New contact" modal.
+                                show-archived toggle, "New contact" modal. Phase 6 Task 3 gained an
+                                ExportCsvLink (gated exports.run).
   Contacts/Show.tsx             Phase 2 T1: contact drill-down — outstanding balance + activity feed.
-  Items/Index.tsx                Phase 2 T2: items catalog CRUD screen.
+  Items/Index.tsx                Phase 2 T2: items catalog CRUD screen. Phase 6 Task 3 gained an
+                                ExportCsvLink (gated exports.run).
   Banking/Index.tsx             Phase 2 T5: bank/cash accounts list + "Record receipt"/"Transfer"/
-                                "New account" actions, per-account balance.
+                                "New account" actions, per-account balance. Phase 6 Task 3 gained an
+                                ExportCsvLink (gated exports.run).
   Banking/Transfer.tsx           Phase 2 T6: transfer-between-accounts form.
   Banking/OtherReceipt.tsx       Phase 2 T7: record-a-receipt form (bank, category, amount, payer).
   Setup/OpeningBalances.tsx     Phase 2 T8-T9: ⭐ the opening-balances wizard — books start date,
@@ -1074,7 +1487,8 @@ Pages/
                                 add-row, CSV template download, CSV upload), live OBE-plug summary,
                                 re-run ("Re-enter opening balances") after a successful run.
   Invoices/Index.tsx             Phase 3 T11: invoice list, status filter (Draft/Sent/Partially
-                                paid/Paid/Void), "New invoice".
+                                paid/Paid/Void), "New invoice". Phase 6 Task 3 gained an
+                                ExportCsvLink (gated exports.run).
   Invoices/Edit.tsx               draft editor — customer/currency/dates + InvoiceLineEditor +
                                 Save draft/Send invoice (FX rate prompt on send if foreign currency).
   Invoices/Show.tsx               ⭐ the invoice detail screen — status, dual-currency total/balance
@@ -1083,6 +1497,7 @@ Pages/
                                 Download PDF/Send email(+Resend)/email status, all idempotency-keyed.
   Expenses/Index.tsx              Phase 4 T9: expense list, status filter (Draft/Recorded/Void),
                                 search (payee/notes), "categories" summary column (summarizeList).
+                                Phase 6 Task 3 gained an ExportCsvLink (gated exports.run).
   Expenses/Edit.tsx                the draft editor — payee/date/bank account + DocumentLineEditor +
                                 AttachmentSection + Save draft; Record moved to Show this task.
   Expenses/Show.tsx                ⭐ the canonical detail page for every status — line items,
@@ -1090,7 +1505,8 @@ Pages/
                                 all idempotency-keyed. Mirrors Invoices/Show's shape.
   Bills/Index.tsx                  Phase 4 T9: bill list, status filter incl. a synthetic "Overdue"
                                 chip (isBillOverdue), row highlight on an overdue bill, "categories"
-                                summary column, search (vendor/reference/notes).
+                                summary column, search (vendor/reference/notes). Phase 6 Task 3
+                                gained an ExportCsvLink (gated exports.run).
   Bills/Edit.tsx                   the draft editor — vendor/reference/dates + DocumentLineEditor +
                                 AttachmentSection + Save draft; Receive/payments moved to Show.
   Bills/Show.tsx                   ⭐ the canonical detail page for every status — line items,
@@ -1111,6 +1527,18 @@ pdf/invoice.blade.php           rendered by InvoicePdf via barryvdh/laravel-domp
 emails/invoice.blade.php        rendered by InvoiceMail; dev mail driver is `log` (MAIL_MAILER),
                                 so a sent email is inspected via storage/logs/laravel.log, not a
                                 real inbox.
+pdf/reports/layout.blade.php    Phase 6 Task 4 (spec §11): shared inline-CSS layout every
+                                Accountant Package PDF extends — mirrors invoice.blade.php's own
+                                header/palette so a report PDF and the invoice PDF read as one
+                                product family. dompdf renders inline CSS only, never Tailwind.
+pdf/reports/{aging,balance-sheet,general-ledger,profit-and-loss,trial-balance}.blade.php
+                                Phase 6 Task 4: one view per Accountant Package report — each takes
+                                the SAME data array its own Reports/*Controller::show already
+                                builds (no separate PDF-only data shaping), rendered via
+                                AccountantPackageService::renderPdf (Pdf::loadView(...)->setPaper('a4')).
+emails/monitoring-alert.blade.php   Phase 6 Task 7 (spec §17.9): rendered by MonitoringAlertMail —
+                                a plain subject/body layout, the alert's own free-text body already
+                                scrubbed of secrets (SecretScrubber) before it ever reaches this view.
 ```
 
 ### Data — `database/migrations/` (in apply order)
@@ -1133,6 +1561,13 @@ emails/invoice.blade.php        rendered by InvoiceMail; dev mail driver is `log
 2026_07_10_000005 bill_payments (no base_amount/fx_rate — base-currency only)                        (Phase 4 T1)
 2026_07_10_000006 attachments (polymorphic attachable, private disk path, uuid filename)              (Phase 4 T8)
 2026_07_10_000007 add_bill_id_to_opening_documents (Phase 4 T7, nullable, nullOnDelete — AP mirror of invoice_id) (Phase 4 T7)
+2026_07_11_000000 reconciliations (bank_account_id FK, statement_date, statement_ending_balance/
+                    opening_reconciled_balance BIGINT signed, status, completed_by/at)             (Phase 6 T1)
+2026_07_11_000001 reconciliation_lines (reconciliation_id cascade, journal_line_id FK restrict,
+                    amount BIGINT; UNIQUE (company_id, journal_line_id) — THE reconciled marker)   (Phase 6 T1)
+2026_07_11_000002 month_end_closes (UNIQUE (company_id, month_end); ar_ap_reviewed_at/
+                    trial_balance_reviewed_at/completed_at/completed_by — only the 2 manual-
+                    acknowledge steps + the completion marker; every other close step is derived)  (Phase 6 T5)
 ```
 
 ### Data — `database/factories/`
@@ -1142,7 +1577,8 @@ Existing factories (Company/User/Account/ManualJournal/Contact/TaxRate/Item/Bank
 OpeningBalanceRun/OpeningDocument/Invoice/InvoiceLine/InvoicePayment) unchanged. Phase 4 T1/T8 added
 their AP-side siblings, same shape as InvoiceFactory/InvoiceLineFactory/InvoicePaymentFactory:
 ExpenseFactory, ExpenseLineFactory, BillFactory, BillLineFactory, BillPaymentFactory,
-AttachmentFactory.
+AttachmentFactory. Phase 6 T1/T5 added ReconciliationFactory, ReconciliationLineFactory,
+MonthEndCloseFactory (same BelongsToCompany-aware shape as every factory above).
 ```
 
 ### Config / routes
@@ -1154,7 +1590,12 @@ config/permissions.php   the §7.14 catalog + per-role permission lists (the aut
                           actually wire routes/gates to them — no config change needed. Same story
                           for expenses.draft/record/void and bills.draft/receive/void: already in the
                           Phase 0 catalog, Phase 4 is the first phase to wire routes/gates to them —
-                          no config change needed here either.
+                          no config change needed here either. Phase 6 is a THIRD instance of the same
+                          pattern: `reconciliation.manage`, `exports.run`, `audit.view` were all
+                          already in the Phase 0 catalog (audit.view pre-existing since HealthController;
+                          reconciliation.manage/exports.run built ahead of need) — Phase 6 is simply
+                          the first phase to wire routes/UI to reconciliation.manage/exports.run. No
+                          config/permissions.php change was needed for any of Phase 6.
 routes/web.php           all in-app routes, each gated (see the gate on each group). Phase 3 added the
                           /invoices/* group, split into invoices.draft / invoices.send / payments.record /
                           invoices.void gate groups (each narrower than invoices.draft). Phase 4 added
@@ -1168,8 +1609,41 @@ routes/web.php           all in-app routes, each gated (see the gate on each gro
                           general-ledger, tax-summary (trial-balance already existed) — the whole
                           group sits behind one `can:reports.view` route-group middleware, with every
                           `/export.csv` sibling additionally gated `can:exports.run` (stricter: view
-                          AND export).
-routes/auth.php          Breeze auth routes. routes/console.php  the ledger:verify schedule.
+                          AND export). Phase 6 added: a `can:reconciliation.manage` group for
+                          /reconciliations/* (index/show/complete/reopen); a `can:periods.lock` group
+                          for /close/* (show/acknowledge/integrity-check/lock/complete); `/reports/
+                          accountant-package` (+ /download, additionally gated exports.run) inside the
+                          existing reports.view group; `/settings/audit-log` inside the existing
+                          audit.view group; and 7 new `/*/export.csv` routes (journal-entries,
+                          contacts, invoices, expenses, bills, items, bank-accounts), each additionally
+                          gated can:exports.run and — for invoices/expenses/bills/contacts — registered
+                          BEFORE that resource's own `/{id}` wildcard route (same ordering hazard every
+                          earlier `/edit`-before-`/{id}` comment in this file already documents).
+routes/auth.php          Breeze auth routes.
+routes/console.php       the ledger:verify schedule (unchanged, daily 03:00) PLUS Phase 6: a daily
+                          02:00 `sparkbooks:backup` (withoutOverlapping — runs BEFORE ledger:verify so
+                          a bad night's data is still backed up before the watchdog catches it) and a
+                          daily 04:00 `sparkbooks:queue-heartbeat`. The backup/integrity heartbeat
+                          pings themselves are NOT scheduled separately — they fire from inside
+                          BackupDatabase/VerifyLedgerIntegrity's own handle() on success.
+config/backup.php         Phase 6 T6/T7 (spec §11): mysqldump/mysql binary paths, `local_path`
+                          (default storage/app/backups), `offhost_disk` name, retention.daily/weekly
+                          (defaults 14/8) — every value env-gated, same Sentry-DSN "inert until
+                          configured" pattern.
+config/monitoring.php     Phase 6 T7 (spec §17.9): heartbeat URLs (backup/integrity/queue) +
+                          alert_email + slack_webhook — every value defaults to null; Heartbeat/
+                          AlertNotifier both no-op cleanly whenever the relevant value is unset.
+config/filesystems.php    Phase 6 T6 added the `backups` disk — an S3-compatible off-host target for
+                          sparkbooks:backup, config-gated on `bucket` being set (falls back to the
+                          app's own AWS_* vars, with its own BACKUP_S3_* overrides for a
+                          separate backups-only account).
+composer.json             Phase 6 T6: added league/flysystem-aws-s3-v3 ^3.35 (the `backups` S3 disk's
+                          driver package).
+.env.example              Phase 6 T6/T7: added the backup (BACKUP_MYSQLDUMP_PATH/BACKUP_MYSQL_PATH/
+                          BACKUP_S3_*/BACKUP_RETENTION_*) and monitoring (BACKUP_HEARTBEAT_URL/
+                          INTEGRITY_HEARTBEAT_URL/QUEUE_HEARTBEAT_URL/MONITORING_ALERT_EMAIL/
+                          MONITORING_SLACK_WEBHOOK) env keys, all blank by default — same
+                          wired-but-inert pattern as the pre-existing SENTRY_LARAVEL_DSN line.
 package.json              Phase 5 T2: added chart.js ^4.5.1 (bundled npm dep) — the Dashboard's
                           income-vs-expense chart is the app's only Chart.js surface.
 vitest.config.ts          Phase 5 T2: added the `@` → resources/js/* alias (mirrors tsconfig) so a
@@ -1223,7 +1697,10 @@ types (Task 11).
   (left intentionally in Task 11 — protects `HealthController::run`'s self-containment).
 - Document the Owner/Accountant-vs-Admin ability split (Admin lacks ledger.post_manual/periods.lock/audit.view).
 - CoA drill-down loads an account's whole line history in memory — fine at current volume, revisit before bulk import.
-- Bulk query-builder ops bypass model immutability guards — Phase 6 DB-trigger hardening candidate.
+- Bulk query-builder ops bypass model immutability guards — flagged since Phase 1 as a "DB-trigger
+  hardening candidate"; Phase 6 (the final phase) did not add one. No future phase remains to pick
+  this up automatically — carry it as a genuine post-v1 hardening item if this project resumes work
+  after launch.
 - Minor polish list (amber stock-shade purge, focus-glow token, store/update spoofed-field asymmetry,
   a few missing UI regression tests) tracked in `.superpowers/sdd/progress.md`.
 
@@ -1346,10 +1823,71 @@ types (Task 11).
 - No dark mode anywhere in the app, Phase 5 included — `IncomeExpenseChart.tsx`'s Chart.js colors
   are hardcoded light-mode token hex values (a `<canvas>` can't resolve Tailwind classes/CSS custom
   properties), so a future dark-mode pass would need to re-render the chart, not just re-theme CSS.
-- Phase 6 (reconciliation, month-end close, exports, backups) has three natural hooks already built
-  this phase: `ReportPeriod`'s fiscal-year math is the obvious place a "lock the fiscal year" /
-  period-close feature would anchor; `BalanceSheetReport`'s Retained-Earnings roll-up is exactly the
-  computation a formal year-end close would need to make durable (today it's recomputed live, on
-  every request); and every Phase 5 report's CSV export already goes through the same
-  `Money::minorToDecimalString` helper, so a Phase 6 "bulk export" feature has one money-rendering
-  convention to reuse rather than five to reconcile.
+- ~~Phase 6 (reconciliation, month-end close, exports, backups) has three natural hooks already
+  built this phase~~ — **Phase 6 built two of the three exactly as anticipated, the third
+  differently on purpose**: `ReportPeriod`'s fiscal-year math IS the anchor both
+  `MonthEndCloseController::exportRange` and `AccountantPackageController::resolveRange` use for
+  their own default period; every Phase 6 export (`CsvExport`, `AccountantPackageService`) DOES
+  reuse the same `Money::minorToDecimalString` convention, so there's still only one money-rendering
+  helper to reconcile, not several. The Retained-Earnings-durability idea did NOT materialize as
+  forecast, deliberately: month-end close (`MonthEndCloseService`) is a live-computed 7-step
+  CHECKLIST layered over existing machinery (spec §17.5's own framing), not a persistence layer over
+  `BalanceSheetReport`'s roll-up — Retained Earnings is still recomputed live on every request,
+  unchanged since Phase 5. The close's own "irreversible-ish" act is still just moving
+  `Company.books_locked_through` (unchanged since Phase 1's `LedgerService` enforcement), not a new
+  frozen-figures table.
+
+**New from Phase 6 (FINAL) — v1 COMPLETE. Everything below is launch-track / deploy-time
+configuration, not a missing feature — see the spec's own §14 pre-trial checklist / §17
+launch-track list for the authoritative source:**
+- **LIVE BROWSER DRIVE is STILL PENDING** — now carried across three phases (4, 5, 6) without ever
+  being closed: interactive browser tooling status this phase is unverified from this doc-update
+  pass (this update was a documentation task, not a build/verify task). Phase 6 was verified via the
+  full test suite (1192 PHP + 61 JS, confirmed green by re-running both suites for this update) +
+  the existing `ledger:verify`/`HealthController` machinery + the rehearsed `docs/RESTORE.md`
+  procedure (a REAL end-to-end restore, the closest thing to a live-system proof any phase has run)
+  — but a genuine human-style click-through of reconciliation (tick lines, watch the difference
+  converge, Finish enabling at 0, reopen newest-only), the month-end close checklist's own UI flow,
+  the audit-log viewer's filters, and the accountant-package download was never independently
+  confirmed live in a browser. **Do this before the real pre-trial walkthrough** — it is the one
+  standing exit-criterion item not independently proven live since Phase 3.
+- **2FA** (spec §17.8 explicitly defers it to the launch track) — not built; still single-factor auth
+  (Breeze) for every role including Owner.
+- **Custom roles / permission editing** — the 4 fixed roles (Owner/Admin/Accountant/Staff) and their
+  `config/permissions.php` matrix are still hard-coded; there is no UI or mechanism to define a new
+  role or hand-edit an existing one's ability list.
+- **Real accountant Gate B review** — the ARTIFACTS a real accountant would need now exist end-to-end
+  (Accountant Package one-click zip, audit-log viewer, every Phase 5 report + CSV export, the
+  month-end close checklist) — what hasn't happened is an actual external accountant sitting down
+  with them and signing off. This is a human/process step the codebase can't close by itself.
+- **Hosting decision** — not yet made; nothing in this codebase assumes a specific host, but the
+  DEPLOY-CONFIG items immediately below are all host-dependent and can't be finalized without one.
+- **DEPLOY-CONFIG checklist** (environment/ops setup, not code — everything below is already wired
+  to a config-gated env var that defaults to inert, same Sentry-DSN pattern used everywhere else in
+  this app):
+  - Production PHP needs the **`zip` extension (ZipArchive)** enabled — both
+    `AccountantPackageService::build` and `BackupDatabase::buildArchive` require it; this dev
+    environment already has it (both `AccountantPackageTest` and `BackupTest` pass here), but a
+    fresh production PHP install may not.
+  - Set the **`BACKUP_S3_*` env vars** (`BACKUP_S3_BUCKET`/`_ACCESS_KEY_ID`/`_SECRET_ACCESS_KEY`/
+    `_REGION`/`_ENDPOINT`) so `sparkbooks:backup`'s off-host copy actually runs — today it's
+    local-artifact-only (the `backups` disk skips cleanly with no bucket set, see
+    `BackupDatabase::copyOffHost`).
+  - Create real **healthchecks.io (or equivalent) heartbeat URLs** and set `BACKUP_HEARTBEAT_URL` /
+    `INTEGRITY_HEARTBEAT_URL` / `QUEUE_HEARTBEAT_URL` — with none set, `Heartbeat::ping` is a
+    permanent no-op and the dead-man's-switch protects nothing yet.
+  - Set **`MONITORING_ALERT_EMAIL`** and/or **`MONITORING_SLACK_WEBHOOK`** — with neither set,
+    `AlertNotifier::alert` only ever logs a warning; a real backup failure or `ledger:verify`
+    finding would currently be silent in production unless someone is tailing logs.
+  - On a shared host, prefer passing the mysqldump/mysql password via the **`MYSQL_PWD` environment
+    variable** rather than `BackupDatabase`/`RestoreDatabase`'s current `--password=<secret>` CLI
+    argument — `SecretScrubber` redacts the password from LOG/ALERT text, but the live OS process
+    table (`ps`/task manager) still briefly shows the full command line with the CLI-arg approach,
+    which `MYSQL_PWD` avoids entirely. Not fixed in code this phase — a deploy-time invocation
+    choice, since `config/backup.php`'s `mysqldump_path`/`mysql_path` are the only pieces wired to
+    override the binary, not its argv shape.
+  - Add **`--no-tablespaces`** to `BackupDatabase::dumpDatabase`'s mysqldump argv if the production
+    DB user lacks the `PROCESS` privilege (common on restricted shared-hosting MySQL accounts) —
+    without it, mysqldump can fail outright trying to read tablespace metadata it has no permission
+    to see. Not needed against this dev environment's root account; flag before pointing
+    `sparkbooks:backup` at a locked-down production DB user.
