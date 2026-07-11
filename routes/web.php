@@ -19,6 +19,7 @@ use App\Http\Controllers\OtherReceiptController;
 use App\Http\Controllers\PeriodLockController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\ReconciliationController;
+use App\Http\Controllers\Reports\AccountantPackageController;
 use App\Http\Controllers\Reports\ApAgingController;
 use App\Http\Controllers\Reports\ArAgingController;
 use App\Http\Controllers\Reports\BalanceSheetController;
@@ -114,6 +115,16 @@ Route::middleware(['auth', 'verified', 'company', 'can:reports.view'])->group(fu
     Route::get('/reports/tax-summary/export.csv', [TaxSummaryController::class, 'exportCsv'])
         ->middleware('can:exports.run')
         ->name('reports.tax-summary.export');
+
+    // Phase 6 Task 4 (spec §11): the Accountant Package — "one-click ... This
+    // is also the escape hatch" — General Ledger, Trial Balance, P&L, Balance
+    // Sheet, A/R aging, A/P aging for a chosen period, bundled as a single
+    // zip. The download is additionally gated exports.run, same double-gate
+    // shape as every /reports/*/export.csv route above.
+    Route::get('/reports/accountant-package', [AccountantPackageController::class, 'show'])->name('reports.accountant-package');
+    Route::get('/reports/accountant-package/download', [AccountantPackageController::class, 'download'])
+        ->middleware('can:exports.run')
+        ->name('reports.accountant-package.download');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:audit.view'])->group(function () {
