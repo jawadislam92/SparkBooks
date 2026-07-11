@@ -2,6 +2,10 @@
 
 namespace Tests\Feature;
 
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Process;
+use Symfony\Component\Process\Exception\ProcessTimedOutException;
+use Symfony\Component\Process\Process as SymfonyProcess;
 use Tests\TestCase;
 
 /**
@@ -51,6 +55,52 @@ class BackupRestoreTest extends TestCase
                 'no',
             )
             ->assertFailed();
+
+        @unlink($sqlFile);
+    }
+
+    /**
+     * Whole-branch review finding: the mysql restore argv carries
+     * --password=<live DB password>, and Symfony's ProcessTimedOutException /
+     * ProcessStartFailedException interpolate the full command line into their
+     * message. A restore that times out (600s) would otherwise write the
+     * cleartext password into the application log — the exact leak class Task 7
+     * fixed for BackupDatabase but originally missed on its RestoreDatabase
+     * sibling. This proves the SecretScrubber is now applied on the restore
+     * side too. (Stubbing the scrubber to a no-op makes this fail with the
+     * password present — verified while writing the fix.)
+     */
+    public function test_restore_failure_never_writes_the_db_password_to_the_console_or_log(): void
+    {
+        Log::spy();
+        config([
+            'database.connections.'.config('database.default').'.password' => 'SECRETpw',
+        ]);
+
+        // A raw .sql file so the command skips the zip path and reaches the
+        // mysql Process call directly.
+        $sqlFile = tempnam(sys_get_temp_dir(), 'restore-scrub-test-').'.sql';
+        file_put_contents($sqlFile, "-- restore payload\n");
+
+        Process::fake([
+            '*' => function () {
+                $sp = new SymfonyProcess(['mysql', '--host=127.0.0.1', '--password=SECRETpw', 'sparkbooks_restore_test_scratch']);
+
+                return new ProcessTimedOutException($sp, ProcessTimedOutException::TYPE_GENERAL);
+            },
+        ]);
+
+        $this->artisan('sparkbooks:restore', [
+            'file' => $sqlFile,
+            '--database' => 'sparkbooks_restore_test_scratch',
+        ])
+            ->doesntExpectOutputToContain('SECRETpw')
+            ->assertFailed();
+
+        // The password reached neither the log message nor its context.
+        Log::shouldHaveReceived('error')->withArgs(function ($message, $context = []) {
+            return ! str_contains($message.' '.json_encode($context), 'SECRETpw');
+        })->atLeast()->once();
 
         @unlink($sqlFile);
     }

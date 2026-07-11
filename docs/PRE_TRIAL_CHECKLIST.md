@@ -16,7 +16,7 @@ _Last updated: end of Phase 6 (2026-07-11)._
 ## Multi-tenancy, permissions, audit
 - ✅ Strict company isolation (`BelongsToCompany` + `CompanyContext`; missing context throws).
 - ✅ §7.14 permission matrix enforced (asserted by tests); Staff cannot post to the ledger.
-- ✅ Append-only audit log capturing every mutating action; **and exports (§17.8)** — all 14 export endpoints write an `*.exported` row (anti-exfiltration trail); audit-log viewer (filter by user/module/date), no raw before/after leak.
+- ✅ Append-only audit log capturing every mutating action; **and exports (§17.8)** — all 15 export endpoints (7 list CSVs + 7 report CSVs + the accountant package) write an `*.exported` row (anti-exfiltration trail); audit-log viewer (filter by user/module/date), no raw before/after leak.
 - ✅ Idempotency (exactly-once posting wrapper) + DB unique/CHECK constraints (§17.2–3).
 
 ## Close, reconciliation, exports

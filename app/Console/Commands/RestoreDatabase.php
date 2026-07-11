@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Support\SecretScrubber;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
@@ -141,8 +142,12 @@ class RestoreDatabase extends Command
         try {
             $result = Process::timeout(600)->input($input)->run($command);
         } catch (Throwable $e) {
-            $this->error("Could not run the restore: {$e->getMessage()}");
-            Log::error('sparkbooks:restore: could not start mysql client.', ['binary' => $binary, 'error' => $e->getMessage()]);
+            // Symfony's Process*Exception messages interpolate the full argv —
+            // which carries --password=<live DB password>. Scrub before it ever
+            // reaches the console or the logs (mirrors BackupDatabase).
+            $reason = SecretScrubber::scrub($e->getMessage());
+            $this->error("Could not run the restore: {$reason}");
+            Log::error('sparkbooks:restore: could not start mysql client.', ['binary' => $binary, 'error' => $reason]);
 
             return self::FAILURE;
         } finally {
@@ -152,8 +157,9 @@ class RestoreDatabase extends Command
         }
 
         if (! $result->successful()) {
-            $this->error("Restore failed (exit {$result->exitCode()}): {$result->errorOutput()}");
-            Log::error('sparkbooks:restore: restore failed.', ['target' => $targetDatabase, 'exit_code' => $result->exitCode(), 'error' => $result->errorOutput()]);
+            $errorOutput = SecretScrubber::scrub($result->errorOutput());
+            $this->error("Restore failed (exit {$result->exitCode()}): {$errorOutput}");
+            Log::error('sparkbooks:restore: restore failed.', ['target' => $targetDatabase, 'exit_code' => $result->exitCode(), 'error' => $errorOutput]);
 
             return self::FAILURE;
         }
