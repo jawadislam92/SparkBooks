@@ -15,12 +15,15 @@ use App\Services\LedgerService;
 use App\Services\Reports\BalanceSheetReport;
 use App\Services\Reports\ProfitAndLossReport;
 use App\Services\Reports\TrialBalanceReport;
+use App\Support\AuditLogger;
 use App\Support\CompanyContext;
 use App\Support\Money;
 use Carbon\CarbonImmutable;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Inertia\Testing\AssertableInertia;
+use RuntimeException;
 use Tests\TestCase;
 use ZipArchive;
 
@@ -374,6 +377,47 @@ class AccountantPackageTest extends TestCase
         $this->get(route('reports.accountant-package'))->assertOk();
 
         $this->assertSame(0, ActivityLog::query()->where('action', 'accountant_package.exported')->count());
+    }
+
+    // ---------------------------------------------------------------
+    // Resource hygiene: no temp-file leak on the pre-stream failure path
+    // ---------------------------------------------------------------
+
+    public function test_download_does_not_leak_temp_file_when_audit_logging_fails(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+
+        // Force the audit-log write to fail AFTER the zip has already been
+        // built and written to disk — this exercises the controller's
+        // pre-stream failure path (deleteFileAfterSend only covers the success
+        // path once streaming finishes, so the catch/@unlink is what must fire
+        // here). The temp file must not survive the failed request.
+        $this->app->instance(AuditLogger::class, new class extends AuditLogger
+        {
+            public function log(string $action, ?Model $subject = null, ?array $before = null, ?array $after = null): ActivityLog
+            {
+                throw new RuntimeException('Simulated audit-log failure.');
+            }
+        });
+
+        $before = $this->packageTempFiles();
+
+        $this->downloadPackage('2026-01-01', '2026-07-11')->assertStatus(500);
+
+        $leaked = array_values(array_diff($this->packageTempFiles(), $before));
+        $this->assertSame([], $leaked, 'download() leaked a temp file when audit logging failed after the zip was built.');
+    }
+
+    /** @return list<string> temp files this feature's tempnam() prefix can produce (full prefix on Linux, 3-char-truncated `spa*.tmp` on Windows). */
+    private function packageTempFiles(): array
+    {
+        $dir = sys_get_temp_dir();
+
+        return array_values(array_merge(
+            glob($dir.'/sparkbooks_accountant_package_*') ?: [],
+            glob($dir.'/spa*.tmp') ?: [],
+        ));
     }
 
     // ---------------------------------------------------------------

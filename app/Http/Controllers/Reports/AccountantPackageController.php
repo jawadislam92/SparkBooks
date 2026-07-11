@@ -51,17 +51,28 @@ class AccountantPackageController extends Controller
 
         $zipPath = $service->build($from, $to);
 
-        $audit->log('accountant_package.exported', after: [
-            'from' => $from->toDateString(),
-            'to' => $to->toDateString(),
-        ]);
+        // The zip exists on disk from here on. deleteFileAfterSend(true) cleans
+        // it up on the SUCCESS path (once the response finishes streaming); this
+        // try/catch covers the PRE-stream failure path — e.g. if $audit->log()
+        // hits a DB hiccup, we unlink the temp file before rethrowing so a
+        // failed export never leaks it (the brief's "no temp-file leak on
+        // success OR exception").
+        try {
+            $audit->log('accountant_package.exported', after: [
+                'from' => $from->toDateString(),
+                'to' => $to->toDateString(),
+            ]);
 
-        $companySlug = Str::slug($context->get()->name) ?: 'company';
-        $filename = "accountant-package-{$companySlug}-{$from->toDateString()}-{$to->toDateString()}.zip";
+            $companySlug = Str::slug($context->get()->name) ?: 'company';
+            $filename = "accountant-package-{$companySlug}-{$from->toDateString()}-{$to->toDateString()}.zip";
 
-        return response()
-            ->download($zipPath, $filename, ['Content-Type' => 'application/zip'])
-            ->deleteFileAfterSend(true);
+            return response()
+                ->download($zipPath, $filename, ['Content-Type' => 'application/zip'])
+                ->deleteFileAfterSend(true);
+        } catch (\Throwable $e) {
+            @unlink($zipPath);
+            throw $e;
+        }
     }
 
     /**

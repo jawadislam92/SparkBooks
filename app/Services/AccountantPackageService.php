@@ -147,6 +147,11 @@ class AccountantPackageService
     }
 
     /**
+     * Builds the zip at a fresh temp path. Every failure branch AFTER tempnam()
+     * creates the file cleans that file up before throwing — the brief's "no
+     * temp-file leak on success OR exception" requirement — so a failed build
+     * never leaves an orphaned empty/truncated zip in the system temp dir.
+     *
      * @param  array<string, array{csv: string, pdf: string}>  $entries
      */
     private function writeZip(array $entries): string
@@ -156,17 +161,28 @@ class AccountantPackageService
             throw new RuntimeException('Unable to allocate a temp file for the accountant package zip.');
         }
 
-        $zip = new ZipArchive;
-        if ($zip->open($path, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
-            throw new RuntimeException('Unable to create the accountant package zip archive.');
-        }
+        try {
+            $zip = new ZipArchive;
+            if ($zip->open($path, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+                throw new RuntimeException('Unable to create the accountant package zip archive.');
+            }
 
-        foreach ($entries as $name => $formats) {
-            $zip->addFromString("{$name}.csv", $formats['csv']);
-            $zip->addFromString("{$name}.pdf", $formats['pdf']);
-        }
+            foreach ($entries as $name => $formats) {
+                // addFromString returns false on a per-entry write failure —
+                // unchecked, that would silently ship the customer a truncated
+                // package, so each write is asserted and fails loudly instead.
+                if ($zip->addFromString("{$name}.csv", $formats['csv']) === false
+                    || $zip->addFromString("{$name}.pdf", $formats['pdf']) === false) {
+                    $zip->close();
+                    throw new RuntimeException("Unable to write the '{$name}' entries to the accountant package zip.");
+                }
+            }
 
-        $zip->close();
+            $zip->close();
+        } catch (\Throwable $e) {
+            @unlink($path);
+            throw $e;
+        }
 
         return $path;
     }
