@@ -1,4 +1,5 @@
 import Button from '@/Components/ui/Button';
+import ExportCsvLink from '@/Components/ui/ExportCsvLink';
 import MoneyText from '@/Components/ui/MoneyText';
 import Sheet from '@/Components/ui/Sheet';
 import StatusChip from '@/Components/invoices/StatusChip';
@@ -73,7 +74,7 @@ function OverdueTag() {
 }
 
 export default function Index({ invoices }: IndexPageProps) {
-    const { currentCompany } = usePage<PageProps>().props;
+    const { currentCompany, can } = usePage<PageProps>().props;
     const currency = currentCompany?.base_currency ?? 'USD';
     const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
     const today = useMemo(() => todayIsoDate(), []);
@@ -85,6 +86,11 @@ export default function Index({ invoices }: IndexPageProps) {
                 : invoices.filter((invoice) => invoice.status === statusFilter),
         [invoices, statusFilter],
     );
+
+    const exportHref =
+        statusFilter === 'all'
+            ? route('invoices.export')
+            : `${route('invoices.export')}?status=${encodeURIComponent(statusFilter)}`;
 
     return (
         <AppShell title="Invoices">
@@ -113,9 +119,12 @@ export default function Index({ invoices }: IndexPageProps) {
                         </button>
                     ))}
                 </div>
-                <Button type="button" onClick={() => router.visit(route('invoices.new'))}>
-                    New invoice
-                </Button>
+                <div className="flex items-center gap-2">
+                    {can['exports.run'] && <ExportCsvLink href={exportHref} />}
+                    <Button type="button" onClick={() => router.visit(route('invoices.new'))}>
+                        New invoice
+                    </Button>
+                </div>
             </div>
 
             <Sheet>

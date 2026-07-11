@@ -1,4 +1,5 @@
 import Button from '@/Components/ui/Button';
+import ExportCsvLink from '@/Components/ui/ExportCsvLink';
 import Field from '@/Components/ui/Field';
 import MoneyText from '@/Components/ui/MoneyText';
 import Sheet from '@/Components/ui/Sheet';
@@ -252,7 +253,7 @@ function Pagination({ journals }: { journals: Paginated<ManualJournalData> }) {
 }
 
 export default function Index({ journals }: IndexPageProps) {
-    const { currentCompany } = usePage<PageProps>().props;
+    const { currentCompany, can } = usePage<PageProps>().props;
     const currency = currentCompany?.base_currency ?? 'USD';
     const [expandedId, setExpandedId] = useState<number | null>(null);
     const [reversingJournal, setReversingJournal] = useState<ManualJournalData | null>(
@@ -270,12 +271,15 @@ export default function Index({ journals }: IndexPageProps) {
             <Sheet
                 title="Journal entries"
                 actions={
-                    <Button
-                        type="button"
-                        onClick={() => router.visit(route('journal-entries.new'))}
-                    >
-                        New journal entry
-                    </Button>
+                    <>
+                        {can['exports.run'] && <ExportCsvLink href={route('journal-entries.export')} />}
+                        <Button
+                            type="button"
+                            onClick={() => router.visit(route('journal-entries.new'))}
+                        >
+                            New journal entry
+                        </Button>
+                    </>
                 }
             >
                 {journals.data.length === 0 ? (

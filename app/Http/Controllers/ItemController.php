@@ -9,9 +9,12 @@ use App\Models\Account;
 use App\Models\Item;
 use App\Models\TaxRate;
 use App\Support\AuditLogger;
+use App\Support\CsvExport;
+use App\Support\Money;
 use Illuminate\Http\RedirectResponse;
 use Inertia\Inertia;
 use Inertia\Response;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class ItemController extends Controller
 {
@@ -37,6 +40,40 @@ class ItemController extends Controller
             'incomeAccounts' => $this->incomeAccountOptions(),
             'taxRates' => $this->taxRateOptions(),
         ]);
+    }
+
+    /**
+     * List-screen CSV export (Phase 6 Task 3, spec §11/§17.8) — the SAME
+     * scope Items/Index reads (every item for the current company, archived
+     * included — mirrors the index's own full load, which the client itself
+     * filters). No status/type filter here — unlike Invoice/Bill/Expense,
+     * an item has no such dimension. Gated `exports.run` in addition to this
+     * controller's own `items.manage` group (routes/web.php). Audit-logged
+     * via the shared CsvExport helper.
+     */
+    public function exportCsv(AuditLogger $audit): StreamedResponse
+    {
+        $items = Item::query()
+            ->with(['incomeAccount', 'taxRate'])
+            ->orderBy('name')
+            ->get();
+
+        $rows = $items->map(fn (Item $item) => [
+            $item->name,
+            $item->description,
+            Money::minorToDecimalString($item->unit_price),
+            $item->incomeAccount?->name,
+            $item->taxRate?->name,
+            $item->is_archived ? 'Yes' : 'No',
+        ]);
+
+        return CsvExport::stream(
+            'items.csv',
+            ['Name', 'Description', 'Default Price', 'Income Account', 'Tax Rate', 'Archived'],
+            $rows,
+            $audit,
+            'items.exported',
+        );
     }
 
     public function store(StoreItemRequest $request, AuditLogger $audit): RedirectResponse

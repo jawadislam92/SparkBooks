@@ -29,12 +29,15 @@ use App\Services\BillService;
 use App\Services\DocumentLineCalculator;
 use App\Support\AuditLogger;
 use App\Support\CategoryAccountGuard;
+use App\Support\CsvExport;
+use App\Support\Money;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -86,6 +89,47 @@ class BillController extends Controller
         return Inertia::render('Bills/Index', [
             'bills' => $bills,
         ]);
+    }
+
+    /**
+     * List-screen CSV export (Phase 6 Task 3, spec §11/§17.8) — mirrors
+     * InvoiceController::exportCsv exactly: same scope as Bills/Index (every
+     * bill for the current company), optionally narrowed by the same
+     * `status` values the index's client-side filter offers. Gated
+     * `exports.run` in addition to this controller's own `bills.draft` group
+     * (routes/web.php). Audit-logged via the shared CsvExport helper.
+     */
+    public function exportCsv(Request $request, AuditLogger $audit): StreamedResponse
+    {
+        $validated = $request->validate([
+            'status' => ['nullable', 'string', Rule::enum(BillStatus::class)],
+        ]);
+        $status = $validated['status'] ?? null;
+
+        $bills = Bill::query()
+            ->with('contact')
+            ->when($status !== null, fn ($query) => $query->where('status', $status))
+            ->orderByDesc('id')
+            ->get();
+
+        $rows = $bills->map(fn (Bill $bill) => [
+            $bill->reference,
+            $bill->contact->name,
+            $bill->bill_date?->toDateString(),
+            $bill->due_date?->toDateString(),
+            $bill->status->value,
+            Money::minorToDecimalString($bill->total),
+            Money::minorToDecimalString($bill->balance),
+        ]);
+
+        return CsvExport::stream(
+            'bills.csv',
+            ['Reference', 'Vendor', 'Bill Date', 'Due Date', 'Status', 'Total', 'Balance'],
+            $rows,
+            $audit,
+            'bills.exported',
+            ['status' => $status ?? 'all'],
+        );
     }
 
     public function create(): Response

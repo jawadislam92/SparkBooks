@@ -28,7 +28,9 @@ use App\Services\InvoicePaymentService;
 use App\Services\InvoicePdf;
 use App\Services\InvoiceService;
 use App\Support\AuditLogger;
+use App\Support\CsvExport;
 use App\Support\Currencies;
+use App\Support\Money;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\UniqueConstraintViolationException;
@@ -37,9 +39,11 @@ use Illuminate\Http\Request;
 use Illuminate\Http\Response as HttpResponse;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
 use Inertia\Response;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 /**
  * Draft-only invoice CRUD (Phase 3 Task 2). No ledger posting, no document
@@ -74,6 +78,52 @@ class InvoiceController extends Controller
         return Inertia::render('Invoices/Index', [
             'invoices' => $invoices,
         ]);
+    }
+
+    /**
+     * List-screen CSV export (Phase 6 Task 3, spec §11/§17.8) — the SAME
+     * scope Invoices/Index reads (every invoice for the current company),
+     * optionally narrowed by the same `status` values the index's client-side
+     * filter offers (e.g. ?status=paid exports only paid invoices), so the
+     * downloaded file always matches what the caller is looking at. Gated
+     * `exports.run` in addition to this controller's own `invoices.draft`
+     * group (routes/web.php) — Staff holds invoices.draft but not
+     * exports.run, so it can view/create invoices but not export them.
+     * Audit-logged via the shared CsvExport helper, which can't produce a
+     * response without also writing the `invoices.exported` row first.
+     */
+    public function exportCsv(Request $request, AuditLogger $audit): StreamedResponse
+    {
+        $validated = $request->validate([
+            'status' => ['nullable', 'string', Rule::enum(InvoiceStatus::class)],
+        ]);
+        $status = $validated['status'] ?? null;
+
+        $invoices = Invoice::query()
+            ->with('contact')
+            ->when($status !== null, fn ($query) => $query->where('status', $status))
+            ->orderByDesc('id')
+            ->get();
+
+        $rows = $invoices->map(fn (Invoice $invoice) => [
+            $invoice->number ?? 'Draft',
+            $invoice->contact->name,
+            $invoice->issue_date?->toDateString(),
+            $invoice->due_date?->toDateString(),
+            $invoice->currency_code,
+            $invoice->status->value,
+            Money::minorToDecimalString($invoice->total),
+            Money::minorToDecimalString($invoice->balance),
+        ]);
+
+        return CsvExport::stream(
+            'invoices.csv',
+            ['Number', 'Customer', 'Issue Date', 'Due Date', 'Currency', 'Status', 'Total', 'Balance'],
+            $rows,
+            $audit,
+            'invoices.exported',
+            ['status' => $status ?? 'all'],
+        );
     }
 
     public function create(): Response

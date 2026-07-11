@@ -1,4 +1,5 @@
 import Button from '@/Components/ui/Button';
+import ExportCsvLink from '@/Components/ui/ExportCsvLink';
 import MoneyText from '@/Components/ui/MoneyText';
 import Sheet from '@/Components/ui/Sheet';
 import StatusChip, { EXPENSE_STATUS_LABELS } from '@/Components/documents/StatusChip';
@@ -59,10 +60,15 @@ function matchesSearch(expense: ExpenseRow, search: string): boolean {
 }
 
 export default function Index({ expenses }: IndexPageProps) {
-    const { currentCompany } = usePage<PageProps>().props;
+    const { currentCompany, can } = usePage<PageProps>().props;
     const currency = currentCompany?.base_currency ?? 'PKR';
     const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
     const [search, setSearch] = useState('');
+
+    const exportHref =
+        statusFilter === 'all'
+            ? route('expenses.export')
+            : `${route('expenses.export')}?status=${encodeURIComponent(statusFilter)}`;
 
     const visibleExpenses = useMemo(
         () =>
@@ -109,9 +115,12 @@ export default function Index({ expenses }: IndexPageProps) {
                         className={SEARCH_INPUT_CLASSES}
                     />
                 </div>
-                <Button type="button" onClick={() => router.visit(route('expenses.new'))}>
-                    New expense
-                </Button>
+                <div className="flex items-center gap-2">
+                    {can['exports.run'] && <ExportCsvLink href={exportHref} />}
+                    <Button type="button" onClick={() => router.visit(route('expenses.new'))}>
+                        New expense
+                    </Button>
+                </div>
             </div>
 
             <Sheet>

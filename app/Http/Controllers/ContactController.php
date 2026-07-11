@@ -3,15 +3,20 @@
 namespace App\Http\Controllers;
 
 use App\Enums\AccountSubtype;
+use App\Enums\ContactType;
 use App\Http\Requests\StoreContactRequest;
 use App\Http\Requests\UpdateContactRequest;
 use App\Models\Account;
 use App\Models\Contact;
 use App\Models\JournalLine;
 use App\Support\AuditLogger;
+use App\Support\CsvExport;
 use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+use Illuminate\Validation\Rule;
 use Inertia\Inertia;
 use Inertia\Response;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class ContactController extends Controller
 {
@@ -28,6 +33,52 @@ class ContactController extends Controller
         return Inertia::render('Contacts/Index', [
             'contacts' => $contacts,
         ]);
+    }
+
+    /**
+     * List-screen CSV export (Phase 6 Task 3, spec §11/§17.8) — the SAME
+     * scope Contacts/Index reads (every contact for the current company,
+     * archived included — mirrors the index's own full load, which the
+     * client itself filters), optionally narrowed by `type`. `type=customer`/
+     * `type=vendor` match Contacts/Index's own client-side filter semantics
+     * (ContactType::isCustomer/isVendor — "both" counts as either), NOT a
+     * bare `type` column equality, so the export always matches what the
+     * caller is looking at; `type=both` still filters to exactly the
+     * dual-role contacts. Gated `exports.run` in addition to this
+     * controller's own `contacts.manage` group (routes/web.php).
+     * Audit-logged via the shared CsvExport helper.
+     */
+    public function exportCsv(Request $request, AuditLogger $audit): StreamedResponse
+    {
+        $validated = $request->validate([
+            'type' => ['nullable', 'string', Rule::enum(ContactType::class)],
+        ]);
+        $type = $validated['type'] ?? null;
+
+        $contacts = Contact::query()
+            ->when($type === ContactType::Customer->value, fn ($query) => $query->whereIn('type', [ContactType::Customer->value, ContactType::Both->value]))
+            ->when($type === ContactType::Vendor->value, fn ($query) => $query->whereIn('type', [ContactType::Vendor->value, ContactType::Both->value]))
+            ->when($type === ContactType::Both->value, fn ($query) => $query->where('type', ContactType::Both->value))
+            ->orderBy('name')
+            ->get();
+
+        $rows = $contacts->map(fn (Contact $contact) => [
+            $contact->name,
+            $contact->type->value,
+            $contact->email,
+            $contact->phone,
+            $contact->tax_number,
+            $contact->is_archived ? 'Yes' : 'No',
+        ]);
+
+        return CsvExport::stream(
+            'contacts.csv',
+            ['Name', 'Type', 'Email', 'Phone', 'Tax Number', 'Archived'],
+            $rows,
+            $audit,
+            'contacts.exported',
+            ['type' => $type ?? 'all'],
+        );
     }
 
     public function store(StoreContactRequest $request, AuditLogger $audit): RedirectResponse

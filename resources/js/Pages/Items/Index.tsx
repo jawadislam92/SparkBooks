@@ -1,4 +1,5 @@
 import Button from '@/Components/ui/Button';
+import ExportCsvLink from '@/Components/ui/ExportCsvLink';
 import Field from '@/Components/ui/Field';
 import MoneyText from '@/Components/ui/MoneyText';
 import Sheet from '@/Components/ui/Sheet';
@@ -268,7 +269,7 @@ function ItemFormDialog({
 }
 
 export default function Index({ items, incomeAccounts, taxRates }: IndexPageProps) {
-    const { currentCompany } = usePage<PageProps>().props;
+    const { currentCompany, can } = usePage<PageProps>().props;
     const currency = currentCompany?.base_currency ?? 'USD';
     const [showArchived, setShowArchived] = useState(false);
     const [editingItem, setEditingItem] = useState<ItemRow | null>(null);
@@ -298,9 +299,12 @@ export default function Index({ items, incomeAccounts, taxRates }: IndexPageProp
                     />
                     Show archived
                 </label>
-                <Button type="button" onClick={() => setCreating(true)}>
-                    New item
-                </Button>
+                <div className="flex items-center gap-2">
+                    {can['exports.run'] && <ExportCsvLink href={route('items.export')} />}
+                    <Button type="button" onClick={() => setCreating(true)}>
+                        New item
+                    </Button>
+                </div>
             </div>
 
             <Sheet>

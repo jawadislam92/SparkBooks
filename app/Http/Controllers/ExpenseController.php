@@ -23,12 +23,15 @@ use App\Services\DocumentLineCalculator;
 use App\Services\ExpenseService;
 use App\Support\AuditLogger;
 use App\Support\CategoryAccountGuard;
+use App\Support\CsvExport;
+use App\Support\Money;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -69,6 +72,45 @@ class ExpenseController extends Controller
         return Inertia::render('Expenses/Index', [
             'expenses' => $expenses,
         ]);
+    }
+
+    /**
+     * List-screen CSV export (Phase 6 Task 3, spec §11/§17.8) — mirrors
+     * InvoiceController::exportCsv/BillController::exportCsv exactly: same
+     * scope as Expenses/Index (every expense for the current company),
+     * optionally narrowed by the same `status` values the index's
+     * client-side filter offers. Gated `exports.run` in addition to this
+     * controller's own `expenses.draft` group (routes/web.php). Audit-logged
+     * via the shared CsvExport helper.
+     */
+    public function exportCsv(Request $request, AuditLogger $audit): StreamedResponse
+    {
+        $validated = $request->validate([
+            'status' => ['nullable', 'string', Rule::enum(ExpenseStatus::class)],
+        ]);
+        $status = $validated['status'] ?? null;
+
+        $expenses = Expense::query()
+            ->with('contact')
+            ->when($status !== null, fn ($query) => $query->where('status', $status))
+            ->orderByDesc('id')
+            ->get();
+
+        $rows = $expenses->map(fn (Expense $expense) => [
+            $expense->contact?->name,
+            $expense->expense_date?->toDateString(),
+            $expense->status->value,
+            Money::minorToDecimalString($expense->total),
+        ]);
+
+        return CsvExport::stream(
+            'expenses.csv',
+            ['Payee', 'Date', 'Status', 'Total'],
+            $rows,
+            $audit,
+            'expenses.exported',
+            ['status' => $status ?? 'all'],
+        );
     }
 
     public function create(): Response

@@ -59,6 +59,12 @@ Route::middleware(['auth', 'verified', 'company', 'can:ledger.post_manual'])->gr
     Route::get('/journal-entries', [ManualJournalController::class, 'index'])->name('journal-entries.index');
     Route::get('/journal-entries/new', [ManualJournalController::class, 'create'])->name('journal-entries.new');
     Route::post('/journal-entries', [ManualJournalController::class, 'store'])->name('journal-entries.store');
+    // Phase 6 Task 3 (spec §11/§17.8): list-screen CSV export — additionally
+    // gated exports.run, same double-gate shape as every /reports/*/export.csv
+    // route below (view/base-ability group AND exports.run).
+    Route::get('/journal-entries/export.csv', [ManualJournalController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('journal-entries.export');
     Route::post('/journal-entries/{manualJournal}/reverse', [ManualJournalController::class, 'reverse'])->name('journal-entries.reverse');
 });
 
@@ -134,6 +140,16 @@ Route::middleware(['auth', 'verified', 'company', 'can:contacts.manage'])->group
     Route::patch('/contacts/{contact}', [ContactController::class, 'update'])->name('contacts.update');
     Route::post('/contacts/{contact}/archive', [ContactController::class, 'archive'])->name('contacts.archive');
     Route::post('/contacts/{contact}/unarchive', [ContactController::class, 'unarchive'])->name('contacts.unarchive');
+    // Phase 6 Task 3 (spec §11/§17.8): list-screen CSV export — registered
+    // BEFORE /contacts/{contact} below on purpose (mirrors invoices.index's
+    // own ordering comment): {contact} is a single-segment wildcard that
+    // would otherwise happily capture "export.csv" as the parameter, since
+    // Laravel matches routes in registration order. Additionally gated
+    // exports.run, same double-gate shape as every /reports/*/export.csv
+    // route below.
+    Route::get('/contacts/export.csv', [ContactController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('contacts.export');
     Route::get('/contacts/{contact}', [ContactController::class, 'show'])->name('contacts.show');
 });
 
@@ -141,6 +157,16 @@ Route::middleware(['auth', 'verified', 'company', 'can:invoices.draft'])->group(
     Route::get('/invoices', [InvoiceController::class, 'index'])->name('invoices.index');
     Route::get('/invoices/new', [InvoiceController::class, 'create'])->name('invoices.new');
     Route::post('/invoices', [InvoiceController::class, 'store'])->name('invoices.store');
+    // Phase 6 Task 3 (spec §11/§17.8): list-screen CSV export — registered
+    // BEFORE /invoices/{invoice} below on purpose, same reasoning as that
+    // route's own ordering comment: {invoice} is a single-segment wildcard
+    // that would otherwise happily capture "export.csv" as the parameter.
+    // Additionally gated exports.run, same double-gate shape as every
+    // /reports/*/export.csv route below (view/base-ability group AND
+    // exports.run) — Staff holds invoices.draft but not exports.run.
+    Route::get('/invoices/export.csv', [InvoiceController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('invoices.export');
     // Registered BEFORE the /edit route below on purpose: both are GETs under
     // /invoices/{invoice}/..., and Laravel matches route definitions in
     // registration order — {invoice} alone would otherwise never lose to a
@@ -188,6 +214,12 @@ Route::middleware(['auth', 'verified', 'company', 'can:expenses.draft'])->group(
     Route::get('/expenses', [ExpenseController::class, 'index'])->name('expenses.index');
     Route::get('/expenses/new', [ExpenseController::class, 'create'])->name('expenses.new');
     Route::post('/expenses', [ExpenseController::class, 'store'])->name('expenses.store');
+    // Phase 6 Task 3 (spec §11/§17.8): list-screen CSV export — registered
+    // BEFORE /expenses/{expense} below, same wildcard-ordering reasoning as
+    // invoices.export above. Additionally gated exports.run.
+    Route::get('/expenses/export.csv', [ExpenseController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('expenses.export');
     // Registered BEFORE /edit below on purpose — mirrors invoices.show/
     // invoices.edit's own ordering comment (Phase 3 T11): both are GETs
     // under /expenses/{expense}/..., Laravel matches in registration order.
@@ -228,6 +260,12 @@ Route::middleware(['auth', 'verified', 'company', 'can:bills.draft'])->group(fun
     Route::get('/bills', [BillController::class, 'index'])->name('bills.index');
     Route::get('/bills/new', [BillController::class, 'create'])->name('bills.new');
     Route::post('/bills', [BillController::class, 'store'])->name('bills.store');
+    // Phase 6 Task 3 (spec §11/§17.8): list-screen CSV export — registered
+    // BEFORE /bills/{bill} below, same wildcard-ordering reasoning as
+    // invoices.export above. Additionally gated exports.run.
+    Route::get('/bills/export.csv', [BillController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('bills.export');
     // Registered BEFORE /edit below — mirrors expenses.show's own ordering
     // comment above (Phase 4 Task 9). The canonical landing page for every
     // status, including draft and the opening-bill banner (relocated here
@@ -276,6 +314,13 @@ Route::middleware(['auth', 'verified', 'company', 'can:items.manage'])->group(fu
     Route::patch('/items/{item}', [ItemController::class, 'update'])->name('items.update');
     Route::post('/items/{item}/archive', [ItemController::class, 'archive'])->name('items.archive');
     Route::post('/items/{item}/unarchive', [ItemController::class, 'unarchive'])->name('items.unarchive');
+    // Phase 6 Task 3 (spec §11/§17.8): list-screen CSV export. No wildcard
+    // GET route in this group (items has no dedicated show page), so no
+    // ordering hazard — additionally gated exports.run, same double-gate
+    // shape as every /reports/*/export.csv route below.
+    Route::get('/items/export.csv', [ItemController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('items.export');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:bank_accounts.manage'])->group(function () {
@@ -284,6 +329,15 @@ Route::middleware(['auth', 'verified', 'company', 'can:bank_accounts.manage'])->
     Route::patch('/bank-accounts/{bankAccount}', [BankAccountController::class, 'update'])->name('bank-accounts.update');
     Route::post('/bank-accounts/{bankAccount}/archive', [BankAccountController::class, 'archive'])->name('bank-accounts.archive');
     Route::post('/bank-accounts/{bankAccount}/unarchive', [BankAccountController::class, 'unarchive'])->name('bank-accounts.unarchive');
+    // Phase 6 Task 3 (spec §11/§17.8): list-screen CSV export — the bank/
+    // cash accounts list (no dedicated bank-transactions index screen exists
+    // yet, see BankAccountController::exportCsv's own docblock). No wildcard
+    // GET route in this group, so no ordering hazard. Additionally gated
+    // exports.run, same double-gate shape as every /reports/*/export.csv
+    // route below.
+    Route::get('/bank-accounts/export.csv', [BankAccountController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('bank-accounts.export');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:transfers.create'])->group(function () {

@@ -7,9 +7,13 @@ use App\Http\Requests\UpdateBankAccountRequest;
 use App\Models\BankAccount;
 use App\Services\AccountBalances;
 use App\Services\BankAccountService;
+use App\Support\AuditLogger;
+use App\Support\CsvExport;
+use App\Support\Money;
 use Illuminate\Http\RedirectResponse;
 use Inertia\Inertia;
 use Inertia\Response;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class BankAccountController extends Controller
 {
@@ -27,6 +31,43 @@ class BankAccountController extends Controller
         return Inertia::render('Banking/Index', [
             'bankAccounts' => $bankAccounts,
         ]);
+    }
+
+    /**
+     * List-screen CSV export (Phase 6 Task 3, spec §11/§17.8) — the bank/
+     * cash accounts list (Banking/Index's own scope: every bank account for
+     * the current company, archived included, current live balance —
+     * mirrors index() exactly, including its balancesByAccount batching so
+     * this doesn't run one whole-ledger query per row). There is no separate
+     * bank-TRANSACTIONS list screen in the app yet (transfers only have a
+     * create form, no index) — this is the closest existing "Banking" list
+     * screen, so it's the one this task's brief maps to. Gated `exports.run`
+     * in addition to this controller's own `bank_accounts.manage` group
+     * (routes/web.php). Audit-logged via the shared CsvExport helper.
+     */
+    public function exportCsv(AccountBalances $balances, AuditLogger $audit): StreamedResponse
+    {
+        $balancesByAccount = $balances->asOf();
+
+        $bankAccounts = BankAccount::query()
+            ->orderBy('name')
+            ->get();
+
+        $rows = $bankAccounts->map(fn (BankAccount $bankAccount) => [
+            $bankAccount->name,
+            $bankAccount->type,
+            $bankAccount->currency_code,
+            Money::minorToDecimalString($bankAccount->balance($balancesByAccount)),
+            $bankAccount->is_archived ? 'Yes' : 'No',
+        ]);
+
+        return CsvExport::stream(
+            'bank-accounts.csv',
+            ['Name', 'Type', 'Currency', 'Balance', 'Archived'],
+            $rows,
+            $audit,
+            'bank_accounts.exported',
+        );
     }
 
     public function store(StoreBankAccountRequest $request, BankAccountService $service): RedirectResponse
