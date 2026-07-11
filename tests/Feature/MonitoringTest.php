@@ -26,8 +26,12 @@ use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
+use RuntimeException;
+use Symfony\Component\Process\Exception\ProcessTimedOutException;
+use Symfony\Component\Process\Process as SymfonyProcess;
 use Tests\TestCase;
 
 /**
@@ -262,6 +266,98 @@ class MonitoringTest extends TestCase
         // The heartbeat ping itself blows up — the backup command must
         // still report success, since the backup genuinely succeeded.
         $this->artisan('sparkbooks:backup')->assertSuccessful();
+    }
+
+    // ---------------------------------------------------------------
+    // Security: the DB password must never reach an alert body or a log.
+    // ---------------------------------------------------------------
+
+    /**
+     * The review-found leak: mysqldump's argv carries --password=<live DB
+     * password> inline, and Symfony's ProcessTimedOutException /
+     * ProcessStartFailedException interpolate the FULL command line into
+     * their message. A production dump hang (>300s) therefore throws an
+     * exception whose message contains the cleartext password — which the
+     * Task 7 alert wiring would otherwise email/Slack out and log verbatim.
+     *
+     * This test forces exactly that: the dump Process is faked to throw a
+     * timeout exception whose message contains --password=SECRETpw (the same
+     * shape Symfony produces on a real hang), and asserts the password
+     * appears in NEITHER the dispatched alert body NOR the logs, while a
+     * useful, secret-free reason still does. Redaction is on the
+     * error-message path only — the real argv is untouched (proven by the
+     * other backup tests which run a genuine mysqldump successfully).
+     */
+    public function test_backup_failure_alert_and_logs_never_contain_the_db_password(): void
+    {
+        Mail::fake();
+        Log::spy();
+        config([
+            'monitoring.alert_email' => 'alerts@sparkbooks.test',
+            // Put a real password into the argv dumpDatabase() builds, so
+            // this proves the CONFIGURED secret can't leak either.
+            'database.connections.'.config('database.default').'.password' => 'SECRETpw',
+        ]);
+
+        Process::fake([
+            '*' => function () {
+                $sp = new SymfonyProcess(['mysqldump', '--host=127.0.0.1', '--password=SECRETpw', 'sparkbooks_test']);
+
+                return new ProcessTimedOutException($sp, ProcessTimedOutException::TYPE_GENERAL);
+            },
+        ]);
+
+        $this->artisan('sparkbooks:backup')->assertFailed();
+
+        Mail::assertSent(MonitoringAlertMail::class, function (MonitoringAlertMail $mail) {
+            $this->assertStringNotContainsString('SECRETpw', $mail->alertBody);
+            $this->assertStringNotContainsString('--password=SECRETpw', $mail->alertBody);
+            $this->assertStringContainsString('--password=***', $mail->alertBody);
+            // A genuinely useful, secret-free reason still survives.
+            $this->assertStringContainsString('mysqldump', $mail->alertBody);
+
+            return true;
+        });
+
+        // Nothing carrying the password reached the logs either.
+        Log::shouldHaveReceived('error')->withArgs(function ($message, $context = []) {
+            $blob = $message.' '.json_encode($context);
+
+            return ! str_contains($blob, 'SECRETpw');
+        })->atLeast()->once();
+    }
+
+    // ---------------------------------------------------------------
+    // A throwing alert channel must never change the command's real exit
+    // code (AlertNotifier's own per-channel try/catch, proven end-to-end).
+    // ---------------------------------------------------------------
+
+    public function test_backup_failure_still_fails_cleanly_when_the_email_alert_throws(): void
+    {
+        // Mail::to() itself throws — AlertNotifier catches it internally, so
+        // the backup's real non-zero exit must still surface (not the mail
+        // exception).
+        Mail::shouldReceive('to')->andThrow(new RuntimeException('mail server down'));
+        config([
+            'monitoring.alert_email' => 'alerts@sparkbooks.test',
+            'backup.mysqldump_path' => $this->backupDir.'/does-not-exist-mysqldump',
+        ]);
+
+        $this->artisan('sparkbooks:backup')->assertFailed();
+    }
+
+    public function test_ledger_verify_still_fails_cleanly_when_the_slack_alert_throws(): void
+    {
+        // The Slack webhook POST throws — AlertNotifier catches it, so
+        // ledger:verify still exits 1 on its findings.
+        Http::fake(function () {
+            throw new ConnectionException('slack unreachable');
+        });
+        config(['monitoring.slack_webhook' => 'https://hooks.slack.test/services/xyz']);
+
+        $this->corruptCompany();
+
+        $this->artisan('ledger:verify')->assertExitCode(1);
     }
 
     // ---------------------------------------------------------------

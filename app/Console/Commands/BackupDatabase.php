@@ -5,6 +5,7 @@ namespace App\Console\Commands;
 use App\Support\AlertNotifier;
 use App\Support\BackupRetentionPolicy;
 use App\Support\Heartbeat;
+use App\Support\SecretScrubber;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Process;
@@ -79,9 +80,10 @@ class BackupDatabase extends Command
         try {
             $manifest = $this->buildArchive($archivePath, $sqlPath);
         } catch (Throwable $e) {
-            $this->error("Failed to build the backup archive: {$e->getMessage()}");
-            Log::error('sparkbooks:backup: failed to build archive', ['error' => $e->getMessage()]);
-            $this->lastFailureReason = "Failed to build the backup archive: {$e->getMessage()}";
+            $error = SecretScrubber::scrub($e->getMessage());
+            $this->error("Failed to build the backup archive: {$error}");
+            Log::error('sparkbooks:backup: failed to build archive', ['error' => $error]);
+            $this->lastFailureReason = "Failed to build the backup archive: {$error}";
 
             return self::FAILURE;
         } finally {
@@ -141,17 +143,26 @@ class BackupDatabase extends Command
         try {
             $result = Process::timeout(300)->run($command);
         } catch (Throwable $e) {
-            $this->error("Could not run mysqldump: {$e->getMessage()}");
-            Log::error('sparkbooks:backup: mysqldump could not be started', ['binary' => $binary, 'error' => $e->getMessage()]);
-            $this->lastFailureReason = "Could not run mysqldump: {$e->getMessage()}";
+            // The Process exception message (timeout / start-failure)
+            // interpolates the FULL mysqldump argv, which includes
+            // --password=<live DB password> — scrub it before it reaches
+            // the console, the logs, OR the failure-alert body.
+            $error = SecretScrubber::scrub($e->getMessage());
+            $this->error("Could not run mysqldump: {$error}");
+            Log::error('sparkbooks:backup: mysqldump could not be started', ['binary' => $binary, 'error' => $error]);
+            $this->lastFailureReason = "Could not run mysqldump: {$error}";
 
             return false;
         }
 
         if (! $result->successful()) {
-            $this->error("mysqldump failed (exit {$result->exitCode()}): {$result->errorOutput()}");
-            Log::error('sparkbooks:backup: mysqldump failed', ['exit_code' => $result->exitCode(), 'error' => $result->errorOutput()]);
-            $this->lastFailureReason = "mysqldump failed (exit {$result->exitCode()}): {$result->errorOutput()}";
+            // errorOutput is mysqldump's own stderr (which does not echo the
+            // password), but scrub it too as defense-in-depth so no failure
+            // path can ever surface a secret.
+            $error = SecretScrubber::scrub($result->errorOutput());
+            $this->error("mysqldump failed (exit {$result->exitCode()}): {$error}");
+            Log::error('sparkbooks:backup: mysqldump failed', ['exit_code' => $result->exitCode(), 'error' => $error]);
+            $this->lastFailureReason = "mysqldump failed (exit {$result->exitCode()}): {$error}";
 
             return false;
         }
@@ -246,9 +257,10 @@ class BackupDatabase extends Command
         try {
             Storage::disk($diskName)->put($archiveName, $stream);
         } catch (Throwable $e) {
-            $this->error("Off-host copy to disk [{$diskName}] failed: {$e->getMessage()}");
-            Log::error('sparkbooks:backup: off-host copy failed', ['disk' => $diskName, 'error' => $e->getMessage()]);
-            $this->lastFailureReason = "Off-host copy to disk [{$diskName}] failed: {$e->getMessage()}";
+            $error = SecretScrubber::scrub($e->getMessage());
+            $this->error("Off-host copy to disk [{$diskName}] failed: {$error}");
+            Log::error('sparkbooks:backup: off-host copy failed', ['disk' => $diskName, 'error' => $error]);
+            $this->lastFailureReason = "Off-host copy to disk [{$diskName}] failed: {$error}";
 
             return false;
         } finally {
