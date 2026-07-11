@@ -98,6 +98,11 @@ function navGroups(can: Record<string, boolean>): NavGroup[] {
                     href: route('reconciliations.index'),
                     ability: 'reconciliation.manage',
                 },
+                {
+                    label: 'Month-end close',
+                    href: route('close.show'),
+                    ability: 'periods.lock',
+                },
             ],
         },
         {

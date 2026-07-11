@@ -12,6 +12,7 @@ use App\Http\Controllers\HealthController;
 use App\Http\Controllers\InvoiceController;
 use App\Http\Controllers\ItemController;
 use App\Http\Controllers\ManualJournalController;
+use App\Http\Controllers\MonthEndCloseController;
 use App\Http\Controllers\OnboardingController;
 use App\Http\Controllers\OpeningBalanceController;
 use App\Http\Controllers\OpeningCsvController;
@@ -381,6 +382,19 @@ Route::middleware(['auth', 'verified', 'company', 'can:reconciliation.manage'])-
     Route::get('/reconciliations/{bankAccount}', [ReconciliationController::class, 'show'])->name('reconciliations.show');
     Route::post('/reconciliations/{bankAccount}/complete', [ReconciliationController::class, 'complete'])->name('reconciliations.complete');
     Route::post('/reconciliations/{reconciliation}/reopen', [ReconciliationController::class, 'reopen'])->name('reconciliations.reopen');
+});
+
+// Phase 6 Task 5 (spec §17.5): the month-end close checklist — gated
+// entirely by periods.lock, same Owner/Accountant-only ability as the period
+// lock itself (config/permissions.php): "who may close the books" is exactly
+// "who may move the lock". Unlike settings.books's GET, there is no broader
+// read-only viewer split here.
+Route::middleware(['auth', 'verified', 'company', 'can:periods.lock'])->group(function () {
+    Route::get('/close', [MonthEndCloseController::class, 'show'])->name('close.show');
+    Route::post('/close/acknowledge', [MonthEndCloseController::class, 'acknowledge'])->name('close.acknowledge');
+    Route::post('/close/integrity-check', [MonthEndCloseController::class, 'runIntegrityCheck'])->name('close.integrity-check');
+    Route::post('/close/lock', [MonthEndCloseController::class, 'lock'])->name('close.lock');
+    Route::post('/close/complete', [MonthEndCloseController::class, 'complete'])->name('close.complete');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:tax_rates.manage'])->group(function () {
