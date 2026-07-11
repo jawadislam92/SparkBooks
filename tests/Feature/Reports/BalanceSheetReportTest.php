@@ -495,6 +495,54 @@ class BalanceSheetReportTest extends TestCase
     }
 
     // ---------------------------------------------------------------
+    // Activity dated BEFORE books_start_date must still roll into
+    // Retained Earnings — the exact accumulated-dev-data scenario that
+    // exposed a completed-FY-rollup lower-bound bug (an expense dated
+    // before books-start fell in NO window and was dropped, overstating
+    // equity by that amount so the sheet didn't balance).
+    // ---------------------------------------------------------------
+
+    public function test_balances_when_activity_predates_books_start_date(): void
+    {
+        // books_start_date = 2026-01-01, but a 300,000 expense is dated
+        // 2025-12-01 (BEFORE books-start). That expense's net-income impact
+        // must land in Retained Earnings; anchoring the completed-FY rollup
+        // at books_start_date would drop it entirely.
+        $company = Company::factory()->create([
+            'fiscal_year_start_month' => 1,
+            'books_start_date' => '2026-01-01',
+        ]);
+        app(CompanyContext::class)->set($company);
+        $bank = $this->bankAccount($company);
+        $income = $this->incomeAccount($company);
+        $expense = $this->expenseAccount($company);
+
+        // Pre-books-start expense (belongs to the completed FY 2025).
+        $this->postEntry($expense, $bank, 300000, '2025-12-01', 1, 'expense', 'Prior-period expense');
+        // Current-FY (2026) activity.
+        $this->postEntry($bank, $income, 500000, '2026-06-01', 2, 'invoice');
+
+        $asOf = CarbonImmutable::parse('2026-07-15');
+        $report = $this->build($asOf);
+
+        // The 2025 expense (net income -300000) rolled into Retained
+        // Earnings — NOT dropped, NOT in current-year earnings.
+        $this->assertSame(-300000, $report['retained_earnings_detail']['completed_fiscal_years_net_income']);
+        $this->assertSame(-300000, $report['equity']['retained_earnings']);
+        // Current-year earnings reflects ONLY the current FY's activity.
+        $this->assertSame(500000, $report['equity']['current_year_earnings']);
+
+        // ...and the sheet STILL balances despite the pre-books activity.
+        // Bank net: +500000 (invoice) - 300000 (expense) = +200000 assets.
+        // Equity: -300000 (RE) + 500000 (current) = +200000. 200000 == 200000.
+        $this->assertSame(200000, $report['total_assets']);
+        $this->assertSame($report['total_assets'], $report['total_liabilities_and_equity']);
+        $this->assertTrue($report['is_balanced']);
+        $this->assertSame(0, $report['difference']);
+        $this->assertLedgerBalances();
+    }
+
+    // ---------------------------------------------------------------
     // Cross-company isolation.
     // ---------------------------------------------------------------
 

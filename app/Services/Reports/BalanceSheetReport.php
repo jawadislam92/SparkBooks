@@ -225,30 +225,56 @@ class BalanceSheetReport
      * The lower bound ReportPeriod::completedFiscalYears() needs (its own
      * docblock: "there is no sensible unbounded default"). Prefers
      * company.books_start_date (spec's intended source). Falls back to the
-     * company's earliest posted entry_date when books_start_date was never
-     * set (a company can have real transactions without ever running the
-     * opening-balances wizard) — using $asOf itself as the fallback would
-     * silently drop any older activity's net income out of the completed-FY
-     * rollup (an empty completedFiscalYears() list), breaking the MUST-
-     * BALANCE invariant for exactly that company. Falls back to $asOf only
-     * when there is truly no ledger activity at all (an empty company),
-     * where the choice is moot — zero completed years, zero net income
-     * either way.
+     * the EARLIER of company.books_start_date and the company's earliest
+     * posted entry_date. books_start_date ALONE is not a safe lower bound:
+     * a company can post real activity dated BEFORE books_start_date — e.g.
+     * a prior-period expense entered after the fact, or (on accumulated dev
+     * data) any entry that predates when the books were declared to start.
+     * Anchoring the completed-FY rollup at books_start_date would drop that
+     * activity's net income entirely — it falls in NO completed-FY window
+     * (all of which start at or after books_start_date) AND before the
+     * current FY — so its income/expense net vanishes from Retained
+     * Earnings, overstating equity and breaking the §7.11.2 MUST-BALANCE
+     * identity (Assets == Liabilities + Equity). Taking the min with the
+     * earliest posted entry_date guarantees EVERY completed FY that holds
+     * any activity is enumerated, so nothing pre-current-FY is ever
+     * dropped, whichever of the two bounds is earlier.
      *
-     * Safe even when this bound lands BEFORE the true start of activity
-     * (e.g. books_start_date not aligned to the fiscal-year boundary, so the
-     * first "completed" FY window technically starts earlier still): the
-     * extra leading days contribute zero net income because nothing is
-     * posted before them, so the rollup is unaffected either way.
+     * Falls back to $asOf only when there is truly no ledger activity at
+     * all AND no books_start_date (an empty company) — the choice is moot
+     * there: zero completed years, zero net income either way.
+     *
+     * Safe even when the chosen bound lands BEFORE the true start of
+     * activity (e.g. books_start_date not aligned to the fiscal-year
+     * boundary, so the first "completed" FY window technically starts
+     * earlier still): the extra leading days contribute zero net income
+     * because nothing is posted before the earliest entry, so the rollup is
+     * unaffected either way.
      */
     private function resolveSinceDate(Company $company, CarbonImmutable $asOf): CarbonImmutable
     {
+        $candidates = [];
+
         if ($company->books_start_date !== null) {
-            return CarbonImmutable::parse($company->books_start_date->toDateString());
+            $candidates[] = CarbonImmutable::parse($company->books_start_date->toDateString());
         }
 
         $earliest = JournalEntry::query()->min('entry_date');
+        if ($earliest !== null) {
+            $candidates[] = CarbonImmutable::parse($earliest);
+        }
 
-        return $earliest !== null ? CarbonImmutable::parse($earliest) : $asOf;
+        if ($candidates === []) {
+            return $asOf;
+        }
+
+        $since = $candidates[0];
+        foreach ($candidates as $candidate) {
+            if ($candidate->lt($since)) {
+                $since = $candidate;
+            }
+        }
+
+        return $since;
     }
 }
