@@ -24,6 +24,7 @@ use App\Http\Controllers\Reports\AccountantPackageController;
 use App\Http\Controllers\Reports\ApAgingController;
 use App\Http\Controllers\Reports\ArAgingController;
 use App\Http\Controllers\Reports\BalanceSheetController;
+use App\Http\Controllers\Reports\CashFlowController;
 use App\Http\Controllers\Reports\GeneralLedgerController;
 use App\Http\Controllers\Reports\ProfitAndLossController;
 use App\Http\Controllers\Reports\TaxSummaryController;
@@ -96,6 +97,12 @@ Route::middleware(['auth', 'verified', 'company', 'can:reports.view'])->group(fu
     Route::get('/reports/balance-sheet/export.csv', [BalanceSheetController::class, 'exportCsv'])
         ->middleware('can:exports.run')
         ->name('reports.balance-sheet.export');
+
+    // Phase 7 Task 4: Statement of Cash Flows (indirect method).
+    Route::get('/reports/cash-flow', [CashFlowController::class, 'show'])->name('reports.cash-flow');
+    Route::get('/reports/cash-flow/export.csv', [CashFlowController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('reports.cash-flow.export');
 
     Route::get('/reports/ar-aging', [ArAgingController::class, 'show'])->name('reports.ar-aging');
     Route::get('/reports/ar-aging/export.csv', [ArAgingController::class, 'exportCsv'])

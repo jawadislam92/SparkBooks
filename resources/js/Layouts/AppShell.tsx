@@ -110,6 +110,7 @@ function navGroups(can: Record<string, boolean>): NavGroup[] {
             items: [
                 { label: 'Profit & loss', href: route('reports.profit-and-loss'), ability: 'reports.view' },
                 { label: 'Balance sheet', href: route('reports.balance-sheet'), ability: 'reports.view' },
+                { label: 'Cash flow', href: route('reports.cash-flow'), ability: 'reports.view' },
                 { label: 'A/R aging', href: route('reports.ar-aging'), ability: 'reports.view' },
                 { label: 'A/P aging', href: route('reports.ap-aging'), ability: 'reports.view' },
                 { label: 'Trial balance', href: route('reports.trial-balance'), ability: 'reports.view' },

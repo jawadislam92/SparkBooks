@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Enums\AccountSubtype;
 use App\Enums\AccountType;
+use App\Enums\CashFlowClass;
 use App\Exceptions\Accounts\AccountHasActiveChildren;
 use App\Exceptions\Accounts\SystemAccountCannotBeArchived;
 use App\Exceptions\Accounts\SystemAccountNotNestable;
@@ -30,13 +31,14 @@ class Account extends Model
      * AccountFactory, AccountService) — so they can never drift out of sync
      * with parent_id by construction.
      */
-    protected $fillable = ['code', 'name', 'type', 'subtype', 'is_system', 'is_archived', 'description', 'parent_id', 'is_postable'];
+    protected $fillable = ['code', 'name', 'type', 'subtype', 'is_system', 'is_archived', 'description', 'parent_id', 'is_postable', 'cf_class'];
 
     protected function casts(): array
     {
         return [
             'type' => AccountType::class,
             'subtype' => AccountSubtype::class,
+            'cf_class' => CashFlowClass::class,
             'is_system' => 'boolean',
             'is_archived' => 'boolean',
             'is_postable' => 'boolean',

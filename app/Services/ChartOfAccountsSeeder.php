@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Enums\AccountSubtype;
+use App\Enums\CashFlowClass;
 use App\Models\Account;
 use App\Models\Company;
 
@@ -23,6 +24,12 @@ class ChartOfAccountsSeeder
                 'type' => $account['subtype']->type()->value,
                 'subtype' => $account['subtype']->value,
                 'is_system' => $account['is_system'],
+                // Phase 7 Task 4 (Statement of Cash Flows): every seeded
+                // account's cf_class — kept in sync with the identical
+                // per-code/per-subtype mapping the add_cf_class_to_accounts
+                // migration backfills onto pre-existing companies. See
+                // CashFlowClass's own docblock for what each value means.
+                'cf_class' => $account['cf_class']->value,
                 // Explicit, same reasoning as AccountController::store — see
                 // its own comment for why this can't be left to the DB
                 // column default alone.
@@ -32,33 +39,38 @@ class ChartOfAccountsSeeder
         }
     }
 
-    /** @return list<array{code: string, name: string, subtype: AccountSubtype, is_system: bool}> */
+    /** @return list<array{code: string, name: string, subtype: AccountSubtype, is_system: bool, cf_class: CashFlowClass}> */
     private function accounts(): array
     {
         return [
-            ['code' => '1000', 'name' => 'Cash on Hand', 'subtype' => AccountSubtype::Cash, 'is_system' => true],
-            ['code' => '1010', 'name' => 'Bank Account', 'subtype' => AccountSubtype::Bank, 'is_system' => true],
-            ['code' => '1100', 'name' => 'Accounts Receivable', 'subtype' => AccountSubtype::Receivable, 'is_system' => true],
-            ['code' => '1500', 'name' => 'Office Equipment', 'subtype' => AccountSubtype::FixedAsset, 'is_system' => false],
-            ['code' => '2000', 'name' => 'Accounts Payable', 'subtype' => AccountSubtype::Payable, 'is_system' => true],
-            ['code' => '2100', 'name' => 'Tax Payable', 'subtype' => AccountSubtype::Tax, 'is_system' => true],
-            ['code' => '3000', 'name' => "Owner's Equity", 'subtype' => AccountSubtype::Equity, 'is_system' => false],
-            ['code' => '3100', 'name' => 'Opening Balance Equity', 'subtype' => AccountSubtype::Equity, 'is_system' => true],
-            ['code' => '3200', 'name' => 'Retained Earnings', 'subtype' => AccountSubtype::Equity, 'is_system' => true],
-            ['code' => '3900', 'name' => 'Owner Drawings', 'subtype' => AccountSubtype::Equity, 'is_system' => false],
-            ['code' => '4000', 'name' => 'Service Income', 'subtype' => AccountSubtype::OperatingIncome, 'is_system' => false],
-            ['code' => '4900', 'name' => 'Other Income', 'subtype' => AccountSubtype::OtherIncome, 'is_system' => false],
-            ['code' => '5000', 'name' => 'Salaries & Wages', 'subtype' => AccountSubtype::OperatingExpense, 'is_system' => false],
-            ['code' => '5100', 'name' => 'Rent', 'subtype' => AccountSubtype::OperatingExpense, 'is_system' => false],
-            ['code' => '5200', 'name' => 'Utilities', 'subtype' => AccountSubtype::OperatingExpense, 'is_system' => false],
-            ['code' => '5300', 'name' => 'Internet & Phone', 'subtype' => AccountSubtype::OperatingExpense, 'is_system' => false],
-            ['code' => '5400', 'name' => 'Software & Subscriptions', 'subtype' => AccountSubtype::OperatingExpense, 'is_system' => false],
-            ['code' => '5500', 'name' => 'Marketing & Advertising', 'subtype' => AccountSubtype::OperatingExpense, 'is_system' => false],
-            ['code' => '5600', 'name' => 'Office Supplies', 'subtype' => AccountSubtype::OperatingExpense, 'is_system' => false],
-            ['code' => '5700', 'name' => 'Bank Fees & Charges', 'subtype' => AccountSubtype::OperatingExpense, 'is_system' => false],
-            ['code' => '5800', 'name' => 'Travel', 'subtype' => AccountSubtype::OperatingExpense, 'is_system' => false],
-            ['code' => '5900', 'name' => 'Professional Fees', 'subtype' => AccountSubtype::OperatingExpense, 'is_system' => false],
-            ['code' => '5990', 'name' => 'Miscellaneous Expense', 'subtype' => AccountSubtype::OperatingExpense, 'is_system' => false],
+            ['code' => '1000', 'name' => 'Cash on Hand', 'subtype' => AccountSubtype::Cash, 'is_system' => true, 'cf_class' => CashFlowClass::Cash],
+            ['code' => '1010', 'name' => 'Bank Account', 'subtype' => AccountSubtype::Bank, 'is_system' => true, 'cf_class' => CashFlowClass::Cash],
+            ['code' => '1100', 'name' => 'Accounts Receivable', 'subtype' => AccountSubtype::Receivable, 'is_system' => true, 'cf_class' => CashFlowClass::Operating],
+            ['code' => '1500', 'name' => 'Office Equipment', 'subtype' => AccountSubtype::FixedAsset, 'is_system' => false, 'cf_class' => CashFlowClass::Investing],
+            ['code' => '2000', 'name' => 'Accounts Payable', 'subtype' => AccountSubtype::Payable, 'is_system' => true, 'cf_class' => CashFlowClass::Operating],
+            ['code' => '2100', 'name' => 'Tax Payable', 'subtype' => AccountSubtype::Tax, 'is_system' => true, 'cf_class' => CashFlowClass::Operating],
+            ['code' => '3000', 'name' => "Owner's Equity", 'subtype' => AccountSubtype::Equity, 'is_system' => false, 'cf_class' => CashFlowClass::Financing],
+            ['code' => '3100', 'name' => 'Opening Balance Equity', 'subtype' => AccountSubtype::Equity, 'is_system' => true, 'cf_class' => CashFlowClass::Financing],
+            // Phase 7 Task 4: 'excluded', never 'financing' — CashFlowReport
+            // special-cases 3200 by CODE (NI at the top + dividends in
+            // Financing, per the spec seed §2 split-account rule); its own
+            // raw movement is never fed through the generic per-account
+            // classification loop.
+            ['code' => '3200', 'name' => 'Retained Earnings', 'subtype' => AccountSubtype::Equity, 'is_system' => true, 'cf_class' => CashFlowClass::Excluded],
+            ['code' => '3900', 'name' => 'Owner Drawings', 'subtype' => AccountSubtype::Equity, 'is_system' => false, 'cf_class' => CashFlowClass::Financing],
+            ['code' => '4000', 'name' => 'Service Income', 'subtype' => AccountSubtype::OperatingIncome, 'is_system' => false, 'cf_class' => CashFlowClass::Operating],
+            ['code' => '4900', 'name' => 'Other Income', 'subtype' => AccountSubtype::OtherIncome, 'is_system' => false, 'cf_class' => CashFlowClass::Operating],
+            ['code' => '5000', 'name' => 'Salaries & Wages', 'subtype' => AccountSubtype::OperatingExpense, 'is_system' => false, 'cf_class' => CashFlowClass::Operating],
+            ['code' => '5100', 'name' => 'Rent', 'subtype' => AccountSubtype::OperatingExpense, 'is_system' => false, 'cf_class' => CashFlowClass::Operating],
+            ['code' => '5200', 'name' => 'Utilities', 'subtype' => AccountSubtype::OperatingExpense, 'is_system' => false, 'cf_class' => CashFlowClass::Operating],
+            ['code' => '5300', 'name' => 'Internet & Phone', 'subtype' => AccountSubtype::OperatingExpense, 'is_system' => false, 'cf_class' => CashFlowClass::Operating],
+            ['code' => '5400', 'name' => 'Software & Subscriptions', 'subtype' => AccountSubtype::OperatingExpense, 'is_system' => false, 'cf_class' => CashFlowClass::Operating],
+            ['code' => '5500', 'name' => 'Marketing & Advertising', 'subtype' => AccountSubtype::OperatingExpense, 'is_system' => false, 'cf_class' => CashFlowClass::Operating],
+            ['code' => '5600', 'name' => 'Office Supplies', 'subtype' => AccountSubtype::OperatingExpense, 'is_system' => false, 'cf_class' => CashFlowClass::Operating],
+            ['code' => '5700', 'name' => 'Bank Fees & Charges', 'subtype' => AccountSubtype::OperatingExpense, 'is_system' => false, 'cf_class' => CashFlowClass::Operating],
+            ['code' => '5800', 'name' => 'Travel', 'subtype' => AccountSubtype::OperatingExpense, 'is_system' => false, 'cf_class' => CashFlowClass::Operating],
+            ['code' => '5900', 'name' => 'Professional Fees', 'subtype' => AccountSubtype::OperatingExpense, 'is_system' => false, 'cf_class' => CashFlowClass::Operating],
+            ['code' => '5990', 'name' => 'Miscellaneous Expense', 'subtype' => AccountSubtype::OperatingExpense, 'is_system' => false, 'cf_class' => CashFlowClass::Operating],
             ...$this->fxAccounts(),
         ];
     }
@@ -71,13 +83,18 @@ class ChartOfAccountsSeeder
      * accounts to companies that were seeded before this task existed,
      * without duplicating the definitions.
      *
-     * @return list<array{code: string, name: string, subtype: AccountSubtype, is_system: bool}>
+     * Phase 7 Task 4: 'excluded', not 'operating' — CashFlowReport
+     * special-cases these two by CODE, routing their P&L contribution to a
+     * dedicated "Effect of FX on cash" line rather than leaving it (buried)
+     * inside Operating. See CashFlowReport's class docblock.
+     *
+     * @return list<array{code: string, name: string, subtype: AccountSubtype, is_system: bool, cf_class: CashFlowClass}>
      */
     public function fxAccounts(): array
     {
         return [
-            ['code' => '4950', 'name' => 'FX Gain', 'subtype' => AccountSubtype::OtherIncome, 'is_system' => true],
-            ['code' => '5950', 'name' => 'FX Loss', 'subtype' => AccountSubtype::OperatingExpense, 'is_system' => true],
+            ['code' => '4950', 'name' => 'FX Gain', 'subtype' => AccountSubtype::OtherIncome, 'is_system' => true, 'cf_class' => CashFlowClass::Excluded],
+            ['code' => '5950', 'name' => 'FX Loss', 'subtype' => AccountSubtype::OperatingExpense, 'is_system' => true, 'cf_class' => CashFlowClass::Excluded],
         ];
     }
 }

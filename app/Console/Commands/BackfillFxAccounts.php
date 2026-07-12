@@ -45,6 +45,12 @@ class BackfillFxAccounts extends Command
                         'type' => $account['subtype']->type()->value,
                         'subtype' => $account['subtype']->value,
                         'is_system' => $account['is_system'],
+                        // Phase 7 Task 4: kept in sync with ChartOfAccountsSeeder's
+                        // own cf_class for these two accounts. Not load-bearing for
+                        // CashFlowReport (which special-cases 4950/5950 by CODE,
+                        // not by cf_class), but keeps the column truthful for any
+                        // future accountant-facing display of it.
+                        'cf_class' => $account['cf_class']->value,
                     ]);
 
                     $added[] = $account['code'];
