@@ -23,6 +23,8 @@ interface AccountRow {
     is_system: boolean;
     is_archived: boolean;
     description: string | null;
+    /** Phase 7 Task 8 (cf_class fix): the Statement of Cash Flows classification — null only for a legacy row that predates the fix. */
+    cf_class: string | null;
     balance: number;
     /** Phase 7 Task 1 (sub-accounts): hierarchy fields. `parent_id` is null for a top-level account. */
     parent_id: number | null;
@@ -48,6 +50,21 @@ const SUBTYPE_CATALOG: { value: string; label: string; type: string }[] = [
     { value: 'operating_income', label: 'Income', type: 'income' },
     { value: 'other_income', label: 'Other income', type: 'income' },
     { value: 'operating_expense', label: 'Expense', type: 'expense' },
+];
+
+/**
+ * Phase 7 Task 8 (cf_class fix): the 5 Statement of Cash Flows
+ * classifications an accountant can reclassify a NON-cash/bank account into
+ * on the edit form. A Cash/Bank subtype account never shows this dropdown —
+ * see AccountFormDialog's own `isCashOrBank` branch — because
+ * Account::booted()'s `saving` hook always forces it back to Cash anyway.
+ */
+const CF_CLASS_CATALOG: { value: string; label: string }[] = [
+    { value: 'operating', label: 'Operating' },
+    { value: 'investing', label: 'Investing' },
+    { value: 'financing', label: 'Financing' },
+    { value: 'cash', label: 'Cash' },
+    { value: 'excluded', label: 'Excluded' },
 ];
 
 const TYPE_LABELS: Record<string, string> = {
@@ -120,6 +137,7 @@ interface AccountFormData {
     name: string;
     subtype: string;
     description: string;
+    cf_class: string;
 }
 
 function AccountFormDialog({
@@ -138,8 +156,14 @@ function AccountFormDialog({
         name: account?.name ?? '',
         subtype: account?.subtype ?? '',
         description: account?.description ?? '',
+        cf_class: account?.cf_class ?? '',
     });
     const errors = form.errors as Record<string, string | undefined>;
+    // Phase 7 Task 8 (cf_class fix): a Cash/Bank subtype account's
+    // classification can never leave Cash — Account::booted()'s `saving`
+    // hook forces it server-side regardless, so the control is hidden here
+    // purely to avoid confusing the user with a choice that can't stick.
+    const isCashOrBank = form.data.subtype === 'cash' || form.data.subtype === 'bank';
 
     const submit: FormEventHandler = (event) => {
         event.preventDefault();
@@ -215,6 +239,38 @@ function AccountFormDialog({
                                         </optgroup>
                                     ))}
                                 </select>
+                            </Field>
+                        )}
+
+                        {isEditing && (
+                            <Field
+                                label="Cash flow classification"
+                                htmlFor="account-cf-class"
+                                error={errors.cf_class}
+                            >
+                                {isCashOrBank ? (
+                                    <p className="flex h-10 items-center rounded-md border border-rule bg-paper px-3 text-sm text-ink-700">
+                                        Cash — every cash/bank account is always part of the cash pool.
+                                    </p>
+                                ) : (
+                                    <select
+                                        id="account-cf-class"
+                                        value={form.data.cf_class}
+                                        onChange={(event) =>
+                                            form.setData('cf_class', event.target.value)
+                                        }
+                                        className={INPUT_CLASSES}
+                                    >
+                                        <option value="" disabled>
+                                            Select a classification…
+                                        </option>
+                                        {CF_CLASS_CATALOG.map((c) => (
+                                            <option key={c.value} value={c.value}>
+                                                {c.label}
+                                            </option>
+                                        ))}
+                                    </select>
+                                )}
                             </Field>
                         )}
 

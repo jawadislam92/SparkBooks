@@ -137,13 +137,24 @@ class AccountController extends Controller
     public function update(UpdateAccountRequest $request, string $account, AuditLogger $audit): RedirectResponse
     {
         $model = Account::query()->findOrFail($account);
-        $before = $model->only(['code', 'name', 'subtype', 'description']);
+        $before = $model->only(['code', 'name', 'subtype', 'description', 'cf_class']);
         $data = $request->validated();
 
         $update = [
             'name' => $data['name'],
             'description' => $data['description'] ?? null,
         ];
+
+        // Phase 7 Task 8 (cf_class fix): reclassification, e.g. tagging a
+        // loan-interest expense as Financing. Only applied when the request
+        // actually included the field (array_key_exists, not `?? null` —
+        // callers/tests that omit it entirely must leave cf_class
+        // untouched). Account::booted()'s `saving` hook forces this back to
+        // Cash for a Cash/Bank subtype account regardless of what's
+        // submitted here — see that hook's own comment.
+        if (array_key_exists('cf_class', $data)) {
+            $update['cf_class'] = $data['cf_class'];
+        }
 
         if (! $model->is_system) {
             $subtype = AccountSubtype::from($data['subtype']);
@@ -154,7 +165,7 @@ class AccountController extends Controller
 
         $model->update($update);
 
-        $audit->log('account.updated', $model, before: $before, after: $model->only(['code', 'name', 'subtype', 'description']));
+        $audit->log('account.updated', $model, before: $before, after: $model->only(['code', 'name', 'subtype', 'description', 'cf_class']));
 
         return redirect()->route('accounts.index');
     }
@@ -266,6 +277,9 @@ class AccountController extends Controller
             'is_system' => $account->is_system,
             'is_archived' => $account->is_archived,
             'description' => $account->description,
+            // Phase 7 Task 8 (cf_class fix): surfaced so the Accounts/Index
+            // edit form can prefill + show the current classification.
+            'cf_class' => $account->cf_class?->value,
             'balance' => $balance,
             'parent_id' => $account->parent_id,
             'is_postable' => $account->isPostable(),

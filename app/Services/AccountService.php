@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Enums\AccountSubtype;
+use App\Enums\CashFlowClass;
 use App\Exceptions\Accounts\CrossTypeSubAccount;
 use App\Exceptions\Accounts\InvalidSubtreeMove;
 use App\Exceptions\Accounts\MaxDepthExceeded;
@@ -40,7 +41,15 @@ class AccountService
      * it is promoted via makeParent() (see that method's docblock for why
      * this is unconditional and safe even when $parent has zero postings).
      *
-     * @param  array{code:string, name:string, subtype:AccountSubtype|string, description?:?string}  $attributes
+     * Phase 7 Task 8 (cf_class fix): the child inherits $parent's `cf_class`
+     * by default (so reclassifying a parent — e.g. marking a loan account
+     * Financing — carries to every sub-account created under it afterward),
+     * unless $attributes explicitly supplies its own. If both are null,
+     * Account::booted()'s `saving` hook is the backstop that derives a
+     * default from the child's own subtype/code instead — never leaving a
+     * sub-account's cf_class unset the way it used to.
+     *
+     * @param  array{code:string, name:string, subtype:AccountSubtype|string, description?:?string, cf_class?:CashFlowClass|string|null}  $attributes
      */
     public function createChild(Account $parent, array $attributes): Account
     {
@@ -79,9 +88,10 @@ class AccountService
                 'description' => $attributes['description'] ?? null,
                 'parent_id' => $parent->id,
                 'is_postable' => true,
+                'cf_class' => $attributes['cf_class'] ?? $parent->cf_class,
             ]);
 
-            $this->audit->log('account.created', $child, after: $child->only(['code', 'name', 'type', 'subtype', 'parent_id', 'description']));
+            $this->audit->log('account.created', $child, after: $child->only(['code', 'name', 'type', 'subtype', 'parent_id', 'description', 'cf_class']));
 
             return $child;
         });
@@ -146,6 +156,14 @@ class AccountService
                     'description' => $leaf->description,
                     'parent_id' => $leaf->id,
                     'is_postable' => true,
+                    // Phase 7 Task 8 (cf_class fix): the "Other" sibling
+                    // inherits $leaf's OWN cf_class (not a fresh subtype-based
+                    // default) — it is literally $leaf's continued posting
+                    // history moved one level deeper, so an already-
+                    // reclassified leaf's classification must carry over
+                    // with it, the same reasoning as createChild()'s own
+                    // parent-inheritance above.
+                    'cf_class' => $leaf->cf_class,
                 ]);
 
                 $movedLines = JournalLine::query()

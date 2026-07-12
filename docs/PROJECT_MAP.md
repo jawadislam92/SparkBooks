@@ -2245,25 +2245,33 @@ classes/segments (P9), payroll (P10–12), WHT/PST + estimates/POs/recurring tra
 operations/sub-items/credit notes (all P8), UI customization (P13). None of these were in Phase 7's
 scope; nothing here narrows or blocks them.
 
-Two open, non-blocking notes carried directly from review (both P7-T4, `CashFlowReport`):
+One open, non-blocking note carried directly from review (P7-T4, `CashFlowReport`):
 - **Income-side disposal add-back is untested** — there is no fixed-asset-disposal feature yet (that
   lands with the assets/depreciation work in P10–12), so `CashFlowReport`'s indirect-method handling
   of a gain/loss ON DISPOSAL showing up on the income side has no scenario to exercise it today. Not
   a known bug — just an assertion this phase couldn't write because the triggering feature doesn't
   exist. Revisit once P10–12 ships disposals.
-- **No `cf_class` edit UI** — `accounts.cf_class` is set correctly by `ChartOfAccountsSeeder` (new
-  companies) and the backfill migration (existing companies), and is a real, editable-later column
-  exactly like `code`/`name`/`description` already are (per the migration's own docblock) — but no
-  screen exists yet to actually change it after the fact. An account whose classification needs
-  correcting today requires a direct DB update. Build a small edit affordance (likely on
-  `Accounts/Show.tsx`) whenever a real misclassification surfaces.
+
+**RESOLVED by Phase 7 Task 8** (the whole-branch reviewer's CRITICAL `cf_class` finding — see
+`.superpowers/sdd/task-8-cfclass-fix-report.md`):
+- ~~No `cf_class` edit UI~~ — an accountant can now reclassify any non-cash/bank account's `cf_class`
+  directly from the Chart of Accounts' own "Edit account" dialog (`UpdateAccountRequest` validates it,
+  `AccountController::update` persists it). A Cash/Bank subtype account's control is hidden (always
+  shows "Cash — every cash/bank account is always part of the cash pool") since `Account::booted()`'s
+  `saving` hook forces it structurally anyway.
+- ~~`createChild` does NOT inherit the parent's `cf_class`~~ — it now does (falling back to
+  `CashFlowClass::defaultFor()` off the child's own subtype/code only when the parent has none), and
+  `AccountService::makeParent()`'s auto-created "— Other" sibling inherits the promoted leaf's
+  `cf_class` the same way. More fundamentally: NO account of any subtype can be created or saved with
+  a NULL `cf_class` anymore, from ANY path (`BankAccountService::createOnce`, `AccountController::
+  store`, `AccountService::createChild`, `ChartOfAccountsSeeder`, `AccountFactory`, future code) —
+  `Account::booted()`'s `saving` hook is the structural, no-bypass fix for the bug this whole section
+  used to describe (a runtime-created account silently falling out of the Statement of Cash Flows'
+  cash pool).
 
 Other minor carries (all noted directly by task reviewers, none blocking):
 - `AccountService::moveSubtree` (Task 1) has no UI yet — service-only, reachable only via a future
-  screen or tinker. `createChild` also does NOT inherit the parent's `cf_class` — a new child starts
-  `cf_class = null` (surfaced as "unclassified" by `CashFlowReport`'s own loud diagnostics, never
-  silently guessed) rather than copying the parent's value; revisit if sub-accounting a cf_class'd
-  account becomes common.
+  screen or tinker.
 - Trial Balance's CSV export emits a parent (header) subtotal row un-indented (the on-screen tree
   view IS indented) — cosmetic only, the number itself is correct.
 - `CashFlowReport`'s FX-exclude behavior (routing 4950/5950 to their own "Effect of FX on cash" line

@@ -201,5 +201,38 @@ class Account extends Model
         static::deleting(function () {
             throw new LogicException('Accounts are archived, never deleted.');
         });
+
+        // Phase 7 Task 8 (cf_class fix): the structural invariant that makes
+        // a NULL `cf_class` — and a cash/bank account silently falling out of
+        // the Statement of Cash Flows' cash pool — impossible after a save,
+        // for EVERY creation/update path (ChartOfAccountsSeeder,
+        // BankAccountService::createOnce, AccountController::store/update,
+        // AccountService::createChild, AccountFactory, future code), because
+        // `saving` fires before BOTH `creating` and `updating` on every
+        // single Model::save() call, regardless of caller.
+        //
+        // 1. A Cash/Bank subtype account is ALWAYS forced to cf_class=Cash,
+        //    unconditionally — a real cash/bank account can never drift out
+        //    of the cash pool, even via a direct mis-edit that tries to set
+        //    it to something else (the "GUARD" the cf_class edit form's own
+        //    UI mirrors by hiding/disabling the control for these accounts).
+        // 2. Otherwise, a null cf_class is filled in from
+        //    CashFlowClass::defaultFor() (the same mapping the migration
+        //    backfill and ChartOfAccountsSeeder use) — this is what closes
+        //    the original bug: an account created by a path that never used
+        //    to set cf_class at all used to stay NULL forever.
+        // 3. An explicitly-set, non-null cf_class on a non-cash/bank account
+        //    is left untouched — that is the accountant-reclassification
+        //    path (e.g. tagging a loan-interest expense as Financing), and
+        //    AccountService::createChild's own parent-inheritance default
+        //    (see that method) flows through this same "already non-null,
+        //    leave it" branch.
+        static::saving(function (Account $account) {
+            if (in_array($account->subtype, [AccountSubtype::Cash, AccountSubtype::Bank], true)) {
+                $account->cf_class = CashFlowClass::Cash;
+            } elseif ($account->cf_class === null) {
+                $account->cf_class = CashFlowClass::defaultFor($account->subtype, $account->code);
+            }
+        });
     }
 }

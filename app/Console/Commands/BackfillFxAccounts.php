@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Enums\CashFlowClass;
 use App\Models\Account;
 use App\Models\Company;
 use App\Services\ChartOfAccountsSeeder;
@@ -45,12 +46,14 @@ class BackfillFxAccounts extends Command
                         'type' => $account['subtype']->type()->value,
                         'subtype' => $account['subtype']->value,
                         'is_system' => $account['is_system'],
-                        // Phase 7 Task 4: kept in sync with ChartOfAccountsSeeder's
-                        // own cf_class for these two accounts. Not load-bearing for
-                        // CashFlowReport (which special-cases 4950/5950 by CODE,
-                        // not by cf_class), but keeps the column truthful for any
-                        // future accountant-facing display of it.
-                        'cf_class' => $account['cf_class']->value,
+                        // Phase 7 Task 8 (cf_class fix): sourced from the same
+                        // CashFlowClass::defaultFor() ChartOfAccountsSeeder now
+                        // uses, so these two accounts can never drift from it.
+                        // Not load-bearing for CashFlowReport (which
+                        // special-cases 4950/5950 by CODE, not by cf_class),
+                        // but keeps the column truthful for any future
+                        // accountant-facing display of it.
+                        'cf_class' => CashFlowClass::defaultFor($account['subtype'], $account['code'])->value,
                     ]);
 
                     $added[] = $account['code'];
