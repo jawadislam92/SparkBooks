@@ -8,7 +8,7 @@
 > service/controller/screen/table is added). It is committed to git. If it ever disagrees with
 > the code, the code wins — fix this file.
 >
-> Last updated: **end of Phase 6 (FINAL) — v1 feature-complete** (bank reconciliation (§7.9,
+> **Phase 6 (FINAL v1) shipped:** — v1 feature-complete (bank reconciliation (§7.9,
 > `ReconciliationService` — NEVER writes the ledger, only marks `journal_lines` as cleared via
 > a `reconciliation_lines` pivot; `complete()` refuses unless the live difference is exactly 0;
 > `reopen()` is newest-first only, and `complete()` itself refuses an out-of-order statement date
@@ -28,12 +28,31 @@
 > monitoring/heartbeats (§17.9 — alert-the-moment-it-happens via email + optional Slack on backup
 > failure or `ledger:verify` findings, dead-man's-switch heartbeat pings for the backup/integrity/
 > queue-worker lifelines, both config-gated exactly like Sentry's DSN so monitoring ships inert by
-> default) — built on branch `phase-6-close-ops`. **This is the final phase — the app is now
-> feature-complete against the binding spec.** What's left is launch-track/deploy-config only, not
-> a missing feature (see §10).
+> default) — built on branch `phase-6-close-ops`. Phase 6 closed out v1 against the binding spec;
+> what follows is a real-world post-v1 phase, not spec scope-creep.
+>
+> **Last updated: end of Phase 7 — accountant essentials** (sub-accounts — a hierarchical chart of
+> accounts via `accounts.parent_id/is_postable/depth/path`, leaf-only posting enforced three ways,
+> `AccountService::createChild/makeParent/moveSubtree`, system accounts made un-nestable after a
+> CRITICAL fix; consistent archiving across accounts/contacts/items/bank-accounts, hidden from new-
+> document pickers but retained in history/reports; visible gap-free entry numbers
+> (`journal_entries.entry_number`, `JE-000142`) allocated through the existing `DocumentNumberService`
+> counter machinery; the **Statement of Cash Flows** — `accounts.cf_class` + `CashFlowReport` running
+> TWO independently-coded engines (indirect NI+add-backs vs. direct cash-leg classification) that
+> must agree; a report **drill-down library** (`TransactionDetailReport`, `AccountQuickReport`) that
+> P&L/Balance Sheet/Trial Balance now link into; a **customer/vendor report library**
+> (`ContactLedgerReport`, 9 methods — balance summary/detail, open invoices, unpaid bills,
+> collections, statements, ×2 for AR/AP) all tying to 1100/2000; and a Settings → Backup/Export
+> screen (`FullDataExportService` — a 9-CSV full-data zip, alongside the existing Accountant Package).
+> **Every one of these is additive**: the two/three new migrations only add nullable columns +
+> backfill existing rows into the pre-Phase-7 shape (every account becomes a top-level postable leaf;
+> every journal entry gets a number) — zero existing balance moved. Built on branch
+> `phase-7-accountant-essentials`. See §10 for what's still deferred (classes/segments, payroll,
+> WHT/PST, estimates/POs, credit notes, UI customization — all later phases) and two open
+> non-blocking notes from review.
 > Companion docs: the binding spec is [`superpowers/specs/2026-07-08-accounting-software-v1-design.md`](superpowers/specs/2026-07-08-accounting-software-v1-design.md);
-> phase plans live in [`superpowers/plans/`](superpowers/plans/) (Phase 6's is
-> [`2026-07-11-phase-6-close-exports-ops.md`](superpowers/plans/2026-07-11-phase-6-close-exports-ops.md));
+> phase plans live in [`superpowers/plans/`](superpowers/plans/) (Phase 7's is
+> [`2026-07-12-phase-7-accountant-essentials.md`](superpowers/plans/2026-07-12-phase-7-accountant-essentials.md));
 > per-task build/review evidence is in `.superpowers/sdd/` (git-ignored scratch — read
 > `progress.md` there when resuming).
 
@@ -89,9 +108,17 @@ invoicing is being built into v1 (spec §17.1 Path 2 "FX-lite"), not deferred. S
 | Month-end close checklist (§17.5, 7-step checklist computed over existing machinery) | ✅ built | 6 |
 | Backups + rehearsed restore (§11, 14 daily + 8 weekly retention, off-host S3 config-gated, `docs/RESTORE.md`) | ✅ built | 6 |
 | Monitoring/heartbeats (§17.9, alert-on-findings/backup-failure via email+Slack, dead-man's-switch heartbeats) | ✅ built | 6 |
+| Sub-accounts — hierarchical chart of accounts (`parent_id`/`is_postable`/`depth`/materialized `path`, leaf-only posting enforced 3 ways, `AccountService::createChild/makeParent/moveSubtree`, system accounts un-nestable) | ✅ built | 7 |
+| Account/contact/item/bank-account archiving — consistent, hidden from new-doc pickers, retained in history/reports, touches no balance | ✅ built | 7 |
+| Visible entry numbers (`journal_entries.entry_number`, `JE-000142`, gap-free per company, `EntryNumberBackfiller` for legacy rows) | ✅ built | 7 |
+| **Statement of Cash Flows** (indirect + direct engines cross-checked, `accounts.cf_class`, ties to Balance Sheet cash at both dates) | ✅ built | 7 |
+| Report drill-down library — Transaction Detail + Account QuickReport (P&L/BS/TB figures now link into a live GL-style drill-down) | ✅ built | 7 |
+| Customer/Vendor report library — balance summary+detail, Open Invoices, Unpaid Bills, Collections, Customer/Vendor Statement (9 methods, ties to 1100/2000) | ✅ built | 7 |
+| Settings → Backup/Export screen (`FullDataExportService` 9-CSV full-data zip, alongside the existing Accountant Package) | ✅ built | 7 |
 
-Tests: **1192 PHP + 61 JS**, all green on real MySQL (verified via `php artisan test` +
-`npm run test:js` at Phase 6 exit). No float on any money path (CI-enforced).
+Tests: **1398 PHP + 61 JS**, all green on real MySQL (verified via `php artisan test` +
+`npm run test:js` at Phase 7 exit — full suite, no isolation reruns needed). No float on any money
+path (CI-enforced grep, zero hits in `app/`).
 Every Phase 5 report carries a §12.9 tie-out test: P&L (net = income − expenses), Balance Sheet
 (always balances, incl. across a fiscal-year boundary and pre-books-start activity), A/R & A/P
 aging (ties to 1100/2000, incl. opening documents), Tax Summary (classified by source-type, never
@@ -107,6 +134,21 @@ each standalone report service's own output (debits==credits, balance sheet bala
 ties out) — not byte-for-byte against the standalone CSV endpoints, since the package renders its
 own CSVs into an in-memory zip rather than calling those controllers directly (see
 `AccountantPackageService`'s own class docblock).
+Phase 7 adds its own tie-out coverage: sub-accounts (a fresh migration run leaves every existing
+account a top-level postable leaf — `parent_id`/`is_postable`/`depth`/`path` all at their pre-
+Phase-7-equivalent default, TB/BS byte-identical before/after, tested; every report's rollup rolls
+up leaf rows into parent subtotals WITHOUT double-counting — grand total is always Σleaves only);
+the Statement of Cash Flows' own **six exact-integer assertions** (`CashFlowReportTest`, all
+passing): Σdebit==Σcredit in-period, CFO+CFI+CFF+FX==closing−opening cash, CFO computed by the
+indirect method == CFO computed by the direct method (the strongest cross-check — two
+independently-coded engines must agree), SCF opening/closing cash == Balance Sheet cash at both
+dates, every cash line classified (zero unclassified), and the depreciation add-back sourced from
+the depreciation EXPENSE account's own movement — never accumulated depreciation's; the drill-down
+library's `TransactionDetailReport` per-account subtotal ties to `LedgerBalances::movement` (the
+same primitive every Phase 5 report already trusted); and the customer/vendor report library's 9
+methods all tie to the 1100/2000 control accounts (aggregate AND per-contact), reviewer-probed
+against a voided document, an overpayment, and boundary dates to prove the tie-out is independent
+of `LedgerBalances`' flat SUM vs. the per-source GROUP BY these reports use.
 
 ---
 
@@ -617,6 +659,137 @@ everything touches them) so they're drawn once.
                      possibly-also-broken queue worker) + Http::post(config('monitoring.slack_webhook'))
                      — either, both, or neither may be configured; neither configured still logs a
                      warning so a real failure stays visible in application logs.
+
+  ── Phase 7 write-side + read-side services: sub-accounts, archiving, entry numbers, SCF,
+     drill-downs, customer/vendor reports, backup/export ──
+
+    AccountController ─▶ AccountService (Task 1, spec new) ─┬─▶ createChild(parent, attrs): flips the
+                          (makeParent, createChild,          │     parent's own is_postable false the
+                          moveSubtree)                       │     FIRST time it gains a child (never
+                                                             │     inferred at read time), sets depth/
+                                                             │     path from the parent — SystemAccount-
+                                                             │     NotNestable blocks it on any is_system
+                                                             │     account (3200/1100/2000/2100/3100/
+                                                             │     4950/5950 can never become a parent or
+                                                             │     child — the CRITICAL fix below)
+                                                             ├─▶ makeParent(leaf): promotes a POSTED leaf
+                                                             │     — moves its existing journal_lines to a
+                                                             │     new "{name} — Other" child in the SAME
+                                                             │     transaction, so every report's grand
+                                                             │     total is unchanged (the one sanctioned
+                                                             │     ledger-line account_id move in the whole
+                                                             │     app; audited `account.promoted`)
+                                                             ├─▶ moveSubtree(account, newParent): cascades
+                                                             │     path/depth to every descendant in one
+                                                             │     transaction (service-only — no UI yet,
+                                                             │     see §10)
+                                                             └─▶ AuditLogger
+                              CRITICAL FIX (Task 1 review): promoting an is_system account (e.g. 3200
+                              Retained Earnings) broke Balance Sheet — RE is read straight off 3200's own
+                              balance by account CODE, and a promoted 3200 stops posting, silently zeroing
+                              RE. Now structurally impossible (SystemAccountNotNestable, enforced in
+                              createChild/makeParent/moveSubtree AND Account's own creating/updating model
+                              guards, belt-and-suspenders); regression test proves BS can't be driven out
+                              of balance this way.
+                              LedgerService::validate now throws NonPostableAccount (app/Exceptions/
+                              Ledger/) if any line targets a non-leaf account — the second of three
+                              enforcement layers (IntegrityChecker's own non_postable_posting rule is the
+                              third, a nightly backstop).
+                              TrialBalanceReport/BalanceSheetReport/ProfitAndLossReport/GeneralLedgerReport
+                              all read through AccountRollup (Phase 7 Task 1/5, shared with the drill-down
+                              reports below): depth-first orders accounts (a parent immediately followed by
+                              its descendants) and rolls up each parent's row as a pure SUM of its leaf
+                              descendants — a company with zero sub-accounts degenerates back to the exact
+                              same flat code-ordered list, byte-identical to pre-Phase-7 (tested).
+
+    AccountController/ContactController/ItemController/BankAccountController ─▶ archive/unarchive
+                              (Task 2 — closed pre-existing gaps, made consistent): archived rows are
+                              HIDDEN from every new-document picker (`formOptions` scopes `->active()`;
+                              CategoryAccountGuard/ValidatesDocumentLines re-check server-side, dual-layer
+                              422) but stay fully visible in history + every report (reports never filter
+                              `is_archived` — structural, not incidental). Archiving writes NO ledger entry
+                              and changes no balance (TB byte-identical before/after archiving anything).
+                              NEW: `SystemAccountCannotBeArchived` (Account's own `updating` guard,
+                              unbypassable) — closed a real latent bug where archiving 1100 (AR) would have
+                              bricked invoicing.
+
+    LedgerService::post ─▶ DocumentNumberService::nextNumber('JE') (Task 3 — visible entry numbers):
+                              the SAME row-locked counter machinery invoices/bills already use, just a new
+                              series. `journal_entries.entry_number` (unique per company) + `JournalEntry::
+                              displayNumber()` → "JE-000142"; a reversal gets its OWN number (linked via
+                              `reversesEntry()`), never reuses the original's. `EntryNumberBackfiller`
+                              (invoked once, from the migration) numbers every legacy row in
+                              entry_date-then-id order, above each company's existing max — idempotent
+                              (only touches `entry_number IS NULL` rows), so a re-run after new out-of-
+                              order backdated rows land can never collide on the unique index. Purely
+                              additive: not part of `EntryDraft`, so no posting/balance logic changed.
+
+    Reports/CashFlowController ─▶ CashFlowReport (Task 4, spec's Statement of Cash Flows) ─▶
+                          (show, exportCsv)         LedgerBalances ─▶ JournalLine
+                              Runs TWO independently-coded engines that must AGREE (the strongest
+                              cross-check in the whole reports layer):
+                                Engine B (indirect): Net Income + non-cash add-backs (the depreciation
+                                  EXPENSE account's own movement — NEVER accumulated depreciation's, which
+                                  would double-count) + working-capital deltas (AR/AP/other operating
+                                  accounts' `cf_class`).
+                                Engine A (direct): classifies each CASH line by the OTHER leg(s)'
+                                  `cf_class` (operating/investing/financing/excluded) — a bank-to-bank
+                                  Transfer's two legs cancel to exactly zero, never showing as investing/
+                                  financing.
+                              `accounts.cf_class` (Task 4's own additive column, nullable, backfilled by
+                              code/subtype — see the migration's own docblock) drives Engine A's per-leg
+                              classification; 3200/4950/5950 are special-cased by CODE (never cf_class
+                              alone) since NI already carries them. FX realized gain/loss gets its OWN
+                              "Effect of FX on cash" line, never buried inside Operating. Opening-balance
+                              entries (dated ≤ from−1) are excluded from every section but DO count toward
+                              opening cash. See §2's tie-out paragraph for the six exact assertions.
+
+    Reports/TransactionDetailController ─▶ TransactionDetailReport (Task 5) ┬─▶ LedgerBalances
+                          Reports/AccountQuickReportController ─▶ AccountQuickReport ┘   (movement/
+                                                                                    cumulativeAsOf)
+                              TransactionDetailReport: every posted line in a period, grouped by account,
+                              each account's subtotal TIES to `LedgerBalances::movement` (the gate every
+                              other Phase 5 report already trusts) — entry#/source/contact/memo columns,
+                              running balance. No per-account filter by design (that's QuickReport's job).
+                              AccountQuickReport: ONE account's running balance from
+                              `cumulativeAsOf(from−1)` through `cumulativeAsOf(to)` — a LEAF account shows
+                              only its own lines; a PARENT (header) account rolls up every descendant
+                              leaf's lines interleaved by date (via AccountRollup). P&L/Balance Sheet/
+                              Trial Balance figures now link `?account_id=&from=&to=` into
+                              `reports/account-quickreport` — a real drill-down, round-trip browser-
+                              verified.
+
+    Reports/CustomerBalanceController/VendorBalanceController ─┬─▶ ContactLedgerReport (Task 6 — 9
+    Reports/OpenInvoicesController/UnpaidBillsController        │     methods total) ─▶ LedgerBalances +
+    Reports/CollectionsController                               │     direct journal_lines queries
+    Reports/CustomerStatementController/VendorStatementController ┘     grouped by contact_id + source
+                              document (same shape as AgingReport/IntegrityChecker's own per-contact
+                              reconstruction) — every total ties to 1100 (AR) / 2000 (AP).
+                              customerBalanceSummary/vendorBalanceSummary: aggregate outstanding per
+                              contact. customerBalanceDetail/vendorBalanceDetail: one contact's own
+                              open items. openInvoices/unpaidBills: unpaid+partially-paid documents only,
+                              outstanding shown base-correct (an FX invoice contributes its BASE remainder,
+                              never the doc-currency balance). collections: overdue AR by customer with
+                              days-overdue + contact phone/email (mirrors AgingReport's bucketing, contact-
+                              facing framing). customerStatement/vendorStatement: opening balance → period
+                              activity → closing balance, and closing MUST equal the contact's own control-
+                              account balance (tested) — printable + a PDF via `StatementPdf` (mirrors
+                              `InvoicePdf`'s own palette/money convention). A voided document, an
+                              overpayment, and boundary dates were reviewer-probed directly against these
+                              tie-outs (not just happy-path).
+
+    BackupExportController ─▶ FullDataExportService (Task 7, spec §11) ─▶ ZipArchive (9 CSVs — accounts,
+                          (show, downloadAccountantPackage,      contacts, items, journal_entries,
+                          downloadFullExport)                    journal_lines, invoices, invoice_payments,
+                                                                  bills, bill_payments — each scoped by the
+                                                                  SAME BelongsToCompany trait every model
+                                                                  already uses, proven company-B-absent)
+                              downloadAccountantPackage reuses the EXISTING Phase 6 AccountantPackageService
+                              (no duplicated report logic) — this screen is a process-UI over two already-
+                              proven export paths, not new accounting math. Both downloads audit-logged
+                              (`accountant_package.exported` / `full_data_export.exported`). Backup-status
+                              widget is a read-only filesystem scan (graceful fallback if the backups dir
+                              is unreadable). Gated `exports.run` like every other export route.
 ```
 
 ---
@@ -750,6 +923,10 @@ Enums/
   BillStatus.php                 Phase 4 T1: draft|received|partially_paid|paid|void (+ isPosted(),
                               canEdit(), canReceive(), canReceivePayment(), canVoid()) — the exact
                               AP-side mirror of InvoiceStatus.
+  CashFlowClass.php              Phase 7 T4: operating|investing|financing|cash|excluded — drives
+                              CashFlowReport's Engine A per-leg classification. Backing column
+                              (`accounts.cf_class`) is nullable; NULL means "unclassified", surfaced
+                              loudly by the report's own diagnostics rather than guessed.
 Exceptions/
   MissingCompanyContext.php   thrown when a tenant query runs with no company set (fail-closed).
   Ledger/LedgerException.php  base for all ledger errors; + UnbalancedEntry, EmptyEntry,
@@ -800,6 +977,19 @@ Exceptions/
                               newest completed reconciliation), ReconciliationAlreadyReopened (a
                               second reopen of the same reconciliation) — caught as one type by
                               ReconciliationController to surface a friendly 422.
+  Accounts/*.php                 Phase 7 T1 (sub-accounts): AccountException base +
+                              CrossTypeSubAccount (a child must share its parent's AccountType),
+                              InvalidSubtreeMove (moveSubtree rejects a cycle/moving under one's own
+                              descendant), MaxDepthExceeded (a sane nesting-depth cap),
+                              SystemAccountNotNestable (the Task 1 CRITICAL-fix guard — no is_system
+                              account, e.g. 3200/1100/2000/2100/3100/4950/5950, can ever become a
+                              parent OR a child — see §5's AccountService entry for the full story).
+  Ledger/NonPostableAccount.php   Phase 7 T1: LedgerService::validate throws this when any posted
+                              line targets a non-leaf (is_postable=false) account — enforcement layer
+                              2 of 3 (createChild/makeParent already prevent reaching this in the
+                              normal UI path; IntegrityChecker's non_postable_posting rule is layer 3,
+                              a nightly backstop for anything that slipped through, e.g. a raw
+                              query-builder write).
 Http/Controllers/
   DashboardController.php       /dashboard — cash position + customer/vendor/bank-account counts
                                 (Phase 2, unchanged) PLUS Phase 5 T7 (spec §7.12): outstanding &
@@ -818,7 +1008,11 @@ Http/Controllers/
                                 calls AuditHumanizer::action/subject) — no behavior change.
   OnboardingController.php     create company → CompanySetupService.
   CompanySwitchController.php  switch current company (audit-logged, tenant-checked → 404).
-  AccountController.php         CoA index/show(drill-down)/store/update/archive/unarchive. Reads AccountBalances.
+  AccountController.php         CoA index/show(drill-down)/store/update/archive/unarchive. Reads
+                                AccountBalances. Phase 7 T1/T2: gained a tree-shaped index (parent/
+                                child rows via AccountRollup), createChild/makeParent/moveSubtree
+                                actions → AccountService, and archive/unarchive now refuse an
+                                is_system account (SystemAccountCannotBeArchived).
   ManualJournalController.php   journal list / new / store / reverse. → ManualJournalService.
                                 Phase 6 Task 3: gained exportCsv (list-screen CSV, spec §11/§17.8) —
                                 the one list export with a genuine status+entry_date-range filter
@@ -844,6 +1038,29 @@ Http/Controllers/
                                 docblock for why those figures aren't meaningful per-contact).
   Reports/TaxSummaryController.php  Phase 5 T6: show + exportCsv (period picker; 2100 Tax Payable
                                 split collected/input/remittances/adjustments).
+  Reports/CashFlowController.php  Phase 7 T4: show + exportCsv (period picker; the six-assertion
+                                Statement of Cash Flows — see §5's CashFlowReport entry); included
+                                in the Accountant Package (Phase 6 service, no change needed there).
+  Reports/TransactionDetailController.php  Phase 7 T5: show + exportCsv — all posted lines in a
+                                period grouped by account, no per-account filter by design.
+  Reports/AccountQuickReportController.php  Phase 7 T5: show + exportCsv — one account's running
+                                balance; the drill-down TARGET every other report links `?account_id=
+                                &from=&to=` into (mirrors GeneralLedgerController's own drill-down-
+                                target role from Phase 5).
+  Reports/CustomerBalanceController.php  Phase 7 T6: summary (all customers) + detail (one contact,
+                                via ?contact_id=) + exportCsv ×2 — ties to 1100.
+  Reports/VendorBalanceController.php  Phase 7 T6: summary + detail + exportCsv ×2 — the AP mirror
+                                of CustomerBalanceController, ties to 2000.
+  Reports/OpenInvoicesController.php  Phase 7 T6: show + exportCsv — unpaid/partially-paid invoices
+                                only, outstanding shown base-correct.
+  Reports/UnpaidBillsController.php  Phase 7 T6: show + exportCsv — the AP mirror of
+                                OpenInvoicesController.
+  Reports/CollectionsController.php  Phase 7 T6: show + exportCsv — overdue AR by customer,
+                                days-overdue + contact phone/email.
+  Reports/CustomerStatementController.php  Phase 7 T6: show + pdf (?contact_id=&from=&to=) —
+                                opening→activity→closing, closing ties to the contact's own 1100
+                                sub-balance; PDF via StatementPdf.
+  Reports/VendorStatementController.php  Phase 7 T6: show + pdf — the AP mirror, ties to 2000.
   HealthController.php          /settings/health — latest IntegrityRun + "Run now".
   ProfileController.php, Auth/* Breeze auth + profile (Phase 0, restyled Phase 1).
   ContactController.php         Phase 2 T1: contacts index (type filter) /store/update/archive/
@@ -918,6 +1135,12 @@ Http/Controllers/
                                 unlinks the temp file on a pre-stream failure too). Sits in the
                                 `reports.view` group; download additionally gated `exports.run`,
                                 same double-gate shape as every other report's own CSV export route.
+  BackupExportController.php     Phase 7 T7 (spec §11): /settings/backup-export — show (renders
+                                backup-status via a read-only filesystem scan, graceful fallback if
+                                unreadable) / downloadAccountantPackage (thin re-use of the Phase 6
+                                AccountantPackageService — no duplicated report logic) /
+                                downloadFullExport → FullDataExportService. Gated `exports.run`
+                                (Staff 403 on all three routes, same as every other export surface).
 Http/Middleware/
   SetCompanyContext.php        resolves current company → CompanyContext; repairs stale/foreign id.
   RequireCompany.php           redirects users with no company to onboarding.
@@ -974,22 +1197,41 @@ Models/
   User.php                     + companies() pivot (role), current_company_id, roleIn() (cached).
   Concerns/BelongsToCompany.php  trait: global company scope + auto-fill company_id. NEVER put company_id in $fillable.
   Account.php                  chart-of-accounts row; system-account guards; isControlAccount().
+                                Phase 7 T1 (sub-accounts): + parent_id (self-FK, nullable,
+                                restrictOnDelete)/is_postable (explicit bool, NEVER derived from
+                                "has children" — flipped false only inside AccountService::makeParent's
+                                own transaction)/depth/path (materialized ancestor path, e.g. "/12/152/",
+                                indexed for prefix-scan descendant lookups) — all pure derivations of
+                                parent_id, computed in the model's own created()/updating() events,
+                                NEVER fillable. isPostable()/parent()/children()/descendants()
+                                (path-prefix query, no recursive N+1). creating()/updating() guards
+                                block SystemAccountNotNestable + reject a raw parent_id write that
+                                would bypass AccountService's cascade. Phase 7 T4: + cf_class
+                                (nullable, App\Enums\CashFlowClass) for the Statement of Cash Flows.
   JournalEntry.php, JournalLine.php   the ledger. Immutable. Written ONLY by LedgerService.
                                 journal_lines.contact_id now has a composite tenant FK →
                                 contacts(id, company_id) (Phase 2 T1; was non-null-only in Phase 1).
+                                Phase 7 T3: + entry_number (nullable at the schema level only —
+                                every row LedgerService::post creates always has one) + displayNumber()
+                                → "JE-000142" + reversesEntry() BelongsTo (a reversal's own entry
+                                number can point back at "reverses JE-000142").
   ManualJournal.php            source document for a manual JE.
   ActivityLog.php              append-only audit rows. Phase 6 Task 2 added a user() BelongsTo (the
                                 actor, nullable) so the Audit log viewer can eager-load names for display.
   IdempotencyKey.php           (company_id,key) unique; stores replay snapshot.
   IntegrityRun.php             persisted integrity-check result (clean? findings json).
   Contact.php                  Phase 2 T1: customer/vendor/both; name/email/phone/tax_number/
-                                billing_address/notes; archivable.
+                                billing_address/notes; archivable. Phase 7 T2: + scopeActive/
+                                scopeArchived (shared shape with Account/Item/BankAccount below).
   TaxRate.php                  Phase 2 T3: name + rate (basis points, integer).
   Item.php                     Phase 2 T2: name/unit_price(minor units)/default_income_account_id/
                                 default_tax_rate_id (both nullable, tenant+type validated); archivable.
+                                Phase 7 T2: + scopeActive/scopeArchived.
   BankAccount.php               Phase 2 T5: bank|cash, currency (=base, enforced), linked Account
                                 (auto-created 10xx code); archivable (doesn't cascade-archive the CoA row).
-                                Phase 6 Task 1 added a reconciliations() HasMany.
+                                Phase 6 Task 1 added a reconciliations() HasMany. Phase 7 T2: +
+                                scopeActive/scopeArchived — every invoice/bill/expense payment
+                                bank-account picker now applies ->active().
   Transfer.php                  Phase 2 T6: source document for a P11 transfer (from/to BankAccount, amount).
   OtherReceipt.php               Phase 2 T7: source document for a P14 receipt (bank, category account, payer).
   OpeningBalanceRun.php         Phase 2 T8: one row per opening-balance setup/re-run; status active|void.
@@ -1065,11 +1307,29 @@ Services/
                                 Task 4 added 4950 FX Gain / 5950 FX Loss); exposes fxAccounts() for
                                 the backfill command.
   LedgerService.php            ⭐ THE GATE (see §6). Unchanged in Phase 2 — every new write-side
-                                service posts through it.
+                                service posts through it. Phase 7 T1: validate() now throws
+                                NonPostableAccount if any line targets a non-leaf account. Phase 7 T3:
+                                post() allocates entry_number via DocumentNumberService's new 'JE'
+                                series (not part of EntryDraft — no posting/balance logic changed).
   ManualJournalService.php     manual JE post/reverse (LedgerService + Idempotency + Audit).
+  AccountService.php            Phase 7 T1 (sub-accounts): ⭐ createChild/makeParent/moveSubtree — see
+                                §5's full writeup. The one service allowed to move an EXISTING
+                                journal_line's account_id (makeParent's leaf→child move), always
+                                inside the same transaction as the row that stops being postable, so
+                                every report's grand total is provably unchanged.
   AccountBalances.php          signed per-account balances from journal_lines (read).
   IntegrityChecker.php         source-type-aware checks per company (read) — see §5 READ side note.
-  Reports/TrialBalanceReport.php  trial balance from journal_lines (read).
+  Reports/TrialBalanceReport.php  trial balance from journal_lines (read). Phase 7 T1: now reads
+                                through AccountRollup — depth-first ordered rows, a parent (header)
+                                row is a pure rollup of its descendant leaves' net (never counted a
+                                second time into total_debit/total_credit), byte-identical to
+                                pre-Phase-7 for a company with no sub-accounts.
+  Reports/AccountRollup.php      Phase 7 T1/T5: ⭐ shared by TrialBalance/BalanceSheet/ProfitAndLoss/
+                                GeneralLedger/TransactionDetail/AccountQuickReport — order() depth-
+                                first sorts accounts (a parent immediately followed by its
+                                descendants); rollup() sums each parent's row as a pure SUM of its
+                                leaf descendants' raw net. The ONE place "how do sub-account subtotals
+                                roll up" is decided, so every report agrees.
   Reports/LedgerBalances.php     Phase 5 T1: ⭐ the ONE shared per-account journal_lines
                                 aggregation every report below reads through — cumulativeAsOf()
                                 (Trial-Balance-style, as-of a date) / movement() (P&L-style, over a
@@ -1085,6 +1345,7 @@ Services/
                                 figures split into calendar-month columns (feeds both the report's
                                 own comparison columns and the dashboard's chart); net_profit =
                                 income − expenses, positive-is-normal sign convention throughout.
+                                Phase 7 T1: now reads through AccountRollup like TrialBalanceReport.
   Reports/BalanceSheetReport.php  Phase 5 T3: assets/liabilities/equity as-of a date; Retained
                                 Earnings = account 3200's posted balance + every COMPLETED fiscal
                                 year's net income (ReportPeriod::completedFiscalYears), Current-Year
@@ -1093,6 +1354,8 @@ Services/
                                 books_start_date-only bound would drop any activity dated before it
                                 and silently break the MUST-BALANCE identity; the min() fix landed
                                 as a same-phase (Task 3) review fix once real data exposed it.
+                                Phase 7 T1: rows AccountRollup-ordered like TrialBalanceReport;
+                                is_balanced/difference unaffected (parent subtotals are display-only).
   Reports/AgingReport.php        Phase 5 T4: ONE engine for both A/R and A/P (direction param) —
                                 outstanding balance per contact bucketed by the SOURCE DOCUMENT's
                                 own due date (Current/1–30/31–60/61–90/90+), the one deliberate
@@ -1109,7 +1372,9 @@ Services/
                                 from an aging row) but does not attempt a per-contact opening
                                 balance, so it deliberately hides the balance columns once active
                                 (they'd misrepresent a per-contact sub-ledger the class was never
-                                asked to build).
+                                asked to build). Phase 7 T1/T5: account picker now includes header
+                                (parent) accounts; AccountQuickReport is the newer, simpler single-
+                                account alternative most Phase 7 drill-down links use instead.
   Reports/TaxSummaryReport.php   Phase 5 T6: 2100 Tax Payable movement over a period, split
                                 collected (source_type='invoice') / input (expense·bill tax_total) /
                                 remittances (expense·bill lines whose OWN category account is 2100 —
@@ -1121,6 +1386,25 @@ Services/
                                 the ledger can't silently drift as new source types touch 2100 (a
                                 manual journal, or an other_receipt whose category is 2100 — spec-
                                 allowed, see §10 carry-forward).
+  Reports/CashFlowReport.php     Phase 7 T4: ⭐ the Statement of Cash Flows — see §5's full writeup
+                                (two independently-coded engines that must agree). accounts.cf_class
+                                drives the direct engine; the indirect engine's add-backs read the
+                                depreciation EXPENSE account's own movement only.
+  Reports/TransactionDetailReport.php  Phase 7 T5: every posted line in a period grouped by account
+                                (AccountRollup-ordered), each account's subtotal TIES to
+                                LedgerBalances::movement — the drill-down library's "all activity"
+                                view.
+  Reports/AccountQuickReport.php  Phase 7 T5: one account's running balance over a period
+                                (cumulativeAsOf(from−1)→cumulativeAsOf(to)); a PARENT account
+                                interleaves every descendant leaf's lines by date via AccountRollup, a
+                                LEAF shows only its own — the drill-down TARGET every other report
+                                links into (mirrors GeneralLedgerReport's own role, account-scoped).
+  Reports/ContactLedgerReport.php  Phase 7 T6: ⭐ the customer/vendor report library — 9 methods
+                                (customerBalanceSummary/Detail, vendorBalanceSummary/Detail,
+                                openInvoices, unpaidBills, collections, customerStatement,
+                                vendorStatement) — see §5's full writeup. Every total ties to 1100
+                                (AR) / 2000 (AP); outstanding amounts are base-correct on an FX
+                                invoice (never the doc-currency balance).
   BankAccountService.php        Phase 2 T5: creates a BankAccount + its linked 10xx Account together;
                                 concurrency-safe code allocation (lockForUpdate + 3-retry).
   TransferService.php           Phase 2 T6: P11 posting + guards (from≠to, amount≥1, tenant+archived,
@@ -1157,7 +1441,20 @@ Services/
   DocumentNumberService.php       Phase 3 T1: gap-free, race-safe numbering — insertOrIgnore +
                                 lockForUpdate on a per-(company,type) document_counters row; no
                                 TOCTOU window. Bills/expenses carry NO internal numbering (spec
-                                decision, Phase 4 brief) — this service is invoice-only.
+                                decision, Phase 4 brief) — was invoice-only through Phase 6. Phase 7
+                                T3 added a SECOND series ('JE') — LedgerService::post now allocates a
+                                gap-free entry_number through this same counter machinery on every
+                                posting, no new race-safety logic needed.
+  EntryNumberBackfiller.php       Phase 7 T3: one-shot backfill (invoked once, from the
+                                add_entry_number_to_journal_entries migration, not a standalone
+                                artisan command) — numbers every UN-numbered journal_entries row, per
+                                company, in entry_date-then-id order, above that company's current
+                                max entry_number (single UPDATE...JOIN window function, no PHP loop),
+                                then advances document_counters' 'JE' row via GREATEST() so it's never
+                                behind. IDEMPOTENT (only touches entry_number IS NULL rows) — a
+                                review fix after the first version re-ranked ALL rows and collided
+                                with the unique(company_id,entry_number) index on any re-run after new
+                                out-of-order backdated rows landed.
   DocumentLineCalculator.php      Phase 4 T2: pure expense/bill-totals calculator, the AP-side
                                 mirror of InvoiceCalculator — AMOUNT-based lines (no qty×price,
                                 spec §7.8): tax per line on the typed net amount via
@@ -1214,6 +1511,17 @@ Services/
                                 accounting math of its own, only formats/bundles. Every failure
                                 branch after tempnam() unlinks the temp file before rethrowing — no
                                 temp-file leak on success OR exception.
+  FullDataExportService.php        Phase 7 T7 (spec §11): streams a per-company ZIP of 9 CSVs
+                                (accounts, contacts, items, journal_entries, journal_lines, invoices,
+                                invoice_payments, bills, bill_payments) — every query scoped by the
+                                SAME BelongsToCompany trait every model already uses (proven company-B
+                                rows absent). Deliberately excludes invoice_lines/bill_lines
+                                (journal_lines already carries the full-fidelity postings) — see §10
+                                for the additive-follow-up note if line-level detail is ever wanted.
+  StatementPdf.php                 Phase 7 T6: renders a customer/vendor statement to PDF (dompdf,
+                                mirrors InvoicePdf's own palette/money convention) — a thin view over
+                                ContactLedgerReport::customerStatement/vendorStatement, no accounting
+                                math of its own.
 Support/
   CompanyContext.php           request-scoped current company; get() throws if unset.
   IdempotencyService.php       exactly-once execute() wrapper (baseline txn guard).
@@ -1424,10 +1732,14 @@ Pages/
                                 activity feed (RecentActivityCard, renders nothing for a viewer
                                 without audit.view).
   Onboarding/CreateCompany.tsx company setup form.
-  Accounts/Index.tsx, Show.tsx chart of accounts + account ledger drill-down.
+  Accounts/Index.tsx, Show.tsx chart of accounts + account ledger drill-down. Phase 7 T1/T2: Index.tsx
+                                grew into a tree view (indented parent/child rows), createChild/
+                                makeParent/moveSubtree actions (gated, hidden for system accounts),
+                                archive/unarchive with a show-archived toggle.
   Journal/New.tsx, Index.tsx   ⭐ manual JE editor (BalanceBeam home) + journal list. Phase 6 Task 3:
                                 Index.tsx gained an ExportCsvLink (status + entry-date-range filter,
-                                gated exports.run).
+                                gated exports.run). Phase 7 T3: Index.tsx displays each entry's
+                                JE-000142 displayNumber() instead of the raw DB id.
   Reports/TrialBalance.tsx     trial balance report + CSV export button.
   Reports/ProfitAndLoss.tsx     Phase 5 T2: income statement — period picker (defaults to current
                                 fiscal YTD), monthly comparison columns, CSV export, print.
@@ -1446,6 +1758,23 @@ Pages/
                                 export, print.
   Reports/TaxSummary.tsx         Phase 5 T6: period picker, collected/input/remittances/adjustments
                                 breakdown + net tax payable, CSV export, print.
+  Reports/CashFlow.tsx            Phase 7 T4: period picker, Operating/Investing/Financing/FX
+                                sections + reconciles-to-cash indicator, CSV export, print; included
+                                in the Accountant Package.
+  Reports/TransactionDetail.tsx   Phase 7 T5: period picker, all posted lines grouped by account
+                                with per-account subtotals, CSV export, print.
+  Reports/AccountQuickReport.tsx  Phase 7 T5: account + period picker, running balance — the
+                                drill-down landing page P&L/Balance Sheet/Trial Balance figures link
+                                into (?account_id=&from=&to=, round-trips).
+  Reports/CustomerBalanceSummary.tsx, CustomerBalanceDetail.tsx  Phase 7 T6: AR balance summary (all
+                                customers) + per-contact detail, ties to 1100, CSV export.
+  Reports/VendorBalanceSummary.tsx, VendorBalanceDetail.tsx  Phase 7 T6: AP mirror, ties to 2000.
+  Reports/OpenInvoices.tsx, UnpaidBills.tsx  Phase 7 T6: unpaid/partially-paid documents only,
+                                outstanding base-correct, CSV export.
+  Reports/Collections.tsx         Phase 7 T6: overdue AR by customer, days-overdue + contact
+                                phone/email, CSV export.
+  Reports/CustomerStatement.tsx, VendorStatement.tsx  Phase 7 T6: contact picker + period, opening→
+                                activity→closing, printable + a "Download PDF" (StatementPdf) button.
   Reports/AccountantPackage.tsx  Phase 6 Task 4 (spec §11): the one-click Accountant Package screen —
                                 a from/to period picker (mirrors Reports/ProfitAndLoss.tsx's own),
                                 lists the 6 bundled reports, a single Download button (gated
@@ -1470,6 +1799,10 @@ Pages/
                                 IP), filters by user/module/date-range. Never renders a row's raw
                                 before/after JSON.
   Settings/Books.tsx, Health.tsx  period lock + integrity health.
+  Settings/BackupExport.tsx     Phase 7 T7 (spec §11): backup-status widget (read-only fs scan) +
+                                two download buttons — Accountant Package (period picker, reuses the
+                                Phase 6 flow) and Full Data Export (9-CSV zip), both gated
+                                `exports.run`.
   Settings/TaxRates.tsx         Phase 2 T3: tax rates CRUD screen.
   Contacts/Index.tsx            Phase 2 T1: contacts list, type filter (All/Customers/Vendors),
                                 show-archived toggle, "New contact" modal. Phase 6 Task 3 gained an
@@ -1568,6 +1901,19 @@ emails/monitoring-alert.blade.php   Phase 6 Task 7 (spec §17.9): rendered by Mo
 2026_07_11_000002 month_end_closes (UNIQUE (company_id, month_end); ar_ap_reviewed_at/
                     trial_balance_reviewed_at/completed_at/completed_by — only the 2 manual-
                     acknowledge steps + the completion marker; every other close step is derived)  (Phase 6 T5)
+2026_07_12_000000 add_sub_accounts_to_accounts_table (parent_id self-FK restrictOnDelete,
+                    is_postable bool default true, depth unsignedTinyInt default 0, path indexed
+                    string, nullable — PURE ADDITIVE: one-statement backfill sets every EXISTING
+                    account's path to '/{id}/', parent_id/is_postable/depth already correct at their
+                    column defaults; zero journal_lines rows touched)                              (Phase 7 T1)
+2026_07_12_000001 add_entry_number_to_journal_entries_table (unsignedBigInteger nullable,
+                    unique(company_id, entry_number) — PURE ADDITIVE: EntryNumberBackfiller numbers
+                    every legacy row in entry_date-then-id order, no existing debit/credit/amount/
+                    entry_date touched)                                                             (Phase 7 T3)
+2026_07_12_000002 add_cf_class_to_accounts_table (string(20) nullable — PURE ADDITIVE: one CASE-
+                    expression backfill derives every EXISTING account's cf_class from its own
+                    code/subtype, mirroring ChartOfAccountsSeeder's identical mapping for new
+                    companies going forward; zero journal_lines rows touched)                       (Phase 7 T4)
 ```
 
 ### Data — `database/factories/`
@@ -1891,3 +2237,50 @@ launch-track list for the authoritative source:**
     without it, mysqldump can fail outright trying to read tablespace metadata it has no permission
     to see. Not needed against this dev environment's root account; flag before pointing
     `sparkbooks:backup` at a locked-down production DB user.
+
+**New from Phase 7 (accountant essentials) — carry to Phase 8+:**
+
+Deferred features (not built this phase, not regressions — later phases per the roadmap):
+classes/segments (P9), payroll (P10–12), WHT/PST + estimates/POs/recurring transactions/batch
+operations/sub-items/credit notes (all P8), UI customization (P13). None of these were in Phase 7's
+scope; nothing here narrows or blocks them.
+
+Two open, non-blocking notes carried directly from review (both P7-T4, `CashFlowReport`):
+- **Income-side disposal add-back is untested** — there is no fixed-asset-disposal feature yet (that
+  lands with the assets/depreciation work in P10–12), so `CashFlowReport`'s indirect-method handling
+  of a gain/loss ON DISPOSAL showing up on the income side has no scenario to exercise it today. Not
+  a known bug — just an assertion this phase couldn't write because the triggering feature doesn't
+  exist. Revisit once P10–12 ships disposals.
+- **No `cf_class` edit UI** — `accounts.cf_class` is set correctly by `ChartOfAccountsSeeder` (new
+  companies) and the backfill migration (existing companies), and is a real, editable-later column
+  exactly like `code`/`name`/`description` already are (per the migration's own docblock) — but no
+  screen exists yet to actually change it after the fact. An account whose classification needs
+  correcting today requires a direct DB update. Build a small edit affordance (likely on
+  `Accounts/Show.tsx`) whenever a real misclassification surfaces.
+
+Other minor carries (all noted directly by task reviewers, none blocking):
+- `AccountService::moveSubtree` (Task 1) has no UI yet — service-only, reachable only via a future
+  screen or tinker. `createChild` also does NOT inherit the parent's `cf_class` — a new child starts
+  `cf_class = null` (surfaced as "unclassified" by `CashFlowReport`'s own loud diagnostics, never
+  silently guessed) rather than copying the parent's value; revisit if sub-accounting a cf_class'd
+  account becomes common.
+- Trial Balance's CSV export emits a parent (header) subtotal row un-indented (the on-screen tree
+  view IS indented) — cosmetic only, the number itself is correct.
+- `CashFlowReport`'s FX-exclude behavior (routing 4950/5950 to their own "Effect of FX on cash" line
+  rather than Operating) currently relies on the SEEDER having set their `cf_class` correctly — the
+  report's own assertion (3) is the backstop that would catch a seeder drift, but there's no second,
+  independent guard.
+- No credit-note document type exists yet (same gap `AgingReport` already had, Phase 5) — Collections/
+  OpenInvoices/UnpaidBills have nothing to net against a credit note because the feature itself
+  isn't built (P8).
+- `FullDataExportService`'s 9-CSV export deliberately excludes `invoice_lines`/`bill_lines` (the
+  posted `journal_lines` already carries full-fidelity postings) — an additive follow-up, not a gap,
+  if a future need wants document-level line detail alongside the ledger-level export.
+- **LIVE BROWSER DRIVE is STILL PENDING** — now carried across four phases (4, 5, 6, 7) without ever
+  being closed. Phase 7's own exit verification (this update) used the sanctioned curl-login +
+  X-XSRF-TOKEN recipe against the dev server to confirm every new report/settings page renders a
+  real Inertia component with real report data (HTTP 200, correct `component`/`props` shape) — not a
+  genuine human-style click-through (tree-view drag/promote/archive interactions, the SCF's period
+  picker, drill-down round-trips, the customer/vendor statement PDF download, the Backup/Export
+  screen's two download buttons). **Do this before the real pre-trial walkthrough** — still the one
+  standing exit-criterion item not independently proven live since Phase 3.
