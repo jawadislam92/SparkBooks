@@ -3,7 +3,7 @@ import MoneyText from '@/Components/ui/MoneyText';
 import Sheet from '@/Components/ui/Sheet';
 import AppShell from '@/Layouts/AppShell';
 import { PageProps } from '@/types';
-import { Head, router, usePage } from '@inertiajs/react';
+import { Head, Link, router, usePage } from '@inertiajs/react';
 import { useState } from 'react';
 
 interface TrialBalanceRow {
@@ -29,6 +29,17 @@ interface TrialBalancePageProps extends PageProps {
 
 const INPUT_CLASSES =
     'h-9 rounded-md border border-rule bg-paper-raised px-3 text-sm text-ink transition duration-[120ms] ease-out motion-reduce:transition-none focus:outline-none focus:ring-2 focus:ring-spark';
+
+/**
+ * Drill-down target for every account row (Phase 7 Task 5): the Account
+ * QuickReport, scoped to this account as of this date. Used for BOTH leaf
+ * and subtotal (parent/header) rows -- a parent's QuickReport rolls its
+ * descendants' lines up into one combined view, so it's a real drill-down
+ * target too, not a dead end.
+ */
+function accountQuickReportHref(accountId: number, asOf: string): string {
+    return `${route('reports.account-quickreport')}?account_id=${accountId}&to=${encodeURIComponent(asOf)}`;
+}
 
 /**
  * Gate-B accountant sign-off report: for every account with activity as of a
@@ -121,7 +132,14 @@ export default function TrialBalance({ report, canExport }: TrialBalancePageProp
                                         <td className="py-3 pr-3 align-top font-mono">
                                             {row.code}
                                         </td>
-                                        <td className="py-3 pr-3 align-top">{row.name}</td>
+                                        <td className="py-3 pr-3 align-top">
+                                            <Link
+                                                href={accountQuickReportHref(row.account_id, asOf)}
+                                                className="text-spark underline decoration-dotted underline-offset-4 hover:no-underline"
+                                            >
+                                                {row.name}
+                                            </Link>
+                                        </td>
                                         <td className="py-3 pl-3 align-top">
                                             <MoneyText
                                                 minor={row.debit}

@@ -48,9 +48,15 @@ function toneClass(amount: number): string {
     return amount < 0 ? 'text-clay' : 'text-spark';
 }
 
-/** Drill-down target for every account row: General Ledger, scoped to this account and period. */
-function generalLedgerHref(accountId: number, from: string, to: string): string {
-    return `${route('reports.general-ledger')}?account=${accountId}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+/**
+ * Drill-down target for every account row (Phase 7 Task 5): the Account
+ * QuickReport, scoped to this account and period. Used for BOTH leaf and
+ * subtotal (parent/header) rows -- a parent's QuickReport rolls its
+ * descendants' lines up into one combined view (see AccountQuickReport's
+ * class docblock), so it's a real drill-down target too, not a dead end.
+ */
+function accountQuickReportHref(accountId: number, from: string, to: string): string {
+    return `${route('reports.account-quickreport')}?account_id=${accountId}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
 }
 
 function SectionRows({
@@ -75,7 +81,7 @@ function SectionRows({
                     </td>
                     <td className="py-2 pr-3 align-top">
                         <Link
-                            href={generalLedgerHref(row.account_id, from, to)}
+                            href={accountQuickReportHref(row.account_id, from, to)}
                             className="text-spark underline decoration-dotted underline-offset-4 hover:no-underline"
                         >
                             {row.name}

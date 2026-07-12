@@ -21,6 +21,7 @@ use App\Http\Controllers\PeriodLockController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\ReconciliationController;
 use App\Http\Controllers\Reports\AccountantPackageController;
+use App\Http\Controllers\Reports\AccountQuickReportController;
 use App\Http\Controllers\Reports\ApAgingController;
 use App\Http\Controllers\Reports\ArAgingController;
 use App\Http\Controllers\Reports\BalanceSheetController;
@@ -28,6 +29,7 @@ use App\Http\Controllers\Reports\CashFlowController;
 use App\Http\Controllers\Reports\GeneralLedgerController;
 use App\Http\Controllers\Reports\ProfitAndLossController;
 use App\Http\Controllers\Reports\TaxSummaryController;
+use App\Http\Controllers\Reports\TransactionDetailController;
 use App\Http\Controllers\Reports\TrialBalanceController;
 use App\Http\Controllers\TaxRateController;
 use App\Http\Controllers\TransferController;
@@ -123,6 +125,20 @@ Route::middleware(['auth', 'verified', 'company', 'can:reports.view'])->group(fu
     Route::get('/reports/tax-summary/export.csv', [TaxSummaryController::class, 'exportCsv'])
         ->middleware('can:exports.run')
         ->name('reports.tax-summary.export');
+
+    // Phase 7 Task 5: report drill-down library. Transaction Detail by
+    // Account groups every posted line by account over a period; Account
+    // QuickReport is the single-account drill-down TARGET every figure in
+    // P&L/Balance Sheet/Trial Balance links into.
+    Route::get('/reports/transaction-detail', [TransactionDetailController::class, 'show'])->name('reports.transaction-detail');
+    Route::get('/reports/transaction-detail/export.csv', [TransactionDetailController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('reports.transaction-detail.export');
+
+    Route::get('/reports/account-quickreport', [AccountQuickReportController::class, 'show'])->name('reports.account-quickreport');
+    Route::get('/reports/account-quickreport/export.csv', [AccountQuickReportController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('reports.account-quickreport.export');
 
     // Phase 6 Task 4 (spec §11): the Accountant Package — "one-click ... This
     // is also the escape hatch" — General Ledger, Trial Balance, P&L, Balance
