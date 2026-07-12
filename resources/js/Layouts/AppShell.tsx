@@ -110,10 +110,30 @@ function navGroups(can: Record<string, boolean>): NavGroup[] {
             items: [
                 { label: 'Profit & loss', href: route('reports.profit-and-loss'), ability: 'reports.view' },
                 { label: 'Balance sheet', href: route('reports.balance-sheet'), ability: 'reports.view' },
+                { label: 'Cash flow', href: route('reports.cash-flow'), ability: 'reports.view' },
                 { label: 'A/R aging', href: route('reports.ar-aging'), ability: 'reports.view' },
                 { label: 'A/P aging', href: route('reports.ap-aging'), ability: 'reports.view' },
+                {
+                    label: 'Customer balances',
+                    href: route('reports.customer-balance-summary'),
+                    ability: 'reports.view',
+                    activeMatch: [route('reports.customer-balance-detail')],
+                },
+                {
+                    label: 'Vendor balances',
+                    href: route('reports.vendor-balance-summary'),
+                    ability: 'reports.view',
+                    activeMatch: [route('reports.vendor-balance-detail')],
+                },
+                { label: 'Open invoices', href: route('reports.open-invoices'), ability: 'reports.view' },
+                { label: 'Unpaid bills', href: route('reports.unpaid-bills'), ability: 'reports.view' },
+                { label: 'Collections', href: route('reports.collections'), ability: 'reports.view' },
+                { label: 'Customer statement', href: route('reports.customer-statement'), ability: 'reports.view' },
+                { label: 'Vendor statement', href: route('reports.vendor-statement'), ability: 'reports.view' },
                 { label: 'Trial balance', href: route('reports.trial-balance'), ability: 'reports.view' },
                 { label: 'General ledger', href: route('reports.general-ledger'), ability: 'reports.view' },
+                { label: 'Transaction detail', href: route('reports.transaction-detail'), ability: 'reports.view' },
+                { label: 'Account QuickReport', href: route('reports.account-quickreport'), ability: 'reports.view' },
                 { label: 'Tax summary', href: route('reports.tax-summary'), ability: 'reports.view' },
                 {
                     label: 'Accountant package',
@@ -134,6 +154,11 @@ function navGroups(can: Record<string, boolean>): NavGroup[] {
                 { label: 'Opening balances', href: route('setup.opening-balances'), ability: 'settings.manage' },
                 { label: 'Health', href: route('settings.health'), ability: 'audit.view' },
                 { label: 'Audit log', href: route('settings.audit-log'), ability: 'audit.view' },
+                {
+                    label: 'Backup & export',
+                    href: route('settings.backup-export'),
+                    ability: 'exports.run',
+                },
             ],
         },
     ];

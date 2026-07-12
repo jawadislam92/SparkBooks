@@ -151,7 +151,7 @@ class ItemController extends Controller
     {
         return Account::query()
             ->where('type', AccountType::Income->value)
-            ->where('is_archived', false)
+            ->active()
             ->orderBy('code')
             ->get(['id', 'code', 'name'])
             ->map(fn (Account $account) => [

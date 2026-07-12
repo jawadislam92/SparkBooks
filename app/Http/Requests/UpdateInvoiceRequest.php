@@ -182,8 +182,19 @@ class UpdateInvoiceRequest extends FormRequest
             return;
         }
 
-        if (Item::query()->find($id) === null) {
+        // See StoreInvoiceRequest::validateItem for why item_id — a
+        // client-side prefill hint, never persisted — still gets a full
+        // tenant/archived check here.
+        $item = Item::query()->find($id);
+
+        if ($item === null) {
             $validator->errors()->add("lines.{$index}.item_id", 'The selected item was not found.');
+
+            return;
+        }
+
+        if ($item->is_archived) {
+            $validator->errors()->add("lines.{$index}.item_id", 'The selected item is archived.');
         }
     }
 }

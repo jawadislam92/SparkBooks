@@ -17,6 +17,7 @@ class AccountFactory extends Factory
             'subtype' => AccountSubtype::OperatingExpense->value,
             'is_system' => false,
             'is_archived' => false,
+            'is_postable' => true,
             'description' => null,
         ];
     }

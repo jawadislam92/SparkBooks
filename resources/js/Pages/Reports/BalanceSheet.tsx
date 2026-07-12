@@ -55,14 +55,17 @@ const RETAINED_EARNINGS_NOTE =
     'Retained Earnings here folds every completed fiscal year’s net income into account 3200’s posted balance, and shows the current fiscal year’s earnings on its own line below. The Trial Balance shows 3200 at its raw posted balance instead, alongside the still-open income and expense accounts — so the two reports will show different Retained Earnings figures by design.';
 
 /**
- * Drill-down target for every account row: General Ledger, scoped to this
- * account through the as-of date. `from` is left unset -- the Balance Sheet
- * has no period start of its own, so GeneralLedgerController falls back to
- * its own default (current fiscal year to date), mirroring how Balance
- * Sheet's own Retained Earnings math treats the current fiscal year.
+ * Drill-down target for every account row (Phase 7 Task 5): the Account
+ * QuickReport, scoped to this account through the as-of date. `from` is
+ * left unset -- the Balance Sheet has no period start of its own, so
+ * AccountQuickReportController falls back to its own default (current
+ * fiscal year to date), mirroring how Balance Sheet's own Retained
+ * Earnings math treats the current fiscal year. Used for BOTH leaf and
+ * subtotal (parent/header) rows -- a parent's QuickReport rolls its
+ * descendants' lines up into one combined view.
  */
-function generalLedgerHref(accountId: number, asOf: string): string {
-    return `${route('reports.general-ledger')}?account=${accountId}&to=${encodeURIComponent(asOf)}`;
+function accountQuickReportHref(accountId: number, asOf: string): string {
+    return `${route('reports.account-quickreport')}?account_id=${accountId}&to=${encodeURIComponent(asOf)}`;
 }
 
 function SectionRows({ rows, currency, asOf }: { rows: BalanceSheetRow[]; currency: string; asOf: string }) {
@@ -73,7 +76,7 @@ function SectionRows({ rows, currency, asOf }: { rows: BalanceSheetRow[]; curren
                     <td className="py-2 pr-3 align-top font-mono text-xs text-ink-700">{row.code}</td>
                     <td className="py-2 pr-3 align-top">
                         <Link
-                            href={generalLedgerHref(row.account_id, asOf)}
+                            href={accountQuickReportHref(row.account_id, asOf)}
                             className="text-spark underline decoration-dotted underline-offset-4 hover:no-underline"
                         >
                             {row.name}

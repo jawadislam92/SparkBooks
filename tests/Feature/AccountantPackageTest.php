@@ -6,6 +6,7 @@ use App\Domain\Ledger\EntryDraft;
 use App\Domain\Ledger\LineDraft;
 use App\Enums\AccountSubtype;
 use App\Enums\AccountType;
+use App\Enums\CashFlowClass;
 use App\Enums\Role;
 use App\Models\Account;
 use App\Models\ActivityLog;
@@ -33,7 +34,7 @@ use ZipArchive;
  * the SAME Phase 5 report services (TrialBalanceReport/BalanceSheetReport/
  * ProfitAndLossReport/...) already covered in isolation by
  * tests/Feature/Reports/*Test.php — this file doesn't re-derive their
- * correctness, it proves the PACKAGING (all 12 entries present and
+ * correctness, it proves the PACKAGING (all 14 entries present and
  * non-empty, the numbers tie to those same services, scoping, the gate, and
  * the export-access-logging completeness rule §17.8 already enforced for
  * every other export endpoint in tests/Feature/ExportTest.php).
@@ -47,6 +48,7 @@ class AccountantPackageTest extends TestCase
         'trial-balance.csv', 'trial-balance.pdf',
         'profit-and-loss.csv', 'profit-and-loss.pdf',
         'balance-sheet.csv', 'balance-sheet.pdf',
+        'cash-flow.csv', 'cash-flow.pdf',
         'ar-aging.csv', 'ar-aging.pdf',
         'ap-aging.csv', 'ap-aging.pdf',
     ];
@@ -69,6 +71,7 @@ class AccountantPackageTest extends TestCase
             'code' => '1010',
             'type' => AccountType::Asset->value,
             'subtype' => AccountSubtype::Bank->value,
+            'cf_class' => CashFlowClass::Cash->value,
         ], $overrides));
     }
 
@@ -80,6 +83,7 @@ class AccountantPackageTest extends TestCase
             'code' => '4000',
             'type' => AccountType::Income->value,
             'subtype' => AccountSubtype::OperatingIncome->value,
+            'cf_class' => CashFlowClass::Operating->value,
         ], $overrides));
     }
 
@@ -91,6 +95,7 @@ class AccountantPackageTest extends TestCase
             'code' => '5000',
             'type' => AccountType::Expense->value,
             'subtype' => AccountSubtype::OperatingExpense->value,
+            'cf_class' => CashFlowClass::Operating->value,
         ], $overrides));
     }
 
@@ -148,7 +153,7 @@ class AccountantPackageTest extends TestCase
     }
 
     // ---------------------------------------------------------------
-    // All 12 entries present, non-empty
+    // All 14 entries present, non-empty
     // ---------------------------------------------------------------
 
     public function test_zip_contains_all_twelve_entries_with_nonempty_content(): void
@@ -165,7 +170,7 @@ class AccountantPackageTest extends TestCase
 
         $entries = $this->readZipEntries($response->streamedContent());
 
-        $this->assertCount(12, $entries, 'Expected exactly 12 zip entries.');
+        $this->assertCount(14, $entries, 'Expected exactly 14 zip entries.');
         foreach (self::EXPECTED_ENTRIES as $name) {
             $this->assertArrayHasKey($name, $entries, "Missing zip entry: {$name}");
             $this->assertGreaterThan(0, strlen($entries[$name]), "Zip entry {$name} is empty.");
@@ -433,7 +438,7 @@ class AccountantPackageTest extends TestCase
         $response->assertOk();
 
         $entries = $this->readZipEntries($response->streamedContent());
-        $this->assertCount(12, $entries);
+        $this->assertCount(14, $entries);
         foreach (self::EXPECTED_ENTRIES as $name) {
             $this->assertArrayHasKey($name, $entries);
             $this->assertGreaterThan(0, strlen($entries[$name]));

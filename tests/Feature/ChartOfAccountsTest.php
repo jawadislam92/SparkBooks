@@ -12,6 +12,7 @@ use App\Models\ActivityLog;
 use App\Models\Company;
 use App\Models\User;
 use App\Services\AccountBalances;
+use App\Services\AccountService;
 use App\Services\LedgerService;
 use App\Support\CompanyContext;
 use Carbon\CarbonImmutable;
@@ -477,6 +478,77 @@ class ChartOfAccountsTest extends TestCase
         $this->assertFalse($account->fresh()->is_archived);
     }
 
+    /**
+     * Phase 7 Task 2: a system account can never be archived (see
+     * SystemAccountCannotBeArchived's docblock) — the HTTP-layer mirror of
+     * AccountsTest::test_system_account_cannot_be_archived, proving the
+     * model-layer guard surfaces as a friendly 422 (not a 500) through the
+     * same route the parent-with-active-children guard uses.
+     */
+    public function test_archiving_a_system_account_returns_a_friendly_error_not_a_500(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $account = Account::factory()->create(['company_id' => $company->id, 'is_system' => true]);
+
+        $response = $this->postJson("/accounts/{$account->id}/archive");
+
+        $response->assertSessionHasErrors('is_archived');
+        $this->assertFalse($account->fresh()->is_archived);
+        $this->assertSame(0, ActivityLog::query()->where('action', 'account.archived')->count());
+    }
+
+    public function test_cross_company_account_returns_404_on_archive(): void
+    {
+        $companyA = Company::factory()->create();
+        $accountA = $this->bankAccount($companyA);
+
+        $companyB = Company::factory()->create();
+        $this->actingAsRole($companyB, Role::Owner);
+
+        $response = $this->postJson("/accounts/{$accountA->id}/archive");
+
+        $response->assertNotFound();
+        $this->assertFalse($accountA->fresh()->is_archived);
+    }
+
+    /**
+     * Archiving is not deletion: an ordinary (non-system) account with real
+     * posted history can still be archived — only a system account or a
+     * parent with active children is blocked. Its historical journal
+     * activity/balance must be completely unaffected by archiving.
+     */
+    public function test_an_account_with_historical_activity_can_still_be_archived_and_its_balance_is_unchanged(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        app(CompanyContext::class)->set($company);
+        $bank = $this->bankAccount($company);
+        $income = $this->incomeAccount($company);
+        $this->postEntry($bank, $income, 5000, '2026-07-01', 1);
+
+        $balancesByAccount = app(AccountBalances::class)->asOf();
+        $balanceBefore = $balancesByAccount[$income->id] ?? 0;
+
+        $response = $this->postJson("/accounts/{$income->id}/archive");
+        $response->assertRedirect(route('accounts.index'));
+        $this->assertTrue($income->fresh()->is_archived);
+
+        $balancesAfter = app(AccountBalances::class)->asOf();
+        $this->assertSame($balanceBefore, $balancesAfter[$income->id] ?? 0);
+
+        // Still fully visible via its own drill-down (Show) — archiving
+        // hides it from NEW-transaction pickers, never from its own history.
+        $showResponse = $this->get("/accounts/{$income->id}");
+        $showResponse->assertOk();
+        $showResponse->assertInertia(function (AssertableInertia $page) use ($income, $balanceBefore) {
+            $page->where('account.id', $income->id);
+            $page->where('account.is_archived', true);
+            $page->where('account.balance', $balanceBefore);
+            $page->has('ledger.data', 1);
+        });
+    }
+
     // ---------------------------------------------------------------
     // Drill-down (Show)
     // ---------------------------------------------------------------
@@ -508,6 +580,134 @@ class ChartOfAccountsTest extends TestCase
             $page->where('ledger.data.1.memo', 'Paid rent');
             $page->where('ledger.data.2.running_balance', 10000);
             $page->where('ledger.data.2.memo', 'Opening deposit');
+        });
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 7 Task 1: sub-accounts — "Add sub-account" HTTP endpoint + tree
+    // rendering on Index/Show.
+    // ---------------------------------------------------------------
+
+    public function test_owner_can_add_a_sub_account_which_promotes_the_parent(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $parent = $this->expenseAccount($company, ['code' => '5400', 'name' => 'Software']);
+
+        $response = $this->postJson("/accounts/{$parent->id}/children", [
+            'code' => '5401',
+            'name' => 'Design Tools',
+            'subtype' => AccountSubtype::OperatingExpense->value,
+        ]);
+
+        $response->assertRedirect(route('accounts.index'));
+
+        $parent->refresh();
+        $this->assertFalse($parent->is_postable);
+
+        $child = Account::query()->where('code', '5401')->sole();
+        $this->assertSame($parent->id, $child->parent_id);
+        $this->assertTrue($child->is_postable);
+    }
+
+    public function test_adding_a_sub_account_of_the_wrong_root_type_is_rejected(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $parent = $this->expenseAccount($company, ['code' => '5400']);
+
+        $response = $this->postJson("/accounts/{$parent->id}/children", [
+            'code' => '1600',
+            'name' => 'Bad Child',
+            'subtype' => AccountSubtype::FixedAsset->value,
+        ]);
+
+        $response->assertSessionHasErrors('subtype');
+        $this->assertSame(0, Account::query()->where('code', '1600')->count());
+        $this->assertTrue($parent->fresh()->is_postable);
+    }
+
+    public function test_staff_forbidden_from_adding_a_sub_account(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Staff);
+        $parent = Account::factory()->create(['company_id' => $company->id]);
+
+        $response = $this->postJson("/accounts/{$parent->id}/children", [
+            'code' => '9001', 'name' => 'Child', 'subtype' => AccountSubtype::OperatingExpense->value,
+        ]);
+
+        $response->assertForbidden();
+        $this->assertSame(0, Account::query()->where('code', '9001')->count());
+    }
+
+    public function test_index_shows_parent_with_rolled_up_balance_and_leaf_hierarchy_fields(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        app(CompanyContext::class)->set($company);
+        $bank = $this->bankAccount($company);
+        $parent = $this->expenseAccount($company, ['code' => '5400', 'name' => 'Software']);
+        $child = app(AccountService::class)->createChild($parent, [
+            'code' => '5401', 'name' => 'Design Tools', 'subtype' => AccountSubtype::OperatingExpense,
+        ]);
+
+        $this->postEntry($child, $bank, 12000, '2026-07-01', 1);
+
+        $response = $this->get('/accounts');
+
+        $response->assertOk();
+        $response->assertInertia(function (AssertableInertia $page) use ($parent, $child) {
+            $page->component('Accounts/Index');
+            $page->where('accounts', function ($accounts) use ($parent, $child) {
+                $byId = collect($accounts)->keyBy('id');
+
+                return $byId[$parent->id]['balance'] === 12000
+                    && $byId[$parent->id]['is_postable'] === false
+                    && $byId[$parent->id]['depth'] === 0
+                    && $byId[$child->id]['balance'] === 12000
+                    && $byId[$child->id]['is_postable'] === true
+                    && $byId[$child->id]['depth'] === 1
+                    && $byId[$child->id]['parent_id'] === $parent->id;
+            });
+        });
+    }
+
+    public function test_archiving_a_parent_with_an_active_child_returns_a_friendly_error_not_a_500(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        app(CompanyContext::class)->set($company);
+        $parent = $this->expenseAccount($company, ['code' => '5400']);
+        app(AccountService::class)->createChild($parent, [
+            'code' => '5401', 'name' => 'Child', 'subtype' => AccountSubtype::OperatingExpense,
+        ]);
+
+        $response = $this->postJson("/accounts/{$parent->id}/archive");
+
+        $response->assertSessionHasErrors('is_archived');
+        $this->assertFalse($parent->fresh()->is_archived);
+    }
+
+    public function test_show_on_a_parent_account_displays_its_rolled_up_balance(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        app(CompanyContext::class)->set($company);
+        $bank = $this->bankAccount($company);
+        $parent = $this->expenseAccount($company, ['code' => '5400', 'name' => 'Software']);
+        $child = app(AccountService::class)->createChild($parent, [
+            'code' => '5401', 'name' => 'Design Tools', 'subtype' => AccountSubtype::OperatingExpense,
+        ]);
+        $this->postEntry($child, $bank, 5000, '2026-07-01', 1);
+
+        $response = $this->get("/accounts/{$parent->id}");
+
+        $response->assertOk();
+        $response->assertInertia(function (AssertableInertia $page) {
+            $page->where('account.balance', 5000);
+            $page->where('account.is_postable', false);
+            $page->has('ledger.data', 0);
         });
     }
 }

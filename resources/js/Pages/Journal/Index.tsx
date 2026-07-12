@@ -28,6 +28,8 @@ interface JournalLineData {
 
 interface JournalEntryData {
     id: number;
+    entry_number: number | null;
+    entry_number_display: string | null;
     lines: JournalLineData[];
 }
 
@@ -293,6 +295,9 @@ export default function Index({ journals }: IndexPageProps) {
                                         Date
                                     </th>
                                     <th scope="col" className="py-2 pr-3 font-medium">
+                                        Entry #
+                                    </th>
+                                    <th scope="col" className="py-2 pr-3 font-medium">
                                         Memo
                                     </th>
                                     <th scope="col" className="py-2 pr-3 text-right font-medium">
@@ -333,6 +338,9 @@ export default function Index({ journals }: IndexPageProps) {
                                                 <td className="py-3 pr-3 align-top">
                                                     {formatDisplayDate(journal.entry_date)}
                                                 </td>
+                                                <td className="py-3 pr-3 align-top text-ink-700">
+                                                    {journal.journal_entry?.entry_number_display ?? '—'}
+                                                </td>
                                                 <td className="py-3 pr-3 align-top">{journal.memo}</td>
                                                 <td className="py-3 pr-3 align-top">
                                                     <MoneyText
@@ -365,7 +373,7 @@ export default function Index({ journals }: IndexPageProps) {
                                             </tr>
                                             {isExpanded && (
                                                 <tr id={detailId} className="border-b border-rule bg-paper">
-                                                    <td colSpan={6} className="px-3 py-3">
+                                                    <td colSpan={7} className="px-3 py-3">
                                                         <table className="w-full border-collapse text-sm">
                                                             <thead>
                                                                 <tr className="text-xs font-medium uppercase tracking-wide text-ink-700">

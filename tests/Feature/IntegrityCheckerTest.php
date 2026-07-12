@@ -412,6 +412,42 @@ class IntegrityCheckerTest extends TestCase
         $this->assertNotContains('trial_balance', $checks);
     }
 
+    /**
+     * Phase 7 Task 1 (sub-accounts) enforcement #2 of 3: LedgerService
+     * already refuses to post to a non-postable account (see
+     * NonPostableAccountTest/LedgerServiceTest), so the ONLY way this
+     * corruption can exist at all is a raw insert bypassing that gate
+     * entirely — exactly like every other seeded corruption in this file.
+     */
+    public function test_non_postable_account_posting_produces_finding(): void
+    {
+        $company = Company::factory()->create();
+        $bank = $this->bankAccount($company);
+        $income = $this->incomeAccount($company);
+        $parent = $this->incomeAccount($company, ['code' => '4900', 'is_postable' => false]);
+
+        $entry = $this->postBalancedEntry($company, [
+            ['account_id' => $bank->id, 'debit' => 10000, 'credit' => 0],
+            ['account_id' => $income->id, 'debit' => 0, 'credit' => 10000],
+        ]);
+
+        // Offsetting raw pair against the (non-postable) parent account, so
+        // this is isolated to JUST the leaf-only violation — the entry and
+        // the whole ledger still net to zero.
+        $this->rawInsertLine($company, $entry, $parent, debit: 700, credit: 0);
+        $this->rawInsertLine($company, $entry, $bank, debit: 0, credit: 700);
+
+        $findings = app(IntegrityChecker::class)->checkCompany($company);
+        $checks = collect($findings)->pluck('check')->all();
+
+        $this->assertContains('non_postable_posting', $checks);
+        $this->assertNotContains('entry_balance', $checks);
+        $this->assertNotContains('trial_balance', $checks);
+
+        $finding = collect($findings)->firstWhere('check', 'non_postable_posting');
+        $this->assertStringContainsString('1 journal_line', $finding['detail']);
+    }
+
     public function test_orphaned_manual_journal_source_entry_produces_finding(): void
     {
         $company = Company::factory()->create();

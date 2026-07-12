@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Enums\AccountSubtype;
+use App\Enums\CashFlowClass;
 use App\Models\Account;
 use App\Models\Company;
 
@@ -23,6 +24,21 @@ class ChartOfAccountsSeeder
                 'type' => $account['subtype']->type()->value,
                 'subtype' => $account['subtype']->value,
                 'is_system' => $account['is_system'],
+                // Phase 7 Task 8 (cf_class fix): sourced from
+                // CashFlowClass::defaultFor() — the ONE canonical
+                // code/subtype -> cf_class mapping, also used by the
+                // add_cf_class_to_accounts migration's backfill CASE
+                // expression (see that method's own docblock for why these
+                // two can never drift apart again) and by Account::booted()'s
+                // `saving` hook for every OTHER account-creation path in the
+                // app. See CashFlowClass's own docblock for what each value
+                // means.
+                'cf_class' => CashFlowClass::defaultFor($account['subtype'], $account['code'])->value,
+                // Explicit, same reasoning as AccountController::store — see
+                // its own comment for why this can't be left to the DB
+                // column default alone.
+                'parent_id' => null,
+                'is_postable' => true,
             ]);
         }
     }
@@ -39,6 +55,11 @@ class ChartOfAccountsSeeder
             ['code' => '2100', 'name' => 'Tax Payable', 'subtype' => AccountSubtype::Tax, 'is_system' => true],
             ['code' => '3000', 'name' => "Owner's Equity", 'subtype' => AccountSubtype::Equity, 'is_system' => false],
             ['code' => '3100', 'name' => 'Opening Balance Equity', 'subtype' => AccountSubtype::Equity, 'is_system' => true],
+            // Phase 7 Task 4: cf_class resolves to 'excluded', never
+            // 'financing' — CashFlowClass::defaultFor() special-cases 3200 by
+            // CODE (NI at the top + dividends in Financing, per the spec seed
+            // §2 split-account rule); its own raw movement is never fed
+            // through the generic per-account classification loop.
             ['code' => '3200', 'name' => 'Retained Earnings', 'subtype' => AccountSubtype::Equity, 'is_system' => true],
             ['code' => '3900', 'name' => 'Owner Drawings', 'subtype' => AccountSubtype::Equity, 'is_system' => false],
             ['code' => '4000', 'name' => 'Service Income', 'subtype' => AccountSubtype::OperatingIncome, 'is_system' => false],
@@ -65,6 +86,12 @@ class ChartOfAccountsSeeder
      * so App\Console\Commands\BackfillFxAccounts can add these exact same
      * accounts to companies that were seeded before this task existed,
      * without duplicating the definitions.
+     *
+     * Phase 7 Task 4: cf_class resolves to 'excluded', not 'operating' —
+     * CashFlowClass::defaultFor() special-cases these two by CODE, routing
+     * their P&L contribution to a dedicated "Effect of FX on cash" line
+     * rather than leaving it (buried) inside Operating. See CashFlowReport's
+     * class docblock.
      *
      * @return list<array{code: string, name: string, subtype: AccountSubtype, is_system: bool}>
      */

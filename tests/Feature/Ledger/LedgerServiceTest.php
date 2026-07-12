@@ -12,6 +12,7 @@ use App\Exceptions\Ledger\ControlAccountViolation;
 use App\Exceptions\Ledger\EmptyEntry;
 use App\Exceptions\Ledger\ImmutableLedger;
 use App\Exceptions\Ledger\LockedPeriod;
+use App\Exceptions\Ledger\NonPostableAccount;
 use App\Exceptions\Ledger\UnbalancedEntry;
 use App\Models\Account;
 use App\Models\Company;
@@ -353,6 +354,64 @@ class LedgerServiceTest extends TestCase
         }
 
         $this->assertSame(0, JournalEntry::query()->count());
+        $this->assertLedgerBalances();
+    }
+
+    // ---------------------------------------------------------------
+    // Sub-accounts: leaf-only posting, enforcement #1 of 3 (Phase 7 Task 1)
+    // ---------------------------------------------------------------
+
+    public function test_primary_entry_touching_non_postable_account_throws_non_postable_account(): void
+    {
+        $company = Company::factory()->create();
+        app(CompanyContext::class)->set($company);
+        $parent = $this->bankAccount(['is_postable' => false]);
+        $income = $this->incomeAccount();
+
+        $draft = new EntryDraft(
+            entryDate: CarbonImmutable::parse('2026-07-01'),
+            memo: 'Posting to a parent account',
+            sourceType: 'manual_journal',
+            sourceId: 24,
+            lines: [
+                new LineDraft(accountId: $parent->id, debit: 10000, credit: 0),
+                new LineDraft(accountId: $income->id, debit: 0, credit: 10000),
+            ],
+        );
+
+        try {
+            DB::transaction(fn () => app(LedgerService::class)->post($draft));
+            $this->fail('Expected NonPostableAccount to be thrown.');
+        } catch (NonPostableAccount $e) {
+            $this->assertStringContainsString($parent->code, $e->getMessage());
+        }
+
+        $this->assertSame(0, JournalEntry::query()->count());
+        $this->assertLedgerBalances();
+    }
+
+    public function test_postable_leaf_account_posts_normally(): void
+    {
+        $company = Company::factory()->create();
+        app(CompanyContext::class)->set($company);
+        $bank = $this->bankAccount(['is_postable' => true]);
+        $income = $this->incomeAccount();
+
+        $draft = new EntryDraft(
+            entryDate: CarbonImmutable::parse('2026-07-01'),
+            memo: 'Postable leaf',
+            sourceType: 'manual_journal',
+            sourceId: 25,
+            lines: [
+                new LineDraft(accountId: $bank->id, debit: 10000, credit: 0),
+                new LineDraft(accountId: $income->id, debit: 0, credit: 10000),
+            ],
+        );
+
+        $entry = DB::transaction(fn () => app(LedgerService::class)->post($draft));
+
+        $this->assertSame(1, JournalEntry::query()->count());
+        $this->assertNotNull($entry->id);
         $this->assertLedgerBalances();
     }
 
@@ -719,6 +778,52 @@ class LedgerServiceTest extends TestCase
         $this->assertSame(0, $incomeLine->credit);
 
         $this->assertSame(2, JournalEntry::query()->count());
+        $this->assertLedgerBalances();
+    }
+
+    /**
+     * Phase 7 Task 3 (visible entry numbers): a reversal is a normal
+     * LedgerService::post() call under the hood, so it gets its OWN
+     * gap-free entry_number exactly like any other entry (never reuses or
+     * decrements the original's) -- and the link back to the original,
+     * already carried by reverses_entry_id, is surfaced through the new
+     * reversesEntry() relation so a caller can read the ORIGINAL's number
+     * off the reversal without a second lookup by hand.
+     */
+    public function test_reverse_gets_its_own_entry_number_and_surfaces_the_originals_number(): void
+    {
+        $company = Company::factory()->create();
+        app(CompanyContext::class)->set($company);
+        $bank = $this->bankAccount();
+        $income = $this->incomeAccount();
+
+        $original = DB::transaction(fn () => app(LedgerService::class)->post(new EntryDraft(
+            entryDate: CarbonImmutable::parse('2026-07-01'),
+            memo: 'Original',
+            sourceType: 'manual_journal',
+            sourceId: 26,
+            lines: [
+                new LineDraft(accountId: $bank->id, debit: 10000, credit: 0),
+                new LineDraft(accountId: $income->id, debit: 0, credit: 10000),
+            ],
+        )));
+
+        $reversal = DB::transaction(
+            fn () => app(LedgerService::class)->reverse($original, CarbonImmutable::parse('2026-07-02'), 'Reversing original')
+        );
+
+        $this->assertSame(1, $original->entry_number);
+        $this->assertSame(2, $reversal->entry_number);
+        $this->assertNotSame($original->entry_number, $reversal->entry_number);
+
+        // The reversal's own reversesEntry() relation resolves back to the
+        // original row, whose entry_number/displayNumber() is the one the
+        // reversal's display should note ("reverses JE-000001").
+        $reversal->load('reversesEntry');
+        $this->assertSame($original->id, $reversal->reversesEntry->id);
+        $this->assertSame($original->entry_number, $reversal->reversesEntry->entry_number);
+        $this->assertSame('JE-000001', $reversal->reversesEntry->displayNumber());
+        $this->assertSame('JE-000002', $reversal->displayNumber());
         $this->assertLedgerBalances();
     }
 

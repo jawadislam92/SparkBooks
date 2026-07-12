@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Enums\AccountSubtype;
 use App\Enums\AccountType;
+use App\Exceptions\Accounts\SystemAccountCannotBeArchived;
 use App\Models\Account;
 use App\Models\Company;
 use App\Models\User;
@@ -250,16 +251,32 @@ class AccountsTest extends TestCase
         $this->assertSame('Front-desk float', $fresh->description);
     }
 
-    public function test_system_account_can_be_archived(): void
+    /**
+     * Phase 7 Task 2 (archiving, surfaced everywhere): a system account is
+     * referenced BY CODE in posting rules and reports (Retained Earnings,
+     * the AR/AP control accounts, Tax Payable, ...) — archiving one would
+     * hide it from the very pickers those posting rules need it in, the same
+     * corruption risk SystemAccountNotNestable already guards against for
+     * sub-accounting. This deliberately supersedes the old behaviour: a
+     * system account could previously be archived (see git history), but
+     * Task 2 closes that gap.
+     */
+    public function test_system_account_cannot_be_archived(): void
     {
         $company = Company::factory()->create();
         $this->seedInto($company);
         app(CompanyContext::class)->set($company);
 
         $account = Account::query()->where('code', '1000')->sole();
-        $account->update(['is_archived' => true]);
 
-        $this->assertTrue($account->fresh()->is_archived);
+        try {
+            $account->update(['is_archived' => true]);
+            $this->fail('Expected SystemAccountCannotBeArchived to be thrown.');
+        } catch (SystemAccountCannotBeArchived) {
+            // expected
+        }
+
+        $this->assertFalse($account->fresh()->is_archived);
     }
 
     public function test_non_system_account_can_change_code_type_and_subtype(): void
@@ -320,6 +337,35 @@ class AccountsTest extends TestCase
         $this->assertTrue($ar->isControlAccount());
         $this->assertTrue($ap->isControlAccount());
         $this->assertFalse($bank->isControlAccount());
+    }
+
+    /**
+     * Phase 7 Task 2 (archiving, surfaced everywhere): scopeActive/
+     * scopeArchived are the shared filter every picker/eligibility query in
+     * this app applies (InvoiceController::formOptions, CategoryAccountGuard::
+     * eligibleQuery, ...) — this pins down their own behaviour directly,
+     * independent of any one caller, including that they respect the
+     * tenant-scoping BelongsToCompany global scope already applies.
+     */
+    public function test_active_and_archived_scopes_filter_by_is_archived_within_the_current_company(): void
+    {
+        $company = Company::factory()->create();
+        app(CompanyContext::class)->set($company);
+        $active = Account::factory()->create(['company_id' => $company->id, 'code' => '9001']);
+        $archived = Account::factory()->create(['company_id' => $company->id, 'code' => '9002', 'is_archived' => true]);
+
+        $otherCompany = Company::factory()->create();
+        $foreignActive = Account::factory()->create(['company_id' => $otherCompany->id, 'code' => '9001']);
+
+        $activeIds = Account::active()->pluck('id')->all();
+        $archivedIds = Account::archived()->pluck('id')->all();
+
+        $this->assertContains($active->id, $activeIds);
+        $this->assertNotContains($archived->id, $activeIds);
+        $this->assertNotContains($foreignActive->id, $activeIds);
+
+        $this->assertContains($archived->id, $archivedIds);
+        $this->assertNotContains($active->id, $archivedIds);
     }
 
     public function test_onboarding_seeds_the_chart_of_accounts(): void

@@ -57,7 +57,7 @@ use Carbon\CarbonImmutable;
  */
 class BalanceSheetReport
 {
-    public function __construct(private LedgerBalances $ledger, private CompanyContext $context) {}
+    public function __construct(private LedgerBalances $ledger, private CompanyContext $context, private AccountRollup $rollup) {}
 
     /**
      * @return array{
@@ -154,28 +154,42 @@ class BalanceSheetReport
     }
 
     /**
-     * One query for the type's cumulative balances, one for its accounts
-     * ordered by code, joined in PHP — mirrors TrialBalanceReport::build().
-     * Zero-net accounts are skipped entirely (never-used AND
-     * fully-offset alike), same skip rule as TrialBalanceReport/
-     * ProfitAndLossReport.
+     * One query for the type's cumulative balances, joined in PHP against
+     * every account of that type, depth-first ordered (see AccountRollup) —
+     * mirrors TrialBalanceReport::build(). Zero-net accounts are skipped
+     * entirely (never-used AND fully-offset alike, LEAF rows only — same
+     * skip rule as TrialBalanceReport/ProfitAndLossReport); an empty parent
+     * header is skipped the same way once its rollup is zero.
      *
-     * @return array{rows: list<array{account_id:int, code:string, name:string, amount:int}>, total:int}
+     * Phase 7 Task 1: parent (header) rows are a pure rollup of their
+     * descendant leaves and never contribute to `$total` a second time (a
+     * leaf's amount is already counted once) — a company with no
+     * sub-accounts degenerates to the exact same flat list and total as
+     * before.
+     *
+     * @return array{rows: list<array{account_id:int, code:string, name:string, amount:int, depth:int, is_subtotal:bool}>, total:int}
      */
     private function accountSection(AccountType $type, CarbonImmutable $asOf, bool $isDebitNormal, ?int $excludeAccountId = null): array
     {
         $balances = $this->ledger->cumulativeAsOf($asOf, null, [$type]);
 
+        $accounts = Account::query()->where('type', $type->value)->get()
+            ->reject(fn (Account $account) => $account->id === $excludeAccountId)
+            ->values();
+        $ordered = $this->rollup->order($accounts);
+
+        $rawAmounts = [];
+        foreach ($accounts as $account) {
+            $net = $balances[$account->id]['net'] ?? 0;
+            $rawAmounts[$account->id] = $isDebitNormal ? $net : -$net;
+        }
+        $rolledAmounts = $this->rollup->rollup($ordered, $rawAmounts);
+
         $rows = [];
         $total = 0;
 
-        foreach (Account::query()->where('type', $type->value)->orderBy('code')->get() as $account) {
-            if ($account->id === $excludeAccountId) {
-                continue;
-            }
-
-            $net = $balances[$account->id]['net'] ?? 0;
-            $amount = $isDebitNormal ? $net : -$net;
+        foreach ($ordered as $account) {
+            $amount = $account->isPostable() ? $rawAmounts[$account->id] : ($rolledAmounts[$account->id] ?? 0);
 
             if ($amount === 0) {
                 continue;
@@ -186,8 +200,13 @@ class BalanceSheetReport
                 'code' => $account->code,
                 'name' => $account->name,
                 'amount' => $amount,
+                'depth' => $account->depth,
+                'is_subtotal' => ! $account->isPostable(),
             ];
-            $total += $amount;
+
+            if ($account->isPostable()) {
+                $total += $amount;
+            }
         }
 
         return ['rows' => $rows, 'total' => $total];

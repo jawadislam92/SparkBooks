@@ -3,6 +3,7 @@
 namespace App\Http\Requests;
 
 use App\Enums\AccountSubtype;
+use App\Enums\CashFlowClass;
 use App\Models\Account;
 use App\Support\CompanyContext;
 use Illuminate\Contracts\Validation\Validator;
@@ -48,6 +49,15 @@ class UpdateAccountRequest extends FormRequest
         $rules = [
             'name' => ['required', 'string', 'max:120'],
             'description' => ['nullable', 'string', 'max:500'],
+            // Phase 7 Task 8 (cf_class fix): the reclassification field —
+            // allowed on ANY account, system or not (unlike code/subtype
+            // below), since it's never structural the way those are. The
+            // model-level guard that actually enforces "a Cash/Bank subtype
+            // account can never leave cf_class=Cash" lives in
+            // Account::booted()'s `saving` hook, not here — so whatever is
+            // submitted for a cash/bank account is silently overwritten back
+            // to Cash on save, rather than rejected with a validation error.
+            'cf_class' => ['nullable', Rule::enum(CashFlowClass::class)],
         ];
 
         if (! $account->is_system) {

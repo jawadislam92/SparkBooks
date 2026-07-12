@@ -34,7 +34,7 @@ use Carbon\CarbonImmutable;
  */
 class ProfitAndLossReport
 {
-    public function __construct(private LedgerBalances $ledger) {}
+    public function __construct(private LedgerBalances $ledger, private AccountRollup $rollup) {}
 
     /**
      * @return array{
@@ -102,36 +102,76 @@ class ProfitAndLossReport
      * total (0 in that example) while never zeroing a month that had
      * activity.
      *
+     * Phase 7 Task 1: rows are depth-first ordered (AccountRollup) and a
+     * non-leaf (parent/header) account's `amount`/`months` are a pure rollup
+     * of its descendant leaves — its OWN raw amounts are always 0 (parents
+     * never carry direct postings). Only LEAF amounts feed `$total`/
+     * `$totalByMonth`, so a parent subtotal row never double-counts. A
+     * company with no sub-accounts degenerates to the exact same flat,
+     * code-ordered list and totals as before.
+     *
      * @param  array<int, array{account_id: int, debit: int, credit: int, net: int}>  $rangeMovement
      * @param  list<array<int, array{account_id: int, debit: int, credit: int, net: int}>>  $monthlyMovements
-     * @return array{rows: list<array{account_id: int, code: string, name: string, amount: int, months: list<int>}>, total: int, total_by_month: list<int>}
+     * @return array{rows: list<array{account_id: int, code: string, name: string, amount: int, months: list<int>, depth: int, is_subtotal: bool}>, total: int, total_by_month: list<int>}
      */
     private function section(AccountType $type, array $rangeMovement, array $monthlyMovements, int $monthCount): array
     {
         $isDebitNormal = $type->isDebitNormal();
 
-        $rows = [];
-        $total = 0;
-        $totalByMonth = array_fill(0, $monthCount, 0);
+        $accounts = Account::query()->where('type', $type->value)->get();
+        $ordered = $this->rollup->order($accounts);
 
-        $accounts = Account::query()->where('type', $type->value)->orderBy('code')->get();
-
+        $rawRangeAmount = [];
+        $rawMonthAmounts = [];
         foreach ($accounts as $account) {
             $net = $rangeMovement[$account->id]['net'] ?? 0;
-            $amount = $isDebitNormal ? $net : -$net;
+            $rawRangeAmount[$account->id] = $isDebitNormal ? $net : -$net;
 
             $months = [];
             for ($i = 0; $i < $monthCount; $i++) {
                 $monthNet = $monthlyMovements[$i][$account->id]['net'] ?? 0;
-                $monthAmount = $isDebitNormal ? $monthNet : -$monthNet;
+                $months[] = $isDebitNormal ? $monthNet : -$monthNet;
+            }
+            $rawMonthAmounts[$account->id] = $months;
+        }
+
+        $rolledRangeAmount = $this->rollup->rollup($ordered, $rawRangeAmount);
+
+        // Roll up each month bucket independently (a parent's Jan column is
+        // Σ its descendants' Jan columns, etc.) — one rollup() call per
+        // month, each over that month's own per-account amount map.
+        $rolledMonthAmounts = array_fill(0, $monthCount, []);
+        for ($i = 0; $i < $monthCount; $i++) {
+            $perAccountThisMonth = [];
+            foreach ($accounts as $account) {
+                $perAccountThisMonth[$account->id] = $rawMonthAmounts[$account->id][$i];
+            }
+            $rolledMonthAmounts[$i] = $this->rollup->rollup($ordered, $perAccountThisMonth);
+        }
+
+        $rows = [];
+        $total = 0;
+        $totalByMonth = array_fill(0, $monthCount, 0);
+
+        foreach ($ordered as $account) {
+            $isLeaf = $account->isPostable();
+            $amount = $isLeaf ? $rawRangeAmount[$account->id] : ($rolledRangeAmount[$account->id] ?? 0);
+
+            $months = [];
+            for ($i = 0; $i < $monthCount; $i++) {
+                $monthAmount = $isLeaf ? $rawMonthAmounts[$account->id][$i] : ($rolledMonthAmounts[$i][$account->id] ?? 0);
                 $months[] = $monthAmount;
-                // ALWAYS accumulate the monthly total, even for a
-                // zero-full-range account — see method docblock.
-                $totalByMonth[$i] += $monthAmount;
+                // ALWAYS accumulate the monthly total for LEAVES ONLY, even
+                // for a zero-full-range account — see method docblock. A
+                // parent's month amount is never added a second time here:
+                // it is already the sum of these same leaves' months.
+                if ($isLeaf) {
+                    $totalByMonth[$i] += $monthAmount;
+                }
             }
 
-            // Skip only the DISPLAY row for a zero-full-range account; its
-            // monthly totals are already accumulated above.
+            // Skip only the DISPLAY row for a zero-full-range account/header;
+            // its monthly totals (if a leaf) are already accumulated above.
             if ($amount === 0) {
                 continue;
             }
@@ -142,8 +182,13 @@ class ProfitAndLossReport
                 'name' => $account->name,
                 'amount' => $amount,
                 'months' => $months,
+                'depth' => $account->depth,
+                'is_subtotal' => ! $isLeaf,
             ];
-            $total += $amount;
+
+            if ($isLeaf) {
+                $total += $amount;
+            }
         }
 
         return ['rows' => $rows, 'total' => $total, 'total_by_month' => $totalByMonth];

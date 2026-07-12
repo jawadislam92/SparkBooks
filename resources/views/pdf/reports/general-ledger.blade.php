@@ -31,7 +31,7 @@
                 @foreach($account['lines'] as $line)
                     <tr>
                         <td>{{ $line['entry_date'] }}</td>
-                        <td>Entry #{{ $line['entry_id'] }}</td>
+                        <td>{{ $line['entry_number_display'] ?? 'Entry #'.$line['entry_id'] }}</td>
                         <td>{{ $line['source_label'] }}</td>
                         <td>{{ $line['contact_name'] ?? '' }}</td>
                         <td class="money">{{ \App\Services\InvoicePdf::formatMoney($line['debit'], $company->base_currency) }}</td>

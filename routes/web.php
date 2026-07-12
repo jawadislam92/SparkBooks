@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\AccountController;
 use App\Http\Controllers\AuditLogController;
+use App\Http\Controllers\BackupExportController;
 use App\Http\Controllers\BankAccountController;
 use App\Http\Controllers\BillController;
 use App\Http\Controllers\CompanySwitchController;
@@ -21,13 +22,23 @@ use App\Http\Controllers\PeriodLockController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\ReconciliationController;
 use App\Http\Controllers\Reports\AccountantPackageController;
+use App\Http\Controllers\Reports\AccountQuickReportController;
 use App\Http\Controllers\Reports\ApAgingController;
 use App\Http\Controllers\Reports\ArAgingController;
 use App\Http\Controllers\Reports\BalanceSheetController;
+use App\Http\Controllers\Reports\CashFlowController;
+use App\Http\Controllers\Reports\CollectionsController;
+use App\Http\Controllers\Reports\CustomerBalanceController;
+use App\Http\Controllers\Reports\CustomerStatementController;
 use App\Http\Controllers\Reports\GeneralLedgerController;
+use App\Http\Controllers\Reports\OpenInvoicesController;
 use App\Http\Controllers\Reports\ProfitAndLossController;
 use App\Http\Controllers\Reports\TaxSummaryController;
+use App\Http\Controllers\Reports\TransactionDetailController;
 use App\Http\Controllers\Reports\TrialBalanceController;
+use App\Http\Controllers\Reports\UnpaidBillsController;
+use App\Http\Controllers\Reports\VendorBalanceController;
+use App\Http\Controllers\Reports\VendorStatementController;
 use App\Http\Controllers\TaxRateController;
 use App\Http\Controllers\TransferController;
 use Illuminate\Foundation\Application;
@@ -97,6 +108,12 @@ Route::middleware(['auth', 'verified', 'company', 'can:reports.view'])->group(fu
         ->middleware('can:exports.run')
         ->name('reports.balance-sheet.export');
 
+    // Phase 7 Task 4: Statement of Cash Flows (indirect method).
+    Route::get('/reports/cash-flow', [CashFlowController::class, 'show'])->name('reports.cash-flow');
+    Route::get('/reports/cash-flow/export.csv', [CashFlowController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('reports.cash-flow.export');
+
     Route::get('/reports/ar-aging', [ArAgingController::class, 'show'])->name('reports.ar-aging');
     Route::get('/reports/ar-aging/export.csv', [ArAgingController::class, 'exportCsv'])
         ->middleware('can:exports.run')
@@ -117,6 +134,20 @@ Route::middleware(['auth', 'verified', 'company', 'can:reports.view'])->group(fu
         ->middleware('can:exports.run')
         ->name('reports.tax-summary.export');
 
+    // Phase 7 Task 5: report drill-down library. Transaction Detail by
+    // Account groups every posted line by account over a period; Account
+    // QuickReport is the single-account drill-down TARGET every figure in
+    // P&L/Balance Sheet/Trial Balance links into.
+    Route::get('/reports/transaction-detail', [TransactionDetailController::class, 'show'])->name('reports.transaction-detail');
+    Route::get('/reports/transaction-detail/export.csv', [TransactionDetailController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('reports.transaction-detail.export');
+
+    Route::get('/reports/account-quickreport', [AccountQuickReportController::class, 'show'])->name('reports.account-quickreport');
+    Route::get('/reports/account-quickreport/export.csv', [AccountQuickReportController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('reports.account-quickreport.export');
+
     // Phase 6 Task 4 (spec §11): the Accountant Package — "one-click ... This
     // is also the escape hatch" — General Ledger, Trial Balance, P&L, Balance
     // Sheet, A/R aging, A/P aging for a chosen period, bundled as a single
@@ -126,6 +157,53 @@ Route::middleware(['auth', 'verified', 'company', 'can:reports.view'])->group(fu
     Route::get('/reports/accountant-package/download', [AccountantPackageController::class, 'download'])
         ->middleware('can:exports.run')
         ->name('reports.accountant-package.download');
+
+    // Phase 7 Task 6: the customer/vendor & receivables/payables report
+    // library — Customer/Vendor Balance Summary+Detail, Open Invoices,
+    // Unpaid Bills, Collections, Customer/Vendor Statement (+ PDF). Every
+    // amount ties to the 1100 (AR) / 2000 (AP) control account (see
+    // ContactLedgerReport).
+    Route::get('/reports/customer-balance-summary', [CustomerBalanceController::class, 'summary'])->name('reports.customer-balance-summary');
+    Route::get('/reports/customer-balance-summary/export.csv', [CustomerBalanceController::class, 'summaryExportCsv'])
+        ->middleware('can:exports.run')
+        ->name('reports.customer-balance-summary.export');
+    Route::get('/reports/customer-balance-detail', [CustomerBalanceController::class, 'detail'])->name('reports.customer-balance-detail');
+    Route::get('/reports/customer-balance-detail/export.csv', [CustomerBalanceController::class, 'detailExportCsv'])
+        ->middleware('can:exports.run')
+        ->name('reports.customer-balance-detail.export');
+
+    Route::get('/reports/vendor-balance-summary', [VendorBalanceController::class, 'summary'])->name('reports.vendor-balance-summary');
+    Route::get('/reports/vendor-balance-summary/export.csv', [VendorBalanceController::class, 'summaryExportCsv'])
+        ->middleware('can:exports.run')
+        ->name('reports.vendor-balance-summary.export');
+    Route::get('/reports/vendor-balance-detail', [VendorBalanceController::class, 'detail'])->name('reports.vendor-balance-detail');
+    Route::get('/reports/vendor-balance-detail/export.csv', [VendorBalanceController::class, 'detailExportCsv'])
+        ->middleware('can:exports.run')
+        ->name('reports.vendor-balance-detail.export');
+
+    Route::get('/reports/open-invoices', [OpenInvoicesController::class, 'show'])->name('reports.open-invoices');
+    Route::get('/reports/open-invoices/export.csv', [OpenInvoicesController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('reports.open-invoices.export');
+
+    Route::get('/reports/unpaid-bills', [UnpaidBillsController::class, 'show'])->name('reports.unpaid-bills');
+    Route::get('/reports/unpaid-bills/export.csv', [UnpaidBillsController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('reports.unpaid-bills.export');
+
+    Route::get('/reports/collections', [CollectionsController::class, 'show'])->name('reports.collections');
+    Route::get('/reports/collections/export.csv', [CollectionsController::class, 'exportCsv'])
+        ->middleware('can:exports.run')
+        ->name('reports.collections.export');
+
+    // Statement PDF is gated only by this group's reports.view (no extra
+    // exports.run) — printing one contact's own statement isn't a bulk data
+    // export, same convention as InvoiceController::pdf.
+    Route::get('/reports/customer-statement', [CustomerStatementController::class, 'show'])->name('reports.customer-statement');
+    Route::get('/reports/customer-statement/pdf', [CustomerStatementController::class, 'pdf'])->name('reports.customer-statement.pdf');
+
+    Route::get('/reports/vendor-statement', [VendorStatementController::class, 'show'])->name('reports.vendor-statement');
+    Route::get('/reports/vendor-statement/pdf', [VendorStatementController::class, 'pdf'])->name('reports.vendor-statement.pdf');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:audit.view'])->group(function () {
@@ -140,6 +218,7 @@ Route::middleware(['auth', 'verified', 'company', 'can:audit.view'])->group(func
 Route::middleware(['auth', 'verified', 'company', 'can:accounts.manage'])->group(function () {
     Route::get('/accounts', [AccountController::class, 'index'])->name('accounts.index');
     Route::post('/accounts', [AccountController::class, 'store'])->name('accounts.store');
+    Route::post('/accounts/{account}/children', [AccountController::class, 'storeChild'])->name('accounts.children.store');
     Route::patch('/accounts/{account}', [AccountController::class, 'update'])->name('accounts.update');
     Route::post('/accounts/{account}/archive', [AccountController::class, 'archive'])->name('accounts.archive');
     Route::post('/accounts/{account}/unarchive', [AccountController::class, 'unarchive'])->name('accounts.unarchive');
@@ -395,6 +474,19 @@ Route::middleware(['auth', 'verified', 'company', 'can:periods.lock'])->group(fu
     Route::post('/close/integrity-check', [MonthEndCloseController::class, 'runIntegrityCheck'])->name('close.integrity-check');
     Route::post('/close/lock', [MonthEndCloseController::class, 'lock'])->name('close.lock');
     Route::post('/close/complete', [MonthEndCloseController::class, 'complete'])->name('close.complete');
+});
+
+// Phase 7 Task 7 (spec §11): Settings > Backup & Export — process-UI over
+// existing Phase-6 machinery (AccountantPackageService, the CSV export
+// convention) plus a new full-data export escape hatch. The whole group is
+// gated exports.run (not settings.manage/reports.view): this screen's
+// entire purpose IS running exports, so Staff — who holds neither
+// exports.run nor any narrower ability that would apply here — gets a 403
+// on the bare show page too, not just the downloads.
+Route::middleware(['auth', 'verified', 'company', 'can:exports.run'])->group(function () {
+    Route::get('/settings/backup-export', [BackupExportController::class, 'show'])->name('settings.backup-export');
+    Route::get('/settings/backup-export/accountant-package', [BackupExportController::class, 'downloadAccountantPackage'])->name('settings.backup-export.accountant-package');
+    Route::get('/settings/backup-export/full-export', [BackupExportController::class, 'downloadFullExport'])->name('settings.backup-export.full-export');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:tax_rates.manage'])->group(function () {

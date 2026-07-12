@@ -38,6 +38,12 @@ class ManualJournalController extends Controller
                 'created_by' => $journal->creator?->name,
                 'journal_entry' => $journal->journalEntry === null ? null : [
                     'id' => $journal->journalEntry->id,
+                    // Phase 7 Task 3 (visible entry numbers): the
+                    // human-readable, gap-free, per-company number this
+                    // manual journal's posted entry received — distinct
+                    // from the `id` above.
+                    'entry_number' => $journal->journalEntry->entry_number,
+                    'entry_number_display' => $journal->journalEntry->displayNumber(),
                     'lines' => $journal->journalEntry->lines->map(fn ($line) => [
                         'id' => $line->id,
                         'debit' => $line->debit,

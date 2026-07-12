@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Services\Reports\AgingReport;
 use App\Services\Reports\BalanceSheetReport;
+use App\Services\Reports\CashFlowReport;
 use App\Services\Reports\GeneralLedgerReport;
 use App\Services\Reports\ProfitAndLossReport;
 use App\Services\Reports\TrialBalanceReport;
@@ -55,6 +56,7 @@ class AccountantPackageService
         private TrialBalanceReport $trialBalance,
         private ProfitAndLossReport $profitAndLoss,
         private BalanceSheetReport $balanceSheet,
+        private CashFlowReport $cashFlow,
         private AgingReport $aging,
         private CompanyContext $context,
     ) {}
@@ -74,6 +76,7 @@ class AccountantPackageService
         $trialBalanceData = $this->trialBalance->build($to);
         $profitAndLossData = $this->profitAndLoss->build($from, $to);
         $balanceSheetData = $this->balanceSheet->build($to);
+        $cashFlowData = $this->cashFlow->build($from, $to);
         $arAgingData = $this->aging->buildReceivables($to);
         $apAgingData = $this->aging->buildPayables($to);
 
@@ -116,6 +119,15 @@ class AccountantPackageService
                     'title' => 'Balance Sheet',
                     'periodLabel' => $to->toDateString(),
                     'data' => $balanceSheetData,
+                ]),
+            ],
+            'cash-flow' => [
+                'csv' => $this->cashFlowCsv($cashFlowData),
+                'pdf' => $this->renderPdf('pdf.reports.cash-flow', [
+                    'company' => $company,
+                    'title' => 'Statement of Cash Flows',
+                    'periodLabel' => $periodLabel,
+                    'data' => $cashFlowData,
                 ]),
             ],
             'ar-aging' => [
@@ -334,6 +346,41 @@ class AccountantPackageService
     private function writeBsTotalRow($handle, string $section, string $label, int $amount): void
     {
         fputcsv($handle, [$section, '', $label, Money::minorToDecimalString($amount)]);
+    }
+
+    /** Mirrors CashFlowController::exportCsv exactly. */
+    private function cashFlowCsv(array $data): string
+    {
+        $handle = fopen('php://temp', 'r+');
+
+        fputcsv($handle, ['Section', 'Code', 'Name', 'Amount']);
+
+        fputcsv($handle, ['Operating', '', 'Net income', Money::minorToDecimalString($data['operating']['net_income'])]);
+        $this->writeCashFlowRows($handle, 'Operating', $data['operating']['add_backs']['rows']);
+        fputcsv($handle, ['Operating', '', 'Foreign exchange (gain)/loss — reclassified below', Money::minorToDecimalString($data['operating']['fx_reclass'])]);
+        $this->writeCashFlowRows($handle, 'Operating', $data['operating']['working_capital']['rows']);
+        fputcsv($handle, ['Operating', '', 'Net cash from operating activities', Money::minorToDecimalString($data['operating']['total'])]);
+
+        $this->writeCashFlowRows($handle, 'Investing', $data['investing']['rows']);
+        fputcsv($handle, ['Investing', '', 'Net cash from investing activities', Money::minorToDecimalString($data['investing']['total'])]);
+
+        $this->writeCashFlowRows($handle, 'Financing', $data['financing']['rows']);
+        fputcsv($handle, ['Financing', '', 'Net cash from financing activities', Money::minorToDecimalString($data['financing']['total'])]);
+
+        fputcsv($handle, ['', '', 'Effect of exchange rate changes on cash', Money::minorToDecimalString($data['fx_on_cash'])]);
+        fputcsv($handle, ['', '', 'Net change in cash', Money::minorToDecimalString($data['net_change_in_cash'])]);
+        fputcsv($handle, ['', '', 'Cash at beginning of period', Money::minorToDecimalString($data['opening_cash'])]);
+        fputcsv($handle, ['', '', 'Cash at end of period', Money::minorToDecimalString($data['closing_cash'])]);
+
+        return $this->contents($handle);
+    }
+
+    /** @param resource $handle */
+    private function writeCashFlowRows($handle, string $section, array $rows): void
+    {
+        foreach ($rows as $row) {
+            fputcsv($handle, [$section, $row['code'], $row['name'], Money::minorToDecimalString($row['amount'])]);
+        }
     }
 
     /** Mirrors ArAgingController/ApAgingController's shared writeCsv exactly — same shape for both directions, only the input $data differs. */

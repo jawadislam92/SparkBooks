@@ -9,6 +9,7 @@ use App\Exceptions\Ledger\ArchivedAccount;
 use App\Exceptions\Ledger\ControlAccountViolation;
 use App\Exceptions\Ledger\EmptyEntry;
 use App\Exceptions\Ledger\LockedPeriod;
+use App\Exceptions\Ledger\NonPostableAccount;
 use App\Exceptions\Ledger\UnbalancedEntry;
 use App\Models\Account;
 use App\Models\JournalEntry;
@@ -20,7 +21,7 @@ use LogicException;
 
 class LedgerService
 {
-    public function __construct(private CompanyContext $context) {}
+    public function __construct(private CompanyContext $context, private DocumentNumberService $numbers) {}
 
     /**
      * THE one gate into the ledger. Callers must already hold a DB transaction
@@ -33,6 +34,16 @@ class LedgerService
         }
         $this->validate($draft);
 
+        // Phase 7 Task 3 (visible entry numbers): allocated inside THIS
+        // transaction, via the same FOR-UPDATE row-lock counter machinery
+        // DocumentNumberService already uses for INV/BILL numbers (series
+        // 'JE') — gap-free and duplicate-free under concurrent posts. A
+        // reversal gets its OWN number here exactly like a primary entry;
+        // the link back to the original entry it reverses is
+        // reverses_entry_id (already set below), surfaced via
+        // JournalEntry::reversesEntry()->displayNumber().
+        $entryNumber = $this->numbers->nextNumber('JE');
+
         $entry = JournalEntry::query()->create([
             'entry_date' => $draft->entryDate->toDateString(),
             'memo' => $draft->memo,
@@ -41,6 +52,7 @@ class LedgerService
             'entry_role' => $draft->role->value,
             'reverses_entry_id' => $draft->reversesEntryId,
             'created_by' => auth()->id(),
+            'entry_number' => $entryNumber,
         ]);
         foreach ($draft->lines as $line) {
             // company_id is set by the BelongsToCompany creating hook from context
@@ -93,6 +105,20 @@ class LedgerService
             // entries, so an account archived AFTER an entry posts must not trap it forever.
             if ($account->is_archived && $draft->role === EntryRole::Primary) {
                 throw new ArchivedAccount("Account {$account->code} is archived and cannot be used on a new entry.");
+            }
+            // Leaf-only posting, enforcement #1 of 3 (Phase 7 Task 1 — see
+            // NonPostableAccount's docblock for #2/#3). Checked for BOTH
+            // Primary and Reversal entries, unlike the archived-account guard
+            // above: a reversal must always be POSTABLE to the exact same
+            // account its original entry used, and an account can only ever
+            // become non-postable via AccountService::makeParent(), which
+            // itself moves that account's existing lines to a new leaf
+            // first — so a reversal of a pre-promotion entry would already
+            // be reversing lines that no longer sit on the now-parent
+            // account, making this check unreachable for reversals in
+            // practice, not a hole deliberately left ajar for them.
+            if (! $account->isPostable()) {
+                throw new NonPostableAccount("Account {$account->code} is not postable — it has sub-accounts and only leaf accounts may be posted to.");
             }
             if ($account->isControlAccount()) {
                 if ($line->contactId === null) {

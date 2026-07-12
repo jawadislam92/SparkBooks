@@ -13,6 +13,7 @@ use App\Models\Company;
 use App\Models\Contact;
 use App\Models\Invoice;
 use App\Models\InvoiceLine;
+use App\Models\Item;
 use App\Models\TaxRate;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -303,6 +304,37 @@ class InvoiceDraftTest extends TestCase
         ]);
 
         $response->assertSessionHasErrors('lines.0.tax_rate_id');
+        $this->assertSame(0, Invoice::query()->count());
+    }
+
+    // ---------------------------------------------------------------
+    // Validation: item_id (client-side prefill hint) must be tenant, non-archived
+    // ---------------------------------------------------------------
+
+    /**
+     * Phase 7 Task 2 (archiving, surfaced everywhere): item_id is never
+     * persisted onto invoice_lines (it's purely a client-side prefill hint —
+     * see StoreInvoiceRequest::validateItem), but the item picker itself
+     * already excludes archived items (InvoiceController::formOptions), so a
+     * request that names an archived item_id directly is rejected as a
+     * friendly 422 too — the same server-side backstop every other
+     * archived-reference guard on this form gets.
+     */
+    public function test_an_archived_item_hint_is_rejected(): void
+    {
+        $company = Company::factory()->create();
+        $this->actingAsRole($company, Role::Owner);
+        $contact = $this->customer($company);
+        $income = $this->incomeAccount($company);
+        $archivedItem = Item::factory()->create(['company_id' => $company->id, 'is_archived' => true]);
+
+        $response = $this->postInvoice([
+            'contact_id' => $contact->id,
+            'currency_code' => 'PKR',
+            'lines' => [$this->line(['income_account_id' => $income->id, 'item_id' => $archivedItem->id])],
+        ]);
+
+        $response->assertSessionHasErrors('lines.0.item_id');
         $this->assertSame(0, Invoice::query()->count());
     }
 
