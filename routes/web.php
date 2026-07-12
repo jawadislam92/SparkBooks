@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\AccountController;
 use App\Http\Controllers\AuditLogController;
+use App\Http\Controllers\BackupExportController;
 use App\Http\Controllers\BankAccountController;
 use App\Http\Controllers\BillController;
 use App\Http\Controllers\CompanySwitchController;
@@ -473,6 +474,19 @@ Route::middleware(['auth', 'verified', 'company', 'can:periods.lock'])->group(fu
     Route::post('/close/integrity-check', [MonthEndCloseController::class, 'runIntegrityCheck'])->name('close.integrity-check');
     Route::post('/close/lock', [MonthEndCloseController::class, 'lock'])->name('close.lock');
     Route::post('/close/complete', [MonthEndCloseController::class, 'complete'])->name('close.complete');
+});
+
+// Phase 7 Task 7 (spec §11): Settings > Backup & Export — process-UI over
+// existing Phase-6 machinery (AccountantPackageService, the CSV export
+// convention) plus a new full-data export escape hatch. The whole group is
+// gated exports.run (not settings.manage/reports.view): this screen's
+// entire purpose IS running exports, so Staff — who holds neither
+// exports.run nor any narrower ability that would apply here — gets a 403
+// on the bare show page too, not just the downloads.
+Route::middleware(['auth', 'verified', 'company', 'can:exports.run'])->group(function () {
+    Route::get('/settings/backup-export', [BackupExportController::class, 'show'])->name('settings.backup-export');
+    Route::get('/settings/backup-export/accountant-package', [BackupExportController::class, 'downloadAccountantPackage'])->name('settings.backup-export.accountant-package');
+    Route::get('/settings/backup-export/full-export', [BackupExportController::class, 'downloadFullExport'])->name('settings.backup-export.full-export');
 });
 
 Route::middleware(['auth', 'verified', 'company', 'can:tax_rates.manage'])->group(function () {
