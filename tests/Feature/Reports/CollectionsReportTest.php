@@ -92,6 +92,47 @@ class CollectionsReportTest extends TestCase
         $this->assertSame(0, $report['grand_total']);
     }
 
+    /**
+     * Review follow-up regression (Phase 7 Task 6 review, gap #1): an invoice
+     * that WAS overdue before being voided must not haunt Collections — its
+     * own entry nets to zero once voided, so ContactLedgerReport::ledger()
+     * drops it from `documents` before collections() ever gets to apply its
+     * own due-date filter. A still-live overdue invoice for the same contact
+     * must still appear normally, proving this isn't just "the contact
+     * vanished."
+     */
+    public function test_voided_overdue_invoice_is_excluded_but_a_live_overdue_invoice_still_appears(): void
+    {
+        $company = Company::factory()->create();
+        app(CompanyContext::class)->set($company);
+        $ar = $this->arAccount($company);
+        $income = $this->incomeAccount($company);
+        $contact = $this->contact($company);
+
+        $asOf = CarbonImmutable::parse('2026-07-31');
+
+        // Still-live, 10 days overdue — must appear.
+        $liveOverdue = $this->invoice($contact, 3000, '2026-06-01', '2026-07-21');
+        $this->postInvoiceEntry($ar, $income, $liveOverdue, 3000, '2026-06-01');
+
+        // Was 21 days overdue, but voided before $asOf — must NOT appear.
+        $voidedOverdue = $this->invoice($contact, 5000, '2026-06-01', '2026-07-10');
+        $entry = $this->postInvoiceEntry($ar, $income, $voidedOverdue, 5000, '2026-06-01');
+        $this->voidInvoice($voidedOverdue, $entry, '2026-06-15');
+
+        $report = $this->build()->collections($asOf);
+
+        $row = collect($report['contacts'])->firstWhere('contact_id', $contact->id);
+        $this->assertNotNull($row);
+
+        $docIds = collect($row['documents'])->pluck('doc_id')->all();
+        $this->assertContains($liveOverdue->id, $docIds);
+        $this->assertNotContains($voidedOverdue->id, $docIds);
+
+        $this->assertSame(3000, $row['total']);
+        $this->assertSame(3000, $report['grand_total']);
+    }
+
     public function test_scoped_to_current_company(): void
     {
         $companyA = Company::factory()->create();
