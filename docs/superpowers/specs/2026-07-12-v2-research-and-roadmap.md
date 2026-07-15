@@ -11,7 +11,7 @@
 
 ## 1. Prioritized roadmap
 
-**Phase 7 — Accountant essentials** (derive-only depth + two additive columns; low risk, high trust payoff):
+**Phase 7 — Accountant essentials** — ✅ **DONE (built + merged to main 2026-07-15, commit 7d61b7b; 1413 tests; deploying to books.sparkingasia.com).** (derive-only depth + two additive columns; low risk, high trust payoff):
 Statement of Cash Flows (indirect, algorithmic — §2), sub-accounts (parent/child COA — §3), activate/deactivate surfaced (accounts + contacts + items), visible human-readable entry numbers, in-app backup/export screen, and an expanded standard-report library:
 - Overview: P&L (Summary/Detail/comparison), Balance Sheet (Summary/Detail), **Statement of Cash Flows**, Trial Balance, Journal/Audit, Account List.
 - Accountant tools: General Ledger (have), **Transaction Detail by Account**, **Account QuickReport**, Recent Transactions, Reconciliation report.
@@ -19,15 +19,42 @@ Statement of Cash Flows (indirect, algorithmic — §2), sub-accounts (parent/ch
 - A/P: Aging (have), **Vendor Balance Summary/Detail**, Unpaid Bills, Bill Payment List.
 - Analytics (need the Items dimension, Phase 8): Sales by Customer, Sales by Product/Service, Expenses by Vendor.
 
-**Phase 8 — Faster entry & adjustment documents:** batch invoicing, batch expenses/bills, sub-items (service items → income account), **credit/debit notes** (customer credit memos + vendor credits via the existing allocation engine), cheque register (cheque printing low priority / likely drop for a bank-transfer-first PK agency). Fold-ins: **estimates/quotes → convert-to-invoice** (high value), **purchase orders → convert-to-bill**, **recurring invoices/bills** (highest-ROI automation for a retainer agency).
+**Phase 8 — Faster entry & adjustment documents:** batch invoicing, batch expenses/bills, sub-items (service items → income account), **credit/debit notes** (customer credit memos + vendor credits via the existing allocation engine), cheque register (cheque printing low priority / likely drop for a bank-transfer-first PK agency). Sales-document flow: **estimates/quotes → sales order → convert-to-invoice** (accountant-requested 2026-07-15; a **Sales Order** is a distinct doc between estimate and invoice — "records goods/services a customer wants to buy"), **purchase orders → convert-to-bill**, **recurring invoices/bills** (highest-ROI automation for a retainer agency). Small report additions requested by the accountant (all derive-only, fit here once Items/adjusting metadata exist): **Adjusted Trial Balance** (unadjusted / adjustments / adjusted columns — flag manual JEs as "adjusting"), **Adjusting Journal Entries report** (the adjusting-entry subset of the journal), **Sales report** (Sales by Customer / by Product-Service) + **Sales graph** + **A/P (vendor) graph** (chart siblings of the existing numeric aging/analytics).
 
-**Phase 9 — Classes / segment reporting:** a line-level class dimension → segmented P&L with a mandatory "Unassigned" column (§3). Optional 2nd dimension (Location). Fold-in: **Budgets + Budget-vs-Actual**. Guardrail: dimensions segment the **P&L only** — a segmented Balance Sheet is out of scope.
+**Phase 9 — Classes / segment reporting:** a line-level class dimension → segmented P&L with a mandatory "Unassigned" column (§3). Optional 2nd dimension (Location). Fold-in: **Budgets + Budget-vs-Actual** (accountant explicitly asked for "Budgets and Forecast reports — Actual vs Budgeted" 2026-07-15 — promote from fold-in to a first-class Phase 9 deliverable). Guardrail: dimensions segment the **P&L only** — a segmented Balance Sheet is out of scope.
 
 **Phases 10–12 — Payroll & Employees** (the only net-new posting engine; gated entirely on the §4 accountant-confirmation checklist): employee master + effective-dated salary components + versioned statutory config; FBR salary-slab withholding engine; a pay-run state machine (draft→calculate→approve→post→pay) posting one balanced journal per run; EOBI/PESSI/PF/gratuity; payslips; disbursement + per-authority liability clearing. Fold-in: **fixed-asset depreciation** (another scheduled accrual engine; feeds the SCF add-back).
 
 **Phase 13 — Interface customization:** custom fields (first-class the **NTN/STRN/ATL/PRA** compliance fields on contacts *now*), saved/customized reports + month-end report pack, configurable dashboard.
 
 **Compliance fold-ins:** **WHT tracking** (capture at bill/expense entry; registers as reports) and **PRA sales-tax return support** (capture on invoice/purchase; monthly summaries) — pull EARLY (Phase 7–8), they're live monthly obligations. Data model in §5.
+
+### 1a. Accountant feedback round 2 (2026-07-15) — verbatim list mapped to status
+
+Second written note from SparkingAsia's accountant ("Features for Software.docx"). **~15 of the ~25 items are already built; 7 of the 8 genuinely-missing were already on this roadmap.** No item invalidates the plan; it adds Sales Orders, promotes Budgets, and names a few small report variants (all folded into Phases 8–9 above).
+
+| Accountant item | Status | Where |
+|---|---|---|
+| Open/restore a company; backup/restore/backup copy | ✅ built | v1 P6 + P7 backup/export screen |
+| Multi-user mode — Admin & Accountant | ✅ built | v1 P0 roles (Owner/Admin/Accountant/Staff) |
+| Print reports/forms | ✅ built | report print + PDF + accountant package |
+| Customer Center; Sales Invoice | ✅ built | contacts + P3 invoicing |
+| Vendor Center; Enter Bills | ✅ built | contacts + P4 bills |
+| Cash Flow Statement | ✅ built | **P7 (new)** |
+| Income & Expenses graph | ✅ built | P5 dashboard chart |
+| Chart of Accounts; **Sub-accounts**; **Journal Entries + Entry Number**; Items | ✅ built | v1 + **P7 (sub-accts, entry numbers)** |
+| Trial Balance | ✅ built | v1 (basic; adjusted-columns variant → P8) |
+| Estimates | ❌ missing | **P8** |
+| Sales Orders | ❌ missing | **P8** (new this round) |
+| Sub-items | ❌ missing | **P8** |
+| Classes (segment income/expense) | ❌ missing | **P9** |
+| Employees Center (names/designations) | ❌ missing | **P10** (payroll precursor) |
+| Payroll + payroll/salary reports | ❌ missing | **P10–12** (gated on §4 statutory confirm) |
+| Budgets & Forecast (Actual vs Budget) | ❌ missing | **P9** (promoted to first-class) |
+| Adjusted Trial Balance; Adjusting Journal Entries report | ⚠️ partial → **P8** | TB + journal exist; adjusted/adjusting variants missing |
+| Sales report; Sales graph; A/P (vendor) graph | ⚠️ partial → **P8** | numbers exist (balances/aging); named report + charts missing |
+
+Verbatim source saved at `docs/superpowers/specs/2026-07-15-accountant-feedback-round2.md`. **Decision (2026-07-15): capture in roadmap only; hold building until P7 is deployed and the accountant reviews it live.** Round 1 (the handwritten note that drove Phase 7) is already reflected in Phase 7 above.
 
 ---
 
